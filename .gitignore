@@ -1,0 +1,45 @@
+# DSH / Node tooling
+node_modules/
+.tmp/
+
+# Unity editor / Locus runtime state — never tracked even if the parent repo is
+# initialised later (Library/ holds the Locus edit-session primitives Unity's
+# Linux named-mutex emulation creates, user settings, caches).
+unity-test/Library/
+unity-test/Temp/
+unity-test/Obj/
+unity-test/Logs/
+unity-test/UserSettings/
+unity-test/MemoryCaptures/
+unity-test/.vs/
+unity-test/.idea/
+unity-test/.vscode/
+unity-test/*.csproj
+unity-test/*.sln
+unity-test/*.unityproj
+unity-test/*.suo
+unity-test/*.user
+unity-test/*.pidb
+unity-test/*.booproj
+unity-test/*.svd
+unity-test/*.pdb
+unity-test/*.mdb
+unity-test/*.opendb
+unity-test/*.VC.db
+unity-test/[Ll]ibrary/
+unity-test/[Tt]emp/
+unity-test/[Oo]bj/
+unity-test/[Bb]uild/
+unity-test/[Bb]uilds/
+unity-test/[Ll]ogs/
+unity-test/[Uu]ser[Ss]ettings/
+unity-test/[Mm]emoryCaptures/
+
+# Upstream Locus checkout is a separate git repository (kept as-is)
+Locus/
+
+.DS_Store
+Thumbs.db
+
+# Local Rust toolchain (installed into the workspace)
+.tooling/

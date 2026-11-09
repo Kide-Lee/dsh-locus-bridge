@@ -1,0 +1,23 @@
+{
+  "name": "dsh-locus-bridge",
+  "version": "0.1.0",
+  "description": "DSH plugin that acts as a Locus client for the in-Unity native broker (named pipe).",
+  "private": true,
+  "type": "module",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./src/*": "./src/*"
+  },
+  "engines": {
+    "node": ">=22.12"
+  },
+  "scripts": {
+    "test": "node --test --test-concurrency=1 \"test/*.test.js\"",
+    "test:live": "node scripts/live-smoke.mjs",
+    "dump-tools": "node scripts/dump-tools.mjs",
+    "validate": "node scripts/dump-tools.mjs && node scripts/typecheck.mjs && node scripts/validate-dsh-tools.mjs",
+    "typecheck": "node scripts/typecheck.mjs",
+    "check": "node --test --test-concurrency=1 \"test/*.test.js\" && node scripts/dump-tools.mjs && node scripts/typecheck.mjs"
+  }
+}
