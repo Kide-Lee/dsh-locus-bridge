@@ -27,7 +27,7 @@ import {
   withClient,
 } from './client-pool.js'
 import { buildApplyRequest, readAsset, reloadAssets } from './asset-api.js'
-import { findCodeUsages, findReferences, projectRelative } from './asset-graph.js'
+import { findCodeUsages, findReferences } from './asset-graph.js'
 import { buildCaptureRequest, captureContent, captureViewport, commitImage, assertImageCapableRoute, formatCapture, readablePath } from './capture.js'
 import { consoleLogMessage, formatConsoleLog } from './console.js'
 import {
@@ -112,6 +112,18 @@ function targetFor(args, exec) {
 
 function failure(message) {
   return { output: `Error: ${message}`, cancelled: false, maxMainThreadBlockedMs: 0 }
+}
+
+/**
+ * Failure shape for tools whose output schema is `{text, ...}`.
+ *
+ * `failure()` above belongs to `unity_execute`, whose schema declares
+ * `output`/`cancelled`/`maxMainThreadBlockedMs`. Returning it from any other tool
+ * is rejected by the registry ("value.output is not a declared property") and
+ * the real error is replaced by a schema complaint.
+ */
+function textFailure(message) {
+  return { text: `Error: ${message}` }
 }
 
 // ─── unity_status ───────────────────────────────────────────────────────────
@@ -1062,10 +1074,10 @@ const unityAssetGraph = {
           limit: args.limit,
           scenePath: args.file_path,
         })
-        const heading = result.member
-          ? `Serialized uses of "${result.member}" from ${result.script} inside ${result.searched} (guid ${result.guid}):`
-          : `Attach points of ${result.script} inside ${result.searched} (guid ${result.guid}):`
-        return { text: `${heading}\n${result.results}`, guid: result.guid }
+        // `findCodeUsages` already renders the heading and the counts from the
+        // scan answer; adding another heading here duplicated it and buried the
+        // results.
+        return { text: result.results, guid: result.guid }
       }
       if (action === 'references' || action === 'dependencies') {
         const result = await findReferences(target, projectRoot, {
@@ -1074,11 +1086,7 @@ const unityAssetGraph = {
           filePath: args.file_path,
           limit: args.limit,
         })
-        const heading =
-          action === 'references'
-            ? `Uses of ${projectRelative(projectRoot, args.path)} (guid ${result.guid}) inside ${result.searched}:`
-            : `Assets ${result.searched} depends on:`
-        return { text: `${heading}\n${result.results}`, guid: result.guid ?? '' }
+        return { text: result.results, guid: result.guid ?? '' }
       }
       throw new Error(`action must be one of ${GRAPH_ACTIONS.join(', ')}.`)
     } catch (error) {
@@ -1151,12 +1159,12 @@ const unityCapture = {
         max_long_edge: args.max_long_edge,
       })
     } catch (error) {
-      return failure(error.message)
+      return textFailure(error.message)
     }
     try {
       const client = await getClient(target)
       const state = await readEditorStatus(client)
-      if (!state.connected) return failure(`Unity Editor not connected${state.error ? `: ${state.error}` : ''}.`)
+      if (!state.connected) return textFailure(`Unity Editor not connected${state.error ? `: ${state.error}` : ''}.`)
       assertRequestedStatus(args.request_editor_status, state.status)
       const captured = await captureViewport(target, request, { signal: exec.signal })
       const resolved = readablePath(projectRoot, captured)
@@ -1180,7 +1188,7 @@ const unityCapture = {
       const image = await commitImage(attachments, resolved)
       return { text: formatCapture(captured, resolved, { target: args.target, attached: true }), path: resolved.absolute, image }
     } catch (error) {
-      return failure(asToolError(error).message)
+      return textFailure(asToolError(error).message)
     }
   },
 }

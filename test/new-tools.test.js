@@ -238,7 +238,7 @@ test('only scenes and prefabs are searchable through the bridge', () => {
   assert.throws(() => assertSearchableAsset(PROJECT, 'Assets/Prefabs/Player.mat'), /is not a scene or prefab/)
 })
 
-test('references resolve the guid and pass it as the search query', async () => {
+test('references compile the guid into a scene scan and report the attach points', async () => {
   const requests = []
   await withEditor(
     async () => {
@@ -251,17 +251,21 @@ test('references resolve the guid and pass it as the search query', async () => 
         ctx(),
       )
       assert.equal(result.guid, '0123456789abcdef0123456789abcdef')
-      assert.match(result.text, /Uses of Assets\/Prefabs\/Player\.prefab \(guid 012345/)
+      assert.match(result.text, /Attach points of Assets\/Prefabs\/Player\.prefab/)
       assert.match(result.text, /inside Assets\/Scenes\/Main\.unity/)
+      assert.match(result.text, /Root\/Player/)
     },
     { onMessage: (request) => {
-      if (request.type === 'search_yaml') requests.push(JSON.parse(request.message))
+      if (request.type === 'execute_code') requests.push(request.message)
       return undefined
     } },
   )
   assert.equal(requests.length, 1)
-  assert.equal(requests[0].file_path, 'Assets/Scenes/Main.unity')
-  assert.equal(requests[0].query, '0123456789abcdef0123456789abcdef')
+  // The GUID and the scene scope both travel as C# string literals, because
+  // `search_yaml` matches names only and never a GUID.
+  assert.match(requests[0], /var targetGuid = "0123456789abcdef0123456789abcdef"/)
+  assert.match(requests[0], /string sceneFilter = "Assets\/Scenes\/Main\.unity"/)
+  assert.match(requests[0], /MonoScript\.FromMonoBehaviour/)
 })
 
 test('references without a file to search inside explains the missing scope', async () => {
@@ -271,7 +275,7 @@ test('references without a file to search inside explains the missing scope', as
   )
 })
 
-test('usages turn a member into a match_fields search', async () => {
+test('usages list attach points for the script guid', async () => {
   const requests = []
   await withEditor(
     async () => {
@@ -288,16 +292,16 @@ test('usages turn a member into a match_fields search', async () => {
       assert.match(result.text, /inside Assets\/Scenes\/Main\.unity/)
     },
     { onMessage: (request) => {
-      if (request.type === 'search_yaml') requests.push(JSON.parse(request.message))
+      if (request.type === 'execute_code') requests.push(request.message)
       return undefined
     } },
   )
-  assert.equal(requests[0].file_path, 'Assets/Scenes/Main.unity')
-  assert.equal(requests[0].match_fields, undefined)
-  assert.equal(requests[0].query, 'fedcba9876543210fedcba9876543210')
+  assert.equal(requests.length, 1)
+  assert.match(requests[0], /var targetGuid = "fedcba9876543210fedcba9876543210"/)
+  assert.match(requests[0], /var wantedMember = null/)
 })
 
-test('usages with a member search that field instead', async () => {
+test('usages with a member name that field in the scan', async () => {
   const requests = []
   await withEditor(
     async () => {
@@ -312,11 +316,12 @@ test('usages with a member search that field instead', async () => {
       )
     },
     { onMessage: (request) => {
-      if (request.type === 'search_yaml') requests.push(JSON.parse(request.message))
+      if (request.type === 'execute_code') requests.push(request.message)
       return undefined
     } },
   )
-  assert.equal(requests[0].match_fields, 'maxHealth')
+  assert.match(requests[0], /var wantedMember = "maxHealth"/)
+  assert.match(requests[0], /FindProperty\("maxHealth"\)/)
 })
 
 // ── unity_scene find / batch / undo ─────────────────────────────────────────

@@ -74,12 +74,30 @@ export async function startFakeBroker({ onMessage, tcp = false, unix = false } =
         const accepted = { requestId: request.id, requestType: type }
         socket.write(JSON.stringify({ type: 'locus-request-accepted', ok: true, message: JSON.stringify(accepted) }) + '\n')
         broadcast({ type: 'status-changed', ok: true, message: JSON.stringify({ editorStatus: 'playing' }) })
+        // The asset-graph scan also prints JSON, so it has to be recognised
+        // first; otherwise the generic printJson branch claims it and answers
+        // with a scene-set shape.
+        const scan = /MonoScript\.FromMonoBehaviour/.test(message)
+          ? JSON.stringify({
+              attachPoints: 1,
+              returned: 1,
+              truncated: false,
+              results: [
+                {
+                  scenePath: 'Assets/Scenes/Main.unity',
+                  objectPath: 'Root/Player',
+                  component: 'PlayerController',
+                  componentIndex: 1,
+                },
+              ],
+            })
+          : null
         // A generated scene-set snippet prints one JSON line; echo it so callers
         // parse exactly what a real edit returns.
         const synthetic = /printJson\(new Dictionary<string, object>/.test(message)
           ? JSON.stringify({ ok: true, scene: 'Assets/Scenes/Main.unity', objectPath: 'Root/Player', component: 'Transform', propertyPath: 'm_LocalPosition', operation: 'set', value: '0,1,0' })
           : null
-        const output = synthetic ?? `ran: ${message.split('\n')[0]}`
+        const output = scan ?? synthetic ?? `ran: ${message.split('\n')[0]}`
         setTimeout(() => reply(socket, request, { ok: true, message: output }), 5)
         return
       }
