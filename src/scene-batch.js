@@ -108,11 +108,14 @@ export function validateComponentSearch({ component_type, include_inactive, limi
 
 /** Build the snippet that lists every object carrying one component type. */
 export function componentSearchBody(request) {
+  // `var x = null` does not compile in C# (CS0815), so the filter variable must
+  // be explicitly typed. Without a scene filter there is no filter at all, which
+  // is what the explicit `string` type expresses.
   const sceneFilter = request.scenePath ? csString(request.scenePath) : 'null'
   return `${VALUE_HELPERS}
 ${PATH_OF}
 var wanted = ${csString(request.componentType)};
-var sceneFilter = ${sceneFilter};
+string sceneFilter = ${sceneFilter};
 var limit = ${request.limit};
 var includeInactive = ${request.includeInactive ? 'true' : 'false'};
 var found = new List<Dictionary<string, object>>();
@@ -138,6 +141,40 @@ for (var i = 0; i < SceneManager.sceneCount && found.Count < limit; i++) {
 }
 printJson(new Dictionary<string, object> { { "component", wanted }, { "count", found.Count }, { "truncated", found.Count >= limit }, { "objects", found } });`
 }
+
+/**
+ * Resolve a scene object from its scene path and hierarchy path inside the
+ * snippet itself.
+ *
+ * The upstream helper (`LocusSceneObjectUtility.ResolveSceneObject`) is
+ * `internal`, so snippet code cannot call it — referring to it fails to compile
+ * with CS0122. This is the same resolution rule, expressed with public APIs:
+ * `"Name"`, `"Name[1]"` for same-named siblings, segments joined from the root.
+ */
+const RESOLVE_OBJECT = `GameObject ResolveObject(string scenePath, string objectPath) {
+  var scene = SceneManager.GetSceneByPath(scenePath);
+  if (!scene.IsValid() || !scene.isLoaded) throw new Exception("scene_not_found: " + scenePath);
+  var segments = objectPath.Split('/');
+  GameObject current = null;
+  var candidates = new List<GameObject>(scene.GetRootGameObjects());
+  foreach (var segment in segments) {
+    var name = segment.Trim();
+    var index = 0;
+    var bracket = name.LastIndexOf('[');
+    if (bracket > 0 && name.EndsWith("]")) {
+      int parsed;
+      if (int.TryParse(name.Substring(bracket + 1, name.Length - bracket - 2), out parsed)) index = parsed;
+      name = name.Substring(0, bracket);
+    }
+    var sameName = new List<GameObject>();
+    foreach (var candidate in candidates) if (candidate != null && candidate.name == name) sameName.Add(candidate);
+    if (sameName.Count == 0) throw new Exception("object_not_found: " + objectPath + " (at \\"" + name + "\\")");
+    current = sameName[Math.Min(index, sameName.Count - 1)];
+    candidates = new List<GameObject>();
+    if (current != null) foreach (Transform child in current.transform) candidates.Add(child.gameObject);
+  }
+  return current;
+}`
 
 /** Validate one batch write. */
 function validateWrite(write, index) {
@@ -183,6 +220,7 @@ export function batchBody(request) {
     { "raw", ${csString(write.value)} }
   }`)
   return `${VALUE_HELPERS}
+${RESOLVE_OBJECT}
 var writes = new List<Dictionary<string, object>> { ${writes.join(',\n')} };
 Undo.IncrementCurrentGroup();
 Undo.SetCurrentGroupName("Locus batch edit");
@@ -198,7 +236,7 @@ foreach (var write in writes) {
   var propertyPath = (string)write["propertyPath"];
   var raw = (string)write["raw"];
   try {
-    var target = Locus.LocusSceneObjectUtility.ResolveSceneObject(scenePath, objectPath);
+    var target = ResolveObject(scenePath, objectPath);
     var scene = target.scene;
     Component component = null;
     if (componentIndex >= 0) { var all = target.GetComponents<Component>(); if (componentIndex < all.Length) component = all[componentIndex]; }
@@ -245,6 +283,7 @@ printJson(new Dictionary<string, object> {
  */
 export function batchUndoBody({ writes }) {
   return `${VALUE_HELPERS}
+${RESOLVE_OBJECT}
 var writes = new List<Dictionary<string, object>> { ${writes
     .map(
       (write) => `new Dictionary<string, object> {
@@ -271,7 +310,7 @@ foreach (var write in writes) {
   var propertyPath = (string)write["propertyPath"];
   var raw = (string)write["raw"];
   try {
-    var target = Locus.LocusSceneObjectUtility.ResolveSceneObject(scenePath, objectPath);
+    var target = ResolveObject(scenePath, objectPath);
     var scene = target.scene;
     Component component = null;
     if (componentIndex >= 0) { var all = target.GetComponents<Component>(); if (componentIndex < all.Length) component = all[componentIndex]; }
