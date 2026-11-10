@@ -188,7 +188,9 @@ test('tools report a disconnected editor instead of throwing', async () => {
     const result = await tools.unity_status.execute({ project_path: PROJECT }, execContext())
     assert.equal(result.connected, false)
     assert.equal(result.status, 'disconnected')
-    assert.match(result.text, /Hint: require the Locus Unity package/)
+    // The generic "install the package" hint was replaced by the project's own
+    // diagnosis, which names the piece that is actually missing.
+    assert.match(result.text, /com\.farlocus\.locus is not installed/)
   } finally {
     __resetPoolForTest()
     if (previous === undefined) delete process.env.LOCUS_UNITY_TEST_PIPE_NAMESPACE

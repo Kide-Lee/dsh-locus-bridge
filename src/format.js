@@ -34,11 +34,7 @@ export function formatStatus({ connected, status, scenes = [], pipe, projectRoot
     if (parts.length > 0) lines.push(`Reload state: ${parts.join(', ')}`)
   }
   if (error) lines.push(`Reason: ${error}`)
-  if (!connected) {
-    lines.push(
-      'Hint: require the Locus Unity package + native broker DLL, and Library/Locus/NativeBridge.enabled ' +
-        '(or LOCUS_UNITY_NATIVE_BRIDGE=1).',
-    )
-  }
+  // No generic "install the package" hint here: the caller appends the project's
+  // actual diagnosis, which names the missing piece instead of listing all three.
   return lines.join('\n')
 }

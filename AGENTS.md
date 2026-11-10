@@ -1,51 +1,54 @@
 # AGENTS.md
 
-Instructions for AI agents working in this repository.
+本文件是给在本仓库中工作的 AI agent 的说明。
 
-## Choosing the Unity project
+## 如何选择 Unity 项目
 
-**Decide for yourself which Unity project a call targets; do not ask the human.**
+**由你自己决定一次调用针对哪个 Unity 项目，不要问人类。**
 
-This repository ships the plugin and the Linux/macOS broker, not a Unity
-project. A working session usually has one checked out next to the code — the
-local development fixture is `unity-test/` (it holds `Assets/` and
-`ProjectSettings/`, which is what makes a directory a Unity project) — and the
-`unity_*` tools find it unaided: they search the working directory and up to
-three levels below it, then beside each ancestor up to the nearest `.git`.
+本仓库发布的是插件和 Linux/macOS broker，本身不是一个 Unity 项目。实际的工作
+会话通常会在代码旁边检出一份工程——本地开发用的固定工程是 `unity-test/`（它包
+含 `Assets/` 和 `ProjectSettings/`，这才是目录被称为 Unity 工程的原因）——而
+`unity_*` 工具会自己找到它：先在当前工作目录及其向下三层里搜，再到每个祖先目录
+旁边找，直到最近的 `.git` 为止。
 
-So `unity_status` with no `project_path` normally resolves the project on its
-own, whether the session starts at the repository root or inside a subdirectory.
+所以无论会话是从仓库根目录还是从某个子目录启动，不带 `project_path` 的
+`unity_status` 通常都能自己解析出工程。
 
-Pass `project_path` when there is more than one candidate, or when you mean a
-different checkout. When a call reports several candidates, pick the one the
-request is about and pass it — the ambiguity is information, not a reason to
-ask. Only ask a human when nothing in the request or the repository indicates
-which project is meant.
+只有在候选工程不止一个、或者你要指向另一份检出时才传 `project_path`。如果某次
+调用报告了多个候选，挑出与本次需求相关的那个传进去——这种歧义本身就是信息，
+不是发问的理由。只有当需求内容和仓库都无法说明指的是哪个工程时，才去问人类。
 
-## What the Unity tools need
+## Unity 工具需要什么
 
-- A running Unity Editor with the Locus package and the native broker
-  (`locus_unity_native.dll` on Windows, `liblocus_unity_native.so` on Linux),
-  plus `<project>/Library/Locus/NativeBridge.enabled` (or
-  `LOCUS_UNITY_NATIVE_BRIDGE=1`).
-- On Linux the broker speaks a Unix domain socket. Under this sandbox it must
-  live inside the workspace (`.locus/`), because `/tmp` is not shared between
-  commands; the editor therefore has to run in a long-lived background job, not
-  a one-shot command.
-- Without a GPU: start the editor as
-  `Unity -batchmode -nographics -projectPath <project>` and do **not** pass
-  `-quit` when you need the broker to stay reachable.
+- 一个正在运行的 Unity 编辑器，装有 Locus 包和原生 broker（Windows 上是
+  `locus_unity_native.dll`，Linux 上是 `liblocus_unity_native.so`），并且存在
+  `<工程>/Library/Locus/NativeBridge.enabled`（或者设置了
+  `LOCUS_UNITY_NATIVE_BRIDGE=1`）。
+- Linux 上 broker 走 Unix domain socket。在当前沙箱里它必须放在工作区内
+  （`.locus/`），因为 `/tmp` 不会在命令之间共享；因此编辑器要跑在长驻的后台作业
+  里，而不是一次性命令。
+- 没有 GPU 时按 `Unity -batchmode -nographics -projectPath <工程>` 启动，并且
+  需要 broker 一直可连时**不要**加 `-quit`。
 
-## Editing this plugin
+## 修改本插件
 
-- `npm test` runs the JS suite. `npm run typecheck` checks module wiring;
-  `node scripts/dump-tools.mjs` validates every tool schema.
-- `src/tools.js` holds the seven tool definitions; `src/args.js` owns project
-  resolution and is covered by `test/args.test.js`.
-- `native/locus_unix_native/` is the Linux/macOS broker port, derived from the
-  upstream Locus `locus-native-broker` and therefore GPL-3.0-or-later. Its
-  protocol dependency `native/locus-native-protocol/` is an unmodified upstream
-  copy. Both build standalone: `npm run build:native` / `npm run test:native`.
-  See `NOTICE` before changing either; modifications must be documented there.
-- `unity-test/` is a disposable local fixture: git-ignored, never committed. It
-  is not required to build or test this repository.
+- `npm test` 跑 JS 测试套件。`npm run typecheck` 检查模块接线；
+  `node scripts/dump-tools.mjs` 校验每个工具 schema。
+- `src/tools.js` 存放七个工具定义；`src/args.js` 负责工程解析，由
+  `test/args.test.js` 覆盖。
+- `src/setup.js` 负责工程诊断与包安装，由 `test/setup.test.js` 覆盖；把
+  `DSH_LOCUS_PAYLOAD_DIR` 指向一个测试用的假 payload，就能避开真实 payload。
+- 安装入口是命令行 `scripts/install-unity-package.mjs`，**不是工具参数**：
+  `unity_status` 的工具定义保持与上游一致（只有 `project_path`/`pipe`），
+  只有诊断出「缺插件」时才会在输出里给出这条命令。不要为了装包再加参数。
+- `payload/locus_unity/` 是上游已编译 Unity 包的生成副本（15 MB）。**不要手工
+  编辑它**：用 `npm run sync:payload` 重新生成，用 `npm run check:payload` 校验。
+  它纳入 git、排除在 npm tarball 之外，并在 `NOTICE` 中记录归属。
+- `native/locus_unix_native/` 是 Linux/macOS 版 broker 移植，派生自上游 Locus 的
+  `locus-native-broker`，因此是 GPL-3.0-or-later。它的协议依赖
+  `native/locus-native-protocol/` 是未经修改的上游副本。两者都能独立构建：
+  `npm run build:native` / `npm run test:native`。改动任一个之前先看 `NOTICE`；
+  所有修改都必须记录在那里。
+- `unity-test/` 是本地一次性验证工程，已被 git 忽略、永不提交。构建或测试本仓库
+  并不需要它。

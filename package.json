@@ -53,7 +53,10 @@
     "typecheck": "node scripts/typecheck.mjs",
     "check": "node --test --test-concurrency=1 \"test/*.test.js\" && node scripts/dump-tools.mjs && node scripts/typecheck.mjs",
     "build:native": "cargo build --release --manifest-path native/locus_unix_native/Cargo.toml",
-    "test:native": "cargo test --release --manifest-path native/locus_unix_native/Cargo.toml"
+    "test:native": "cargo test --release --manifest-path native/locus_unix_native/Cargo.toml",
+    "sync:payload": "node scripts/sync-payload.mjs",
+    "check:payload": "node scripts/sync-payload.mjs --check",
+    "install:unity-package": "node scripts/install-unity-package.mjs"
   },
   "dsh": {
     "bundle": {

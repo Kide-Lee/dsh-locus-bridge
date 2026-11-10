@@ -38,6 +38,7 @@ import {
 import { formatStatus } from './format.js'
 import { LocusError } from './locus-client.js'
 import { playModeMessage, setPlayMode } from './play-mode.js'
+import { formatSetup, inspectSetup } from './setup.js'
 import { clampExecuteTimeout, EXECUTE_IDLE_LIMIT_MS } from './protocol.js'
 import { beginUndoCheckpoint, endUndoCheckpoint, recordWrite } from './undo.js'
 import { recompile, readReloadState, assertRecompileableStatus } from './recompile.js'
@@ -123,7 +124,13 @@ const unityStatus = {
       const text = formatStatus({ ...state, pipe: target.pipe, projectRoot, capabilities, reloadState })
       return statusResult(target, state.connected, state.status, state.scenes, capabilities, state.error, text)
     } catch (error) {
-      const text = formatStatus({ connected: false, status: 'disconnected', pipe: target.pipe, projectRoot, error: error.message })
+      // A failed connection is exactly when the project's own state matters:
+      // report it unprompted instead of making the caller ask again.
+      const text = await withDiagnosis(
+        formatStatus({ connected: false, status: 'disconnected', pipe: target.pipe, projectRoot, error: error.message }),
+        projectRoot,
+        exec,
+      )
       return statusResult(target, false, 'disconnected', [], [], error.message, text)
     }
   },
@@ -137,6 +144,23 @@ function statusResult(target, connected, status, scenes, capabilities, error, te
     scenes: scenes ?? [],
     pipe: target.pipe ?? '',
   }
+}
+
+/**
+ * Append a project diagnosis to a failed connection, without repeating what the
+ * caller already sees. An empty diagnosis means the project is fine and the
+ * editor is simply not running.
+ */
+async function withDiagnosis(text, projectRoot, exec) {
+  let diagnosis
+  try {
+    diagnosis = formatSetup(inspectSetup(projectRoot))
+  } catch {
+    return text
+  }
+  if (!diagnosis) return text
+  publish(diagnosis, exec)
+  return `${text}\n\n${diagnosis}`
 }
 
 // ─── unity_execute ──────────────────────────────────────────────────────────

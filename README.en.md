@@ -54,21 +54,44 @@ After restarting DSH, the model sees 7 tools whose names start with `unity_`.
 
 ### Editor prerequisites
 
-1. The `locus_unity` Unity package is installed in the project (obtained from Locus upstream).
+1. The `locus_unity` Unity package (`com.farlocus.locus`) is installed in the project.
 2. The native broker library for the platform is in place — on Windows it is `locus_unity_native.dll`, on
    Linux/macOS it is `liblocus_unity_native.so` (built with `npm run build:native`).
 3. `<project>/Library/Locus/NativeBridge.enabled` exists, or the editor was started with
    `LOCUS_UNITY_NATIVE_BRIDGE=1`. On Linux the first line of that marker is read as an absolute socket path,
    because inside a sandbox the socket cannot live in `/tmp`.
 
-A tool reporting "editor not connected" is the normal failure shape: they return a structured result rather than
-throwing, so the agent can tell the user directly what is missing.
+A failed `unity_status` **automatically** reports what the project is missing, so a diagnosis costs no extra
+call. Only when it finds **no Unity package** does it also print the install command:
+
+```bash
+node scripts/install-unity-package.mjs <project> --install
+```
+
+That copies the bundled package into `Packages/com.farlocus.locus`, writes
+`Library/Locus/NativeBridge.enabled`, and verifies the result. It requires the editor to be closed.
+
+When the project is fine and only the editor is shut, the diagnosis prints **nothing**: "the package is in
+place" is the absence of a finding, and no finding costs no context. The tool definitions therefore match the
+official client's exactly: installing is rare enough that it must not occupy context permanently.
+
+### Install source
+
+`payload/locus_unity` is the compiled Unity package (231 files, about 15 MB, of which
+`Editor/Roslyn/Locus.Roslyn.dll` is 9 MB). It is deliberately not fetched from upstream git: upstream's
+`.gitignore` drops `Locus.Json.dll`, `Locus.Detour.dll`, `Locus.HotReload.Runtime.dll`, `Locus.Roslyn.dll`
+and the native broker, so `"com.farlocus.locus": "https://github.com/...?path=locus_unity"` installs a
+package that **does not compile**. Vendoring a complete copy is the only source that works on every platform.
+
+Regenerate it with `npm run sync:payload` from a local Locus checkout (`--check` verifies without writing).
+The 15 MB tree stays out of the npm tarball and ships as a release asset; point `DSH_LOCUS_PAYLOAD_DIR` at the
+unpacked directory to keep it outside the plugin directory.
 
 ## Tools
 
 | Tool | What it does | Underlying commands |
 |---|---|---|
-| `unity_status` | Connection check, editor state (editing/playing/playing_paused), open scenes, capabilities, domain reload state | `status` / `bridge_capabilities` / `get_reload_state` |
+| `unity_status` | Connection check, editor state (editing/playing/playing_paused), open scenes, capabilities, domain reload state; diagnoses a missing package/broker/marker automatically, and prints the install command when the package is absent | `status` / `bridge_capabilities` / `get_reload_state` |
 | `unity_execute` | Compile and execute a C# method body on the Unity main thread (`print`/`printJson`/`ctx.Progress`/`ctx.WaitFrame`), the escape hatch | `status` → `begin_edit_session` → `execute_code` + 250ms `execute_code_progress` → (cancel) `cancel_execute_code` → `end_edit_session` |
 | `unity_play_mode` | Switch to Play/Edit mode and wait for it to take effect | `status` → `set_editor_status` → poll `status` |
 | `unity_console_log` | Read the Unity Console (merged and deduplicated by level) | `unity_get_console_log` |
