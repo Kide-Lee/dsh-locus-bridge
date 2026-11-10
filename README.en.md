@@ -8,114 +8,101 @@
 
 English | [简体中文](README.md)
 
-A **DeepSeek Harness plugin** that lets DSH act as a [Locus](https://github.com/r1n7aro/Locus)
-client. It does not go through MCP: it speaks the Locus native broker protocol
-directly, so the agent can drive a running Unity editor.
+dsh-locus-bridge is a **DeepSeek harness plugin**. It lets DSH act directly as a Locus client and operate the Unity editor through the Locus native broker.
 
-- No MCP server in the middle — DSH connects to the broker that the Locus Unity
-  package already runs inside the editor process.
-- 7 tools, all prefixed `unity_`: status, C# evaluation, play mode, console,
-  recompile, asset edits, scene edits.
-- Windows named pipe and Unix domain socket transports. The Linux/macOS broker
-  port lives in `native/locus_unix_native/` and is built by `npm run build:native`.
+This project's `native/` directory contains two Rust crates: `locus_unix_native` (the Linux/macOS native broker built by this project) and `locus-native-protocol` (the upstream protocol crate). They build `liblocus_unity_native.so`, which the C# plugin inside Unity calls.
+
+For more information about Locus, see:
+
+- Upstream project: https://github.com/r1n7aro/Locus
+- Documentation: https://unity.farlocus.com
 
 ## How it works
 
-Locus is not a normal client/server pair. **The Unity side is the server**: the
-`locus_unity_native` Rust dll is loaded in-process by the editor and serves a
-named pipe (Windows) or a Unix domain socket (Linux/macOS), surviving domain
-reloads because the dll itself stays resident. The Locus desktop app is a client
-of that socket, and so is this plugin — it implements the same line-delimited
-JSON protocol, which means **nothing on the Unity side has to change**.
+Locus is not an ordinary "client / server" structure. **The Unity side is the server**: the `locus_unity_native`
+Rust dll is loaded in-process by the editor, exposing a named pipe (Windows) or a Unix domain socket
+(Linux/macOS), and because the dll itself stays resident, it survives domain reloads. The Locus desktop app is a
+client of that socket, and so is this plugin — it implements the same "one JSON per line" protocol, so the Unity
+side needs no code changes.
 
-Requests look like `{"id": "...", "type": "<command>", "message": "<string>"}`
-and replies carry `reply_to`, so a single connection can pipeline calls. Error
-codes such as `managed_reloading` or `native_request_timed_out` mean the request
-was **not** executed and can be retried safely; the client uses that distinction
-to reconnect across a domain reload instead of failing the call.
+A request looks like `{"id": "...", "type": "<command>", "message": "<string>"}`, and responses carry `reply_to`,
+so one connection can multiplex concurrent calls. Error codes such as `managed_reloading` or
+`native_request_timed_out` mean the request was **not executed** and can be retried safely; the client relies on
+exactly this distinction to reconnect across a domain reload instead of declaring the call dead.
 
 ## Install
 
-From a local checkout:
+You can enter the following prompt in DSH and let the AI install this plugin:
+
+```
+Please install the plugin https://github.com/Kide-Lee/dsh-locus-bridge for me. If my Unity project does not have the Locus plugin, please install that for me too.
+```
+
+Or you can install it manually after cloning this project:
 
 ```bash
 dsh plugin --profile <profile> add /path/to/dsh-locus-bridge
 ```
 
-Or straight from GitHub. The package declares `dsh.bundle`, so installing it as a
-profile bundle is enough — you do not edit your own `cordis.patch.yml`:
+You can also install straight from GitHub:
 
 ```bash
 dsh plugin --profile <profile> add github:Kide-Lee/dsh-locus-bridge
 ```
 
-Or just ask the agent to do it:
-
-```
-Install the plugin https://github.com/Kide-Lee/dsh-locus-bridge for me, and set up
-the Locus Unity package in my Unity project if it is missing.
-```
-
-Restart DSH afterwards. The model then sees 7 tools prefixed with `unity_`.
+After restarting DSH, the model sees 7 tools whose names start with `unity_`.
 
 ### Editor prerequisites
 
-1. The `locus_unity` Unity package is installed in the project (from Locus
-   upstream).
-2. The native broker library is present for the platform — `locus_unity_native.dll`
-   on Windows, `liblocus_unity_native.so` (built with `npm run build:native`) on
-   Linux/macOS.
-3. `<project>/Library/Locus/NativeBridge.enabled` exists, or the editor was
-   started with `LOCUS_UNITY_NATIVE_BRIDGE=1`. On Linux the marker's first line is
-   read as an absolute socket path, because the socket cannot live in `/tmp`
-   under a sandbox.
+1. The `locus_unity` Unity package is installed in the project (obtained from Locus upstream).
+2. The native broker library for the platform is in place — on Windows it is `locus_unity_native.dll`, on
+   Linux/macOS it is `liblocus_unity_native.so` (built with `npm run build:native`).
+3. `<project>/Library/Locus/NativeBridge.enabled` exists, or the editor was started with
+   `LOCUS_UNITY_NATIVE_BRIDGE=1`. On Linux the first line of that marker is read as an absolute socket path,
+   because inside a sandbox the socket cannot live in `/tmp`.
 
-A tool reporting a disconnected editor is the normal failure mode: it returns a
-structured result rather than throwing, so the agent can explain what is missing.
+A tool reporting "editor not connected" is the normal failure shape: they return a structured result rather than
+throwing, so the agent can tell the user directly what is missing.
 
 ## Tools
 
-| Tool | What it does | Broker commands |
+| Tool | What it does | Underlying commands |
 |---|---|---|
-| `unity_status` | Connection check, editor state (editing/playing/playing_paused), open scenes, capabilities, domain-reload state | `status` / `bridge_capabilities` / `get_reload_state` |
-| `unity_execute` | Compile and run a C# method body on the Unity main thread (`print`/`printJson`/`ctx.Progress`/`ctx.WaitFrame`); the escape hatch | `status` → `begin_edit_session` → `execute_code` + 250 ms `execute_code_progress` → (cancel) `cancel_execute_code` → `end_edit_session` |
-| `unity_play_mode` | Switch to Play or Edit mode and wait until it takes effect | `status` → `set_editor_status` → poll `status` |
-| `unity_console_log` | Read the Unity Console, merged and deduplicated by level | `unity_get_console_log` |
-| `unity_recompile` | Compile + domain reload, waiting across the disconnect for convergence; `sync: none/targeted/full` controls asset import | `request_recompile` → disconnect → reconnect → poll `get_compile_result` |
-| `unity_asset` | Read a serialized asset; revision-guarded atomic edits (`set` and array ops); undo; reload | `asset_api` (read / apply_batch / disk_reload) |
-| `unity_scene` | Scene object search, property-tree read, atomic set (Undo, saves the scene) | `search_scene_objects` / `property_tree_read` / generated `execute_code` |
+| `unity_status` | Connection check, editor state (editing/playing/playing_paused), open scenes, capabilities, domain reload state | `status` / `bridge_capabilities` / `get_reload_state` |
+| `unity_execute` | Compile and execute a C# method body on the Unity main thread (`print`/`printJson`/`ctx.Progress`/`ctx.WaitFrame`), the escape hatch | `status` → `begin_edit_session` → `execute_code` + 250ms `execute_code_progress` → (cancel) `cancel_execute_code` → `end_edit_session` |
+| `unity_play_mode` | Switch to Play/Edit mode and wait for it to take effect | `status` → `set_editor_status` → poll `status` |
+| `unity_console_log` | Read the Unity Console (merged and deduplicated by level) | `unity_get_console_log` |
+| `unity_recompile` | Compile + domain reload + wait across the disconnect for convergence; `sync: none/targeted/full` controls asset import | `request_recompile` → disconnect → reconnect → poll `get_compile_result` |
+| `unity_asset` | Read serialized assets; revision-guarded atomic edits (`set` and array operations); undo; reload | `asset_api` (read / apply_batch / disk_reload) |
+| `unity_scene` | Scene object search, property tree read, atomic set (Undo, saves the scene) | `search_scene_objects` / `property_tree_read` / generated `execute_code` |
 
 ## Differences from the Locus desktop client
 
-- **The session working directory does not have to be the Unity project.** The
-  plugin searches up to three levels downward, breadth-first, then looks beside
-  each ancestor directory; an explicit `project_path` always wins.
-- **No Locus UI, knowledge base or skill system.** The plugin takes only the
-  "call into Unity from another process" capability; the desktop app's panels and
-  agent loop are not involved.
-- **The broker accepts multiple clients.** When the broker advertises the
-  `broker_multi_client_v1` capability, DSH and the Locus desktop app can be
-  connected to the same editor at the same time, and replies go back to the
-  connection that asked.
-- **Recompile survives the disconnect.** A domain reload tears the connection
-  down mid-call, so the client reconnects and resumes polling the operation id
-  rather than reporting a transport error.
+- **The session working directory does not have to be the Unity project.** The plugin searches up to three
+  levels downward, breadth-first, and when that fails it searches beside each ancestor directory; an explicit
+  `project_path` always takes precedence.
+- **No Locus UI, knowledge base or skill system.** This plugin takes only the "call into Unity from another
+  process" capability; the desktop app's panels and agent loop take no part.
+- **The broker supports multiple clients.** When the broker has the `broker_multi_client_v1` capability, DSH and
+  the Locus desktop app can be connected to the same editor at the same time, and responses go back to the
+  connection that issued the request.
+- **Recompilation continues across the disconnect.** A domain reload breaks the connection mid-call; the client
+  reconnects and keeps polling the operation id instead of reporting a transport error.
 
 ## Development
 
 ```bash
-npm test               # 71 tests, no Unity required
-npm run typecheck      # static import/export checks
-npm run validate       # tool schemas against the DSH JSON Schema subset
-npm run build:native   # Linux/macOS broker (Rust)
-npm run test:live      # end-to-end against a real editor; see scripts/live-smoke.mjs
+npm test               # 71 tests, Unity not required
+npm run typecheck      # static check of import / export
+npm run validate       # validate tool definitions against the DSH JSON Schema subset
+npm run build:native   # the Linux/macOS broker (Rust)
+npm run test:live      # end-to-end against a real editor, see scripts/live-smoke.mjs
 ```
 
-`unity-test/` is a disposable local fixture and is git-ignored.
+`unity-test/` is a local disposable verification project, ignored by git.
 
 ## License
 
-GPL-3.0-or-later. `native/` contains work derived from upstream Locus — see
-[NOTICE](NOTICE) for the exact files and the upstream commit it was aligned with.
-Nothing here is an official Locus release, and the Locus authors are not
-affiliated with this project.
+GPL-3.0-or-later. The code under `native/` is derived from upstream Locus; see
+[NOTICE](NOTICE) for the exact files and the upstream commit it is aligned with. This project is not an official
+Locus release and has no affiliation with the Locus authors.
