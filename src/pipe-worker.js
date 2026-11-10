@@ -1,18 +1,16 @@
-// Worker that owns one Locus broker connection: all blocking or evented I/O
-// lives here so the DSH main thread never blocks. Protocol: newline-framed JSON
-// commands in, newline-framed JSON notifications out.
+// Worker that owns one Locus broker connection: all I/O lives here so the DSH
+// main thread never blocks. Protocol: newline-framed JSON commands in,
+// newline-framed JSON notifications out.
 //
 // Two transports, selected by the endpoint shape:
-//   `\\.\pipe\…` → blocking Win32 named-pipe fd (`pipe-io.js`)
-//   `/…`         → Unix domain socket stream (`socket-io.js`, Linux/macOS port)
+//   `\\.\pipe\…` / bare `locus_*` name → Win32 named pipe (`pipe-io.js`)
+//   `/…`                               → Unix domain socket stream (`socket-io.js`)
 //
-// in:  {op:'open', pipeName, id} | {op:'write', id, data} | {op:'close', id}
-// out: {kind:'opened', id} | {kind:'write-failed', id, error, code}
-//      {kind:'frames', frames:[string]}
-//      {kind:'closed', reason:'eof'|'error'|'aborted'|'closed', error?}
+// Both are evented. A blocking read loop here would starve the very
+// `{op:'write'}` messages this worker exists to service.
 
 import { parentPort } from 'node:worker_threads'
-import { closePipe, isSocketPath, openPipeClient, readFrames, writeFrame } from './pipe-io.js'
+import { closePipe, connectPipe, isSocketPath, readPipeFrames, writePipeFrame } from './pipe-io.js'
 import { closeSocket, connectSocket, readSocketFrames, writeSocketFrame } from './socket-io.js'
 
 const port = parentPort
@@ -24,7 +22,7 @@ const port = parentPort
  * table by that request id would never match — the connection is a worker-wide
  * singleton, not a per-message session.
  *
- * @type {{ transport: 'pipe', fd, controller, closed } | { transport: 'socket', stream, controller, closed } | null}
+ * @type {{ transport: 'pipe', stream, controller, closed } | { transport: 'socket', stream, controller, closed } | null}
  */
 let session = null
 
@@ -38,32 +36,32 @@ port.on('message', (message) => {
       write(message)
       return
     case 'close':
-      close()
+      close(message.id)
       return
     case 'shutdown':
-      close()
+      close(message.id)
       return
     default:
       return
   }
 })
 
-function open({ id, pipeName }) {
+async function open({ id, pipeName }) {
   if (isSocketPath(pipeName)) {
-    openSocketSession(id, pipeName)
+    await openSocketSession(id, pipeName)
     return
   }
-  let fd
+  let stream
   try {
-    fd = openPipeClient(pipeName)
+    ;({ stream } = await connectPipe(pipeName))
   } catch (error) {
     port.postMessage({ kind: 'closed', id, reason: 'error', error: error.message, code: error.code })
     return
   }
-  const current = { transport: 'pipe', fd, controller: new AbortController(), closed: false }
+  const current = { transport: 'pipe', stream, controller: new AbortController(), closed: false }
   session = current
   port.postMessage({ kind: 'opened', id })
-  readFrames(fd, {
+  readPipeFrames(stream, {
     signal: current.controller.signal,
     onFrames: (frames) => port.postMessage({ kind: 'frames', id, frames }),
   }).then((result) => settle(id, current, result))
@@ -91,7 +89,7 @@ function settle(id, current, result) {
   current.closed = true
   if (session === current) session = null
   if (current.transport === 'socket') closeSocket(current.stream)
-  else closePipe(current.fd)
+  else closePipe(current.stream)
   port.postMessage({
     kind: 'closed',
     id,
@@ -106,9 +104,10 @@ function write({ id, data }) {
     port.postMessage({ kind: 'write-failed', id, error: 'connection is closed' })
     return
   }
+  const buffer = Buffer.from(data, 'utf8')
   try {
-    if (session.transport === 'socket') writeSocketFrame(session.stream, Buffer.from(data, 'utf8'))
-    else writeFrame(session.fd, Buffer.from(data, 'utf8'))
+    if (session.transport === 'socket') writeSocketFrame(session.stream, buffer)
+    else writePipeFrame(session.stream, buffer)
   } catch (error) {
     port.postMessage({ kind: 'write-failed', id, error: error.message, code: error.code })
   }
@@ -121,6 +120,6 @@ function close(id = 0) {
   current.closed = true
   current.controller.abort()
   if (current.transport === 'socket') closeSocket(current.stream)
-  else closePipe(current.fd)
+  else closePipe(current.stream)
   port.postMessage({ kind: 'closed', id, reason: 'closed' })
 }
