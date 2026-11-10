@@ -61,6 +61,9 @@ otherwise:
   `Locus.Detour.dll` and `Locus.HotReload.Runtime.dll` (Roslyn, Newtonsoft.Json,
   Mono.Cecil, MonoMod.Detour as recorded in the adjacent `THIRD_PARTY.md` and
   `licenses/` directories inside the package);
+- `Editor/Native/x86_64/locus_unity_native.dll`, built **unmodified** from
+  upstream's `locus_unity_native` crate at the commit above (release profile
+  with MSVC). Its exported symbols equal `locus_unity_native/exports.txt`;
 - `Editor/Native/linux-x86_64/liblocus_unity_native.so`, built from this
   repository's `native/locus_unix_native/`.
 

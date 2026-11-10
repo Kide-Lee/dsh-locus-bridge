@@ -56,7 +56,8 @@ After restarting DSH, the model sees 7 tools whose names start with `unity_`.
 
 1. The `locus_unity` Unity package (`com.farlocus.locus`) is installed in the project.
 2. The native broker library for the platform is in place — on Windows it is `locus_unity_native.dll`, on
-   Linux/macOS it is `liblocus_unity_native.so` (built with `npm run build:native`).
+   Linux/macOS it is `liblocus_unity_native.so`. The bundled payload carries both platforms, so neither needs
+   to be built locally.
 3. `<project>/Library/Locus/NativeBridge.enabled` exists, or the editor was started with
    `LOCUS_UNITY_NATIVE_BRIDGE=1`. On Linux the first line of that marker is read as an absolute socket path,
    because inside a sandbox the socket cannot live in `/tmp`.
@@ -77,11 +78,22 @@ official client's exactly: installing is rare enough that it must not occupy con
 
 ### Install source
 
-`payload/locus_unity` is the compiled Unity package (231 files, about 15 MB, of which
+`payload/locus_unity` is the compiled Unity package (233 files, about 15 MB, of which
 `Editor/Roslyn/Locus.Roslyn.dll` is 9 MB). It is deliberately not fetched from upstream git: upstream's
 `.gitignore` drops `Locus.Json.dll`, `Locus.Detour.dll`, `Locus.HotReload.Runtime.dll`, `Locus.Roslyn.dll`
 and the native broker, so `"com.farlocus.locus": "https://github.com/...?path=locus_unity"` installs a
 package that **does not compile**. Vendoring a complete copy is the only source that works on every platform.
+
+The package carries the native broker for **both platforms**, so the same payload connects directly on
+Windows and on Linux/macOS:
+
+| Platform | Path | Built from |
+|---|---|---|
+| Windows x86_64 | `Editor/Native/x86_64/locus_unity_native.dll` | the upstream `locus_unity_native` crate (`cargo build --release`) |
+| Linux x86_64 | `Editor/Native/linux-x86_64/liblocus_unity_native.so` | this repository's `native/locus_unix_native/` (`npm run build:native`) |
+
+The Windows file is the upstream crate itself, unmodified, and its 44 exported symbols match upstream's
+`locus_unity_native/exports.txt` name for name (Unity binds by those names across versions).
 
 Regenerate it with `npm run sync:payload` from a local Locus checkout (`--check` verifies without writing).
 The 15 MB tree stays out of the npm tarball and ships as a release asset; point `DSH_LOCUS_PAYLOAD_DIR` at the

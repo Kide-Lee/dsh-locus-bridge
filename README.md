@@ -54,7 +54,8 @@ dsh plugin --profile <profile> add github:Kide-Lee/dsh-locus-bridge
 
 1. 项目里装了 `locus_unity` 这个 Unity 包（`com.farlocus.locus`）。
 2. 对应平台的原生 broker 库就位——Windows 是 `locus_unity_native.dll`，Linux/macOS 是
-   `liblocus_unity_native.so`（用 `npm run build:native` 构建）。
+   `liblocus_unity_native.so`。随包附带的 payload 已包含这两个平台，装在 Windows 或 Linux
+   上都不需要自行构建。
 3. `<项目>/Library/Locus/NativeBridge.enabled` 存在，或者编辑器以 `LOCUS_UNITY_NATIVE_BRIDGE=1`
    启动。Linux 上会读取该 marker 的第一行作为绝对 socket 路径，因为在沙箱里 socket 不能放在 `/tmp`。
 
@@ -74,12 +75,22 @@ node scripts/install-unity-package.mjs <工程路径> --install
 
 ### 安装来源
 
-`payload/locus_unity` 是已编译好的 Unity 包（231 个文件，约 15 MB，其中
+`payload/locus_unity` 是已编译好的 Unity 包（233 个文件，约 15 MB，其中
 `Editor/Roslyn/Locus.Roslyn.dll` 占 9 MB）。它不是从上游 git 拉取的：上游
 `.gitignore` 忽略了 `Locus.Json.dll`、`Locus.Detour.dll`、`Locus.HotReload.Runtime.dll`、
 `Locus.Roslyn.dll` 和原生 broker，所以
 `"com.farlocus.locus": "https://github.com/...?path=locus_unity"` 装出来是**编译不过的残缺包**。
 自带一份完整包是唯一在所有平台上都成立的来源。
+
+包内随带**两个平台**的原生 broker，因此同一份 payload 在 Windows 与 Linux/macOS 上都能直接连上：
+
+| 平台 | 路径 | 来源 |
+|---|---|---|
+| Windows x86_64 | `Editor/Native/x86_64/locus_unity_native.dll` | 上游 `locus_unity_native` crate（`cargo build --release`） |
+| Linux x86_64 | `Editor/Native/linux-x86_64/liblocus_unity_native.so` | 本仓库 `native/locus_unix_native/`（`npm run build:native`） |
+
+Windows 用的就是上游 crate 本身，未作修改，导出符号与上游 `locus_unity_native/exports.txt`
+的 44 个名字逐一对齐（Unity 各版本靠这些名字绑定）。
 
 用 `npm run sync:payload` 从本地 Locus 检出重新生成（`--check` 只校验不写入）。这份 15 MB 的
 产物不进 npm tarball，通过 release asset 分发；用 `DSH_LOCUS_PAYLOAD_DIR` 指向解包后的目录即可，
