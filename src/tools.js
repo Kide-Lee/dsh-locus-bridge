@@ -49,7 +49,7 @@ const PROJECT_PATH = {
   description:
     'Unity project root (the folder containing Assets/ and ProjectSettings/). Relative paths resolve from the ' +
     'Session working directory. Omit it when the working directory is the Unity project, or when exactly one ' +
-    'Unity project sits directly inside it; otherwise pass the path explicitly.',
+    'Unity project sits within three levels below it; otherwise pass the path explicitly.',
 }
 
 const CONNECTION_DESCRIPTION =

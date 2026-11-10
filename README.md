@@ -63,8 +63,10 @@ dsh plugin --profile <profile> add /path/to/dsh-locus-bridge
 
 1. 显式 `project_path`（绝对路径，或相对 Session 工作目录）——**并校验**目录同时含 `Assets/` 与 `ProjectSettings/`；
 2. 省略时，若 Session 工作目录本身就是 Unity 工程，就用它；
-3. 否则在 Session 工作目录的**一层直接子目录**里找唯一一个 Unity 工程（例如仓库根的 `unity-test/`）；
-4. 找到多个 → 报错列出候选；一个都没有 → 报错提示传 `project_path`。
+3. 否则在 Session 工作目录**向下最多三层**找 Unity 工程（例如仓库根的 `unity-test/`）。广度优先，**最浅的那一层优先**——三层深处才找到的工程不会和一层深处找到的冲突；
+4. 同一最浅层有多个 → 报错列出候选；三层内一个都没有 → 报错提示传 `project_path`。
+
+搜索会跳过 `.git`、`node_modules`、Unity 的 `Library/Temp/Obj/Logs/UserSettings` 等生成目录，且**不会深入已识别的工程内部**（工程自己的 `Packages/` 里嵌套的包不算候选）。符号链接不跟随，理由与下面 `realpath` 那条相同。
 
 桌面端没有第 3 步（它只有「显式 `--project`」或「GUI 当前聚焦的 workspace」）。这里放宽一步，是因为 DSH 的 Session 通常起在仓库根而不是 Unity 工程内。路径只做 `resolve()` 折叠 `.`/`..`，**不做 `realpath`**：Unity 用它打开时的路径派生 broker key，跟随符号链接反而可能与编辑器不一致。
 

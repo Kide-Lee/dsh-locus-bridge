@@ -34,8 +34,78 @@ export function isUnityProject(root) {
   }
 }
 
-/** Direct child directories of `dir` that are Unity projects (dot dirs skipped). */
-export function unityProjectChildren(dir) {
+/** How deep the implicit search looks below the Session working directory. */
+export const PROJECT_SEARCH_DEPTH = 3
+
+/**
+ * Directory names never worth descending into while looking for a project.
+ *
+ * These are either huge generated trees (a Unity `Library/` is tens of thousands
+ * of files) or package caches. Skipping them keeps the implicit search cheap
+ * without affecting correctness: a real project is recognised by its own
+ * `Assets/` + `ProjectSettings/`, never by what sits underneath it.
+ */
+const SKIP_DIR_NAMES = new Set([
+  'node_modules',
+  'Library',
+  'Temp',
+  'Obj',
+  'obj',
+  'Build',
+  'Builds',
+  'Logs',
+  'UserSettings',
+  'MemoryCaptures',
+  'Recordings',
+  '.git',
+  '.svn',
+  '.hg',
+  '.vs',
+  '.idea',
+  '.vscode',
+  'target',
+  'dist',
+])
+
+/**
+ * Unity projects at or below `dir`, searched breadth-first up to `maxDepth`.
+ *
+ * Breadth-first matters: a project one level down is a better answer than one
+ * three levels down, so the caller can prefer the shallowest hit instead of
+ * reporting a false ambiguity. The search never descends into a directory it
+ * already identified as a project (a project's own subtree cannot contain a
+ * better answer, only nested packages).
+ *
+ * Returns `[{ path, depth }]` ordered by depth, then path, so the result is
+ * deterministic. Symlinked directories are not followed: that would need cycle
+ * detection and would disagree with the path Unity itself opened.
+ */
+export function findUnityProjects(dir, { maxDepth = PROJECT_SEARCH_DEPTH } = {}) {
+  const found = []
+  let frontier = [{ path: dir, depth: 0 }]
+  const limit = Number.isInteger(maxDepth) && maxDepth > 0 ? maxDepth : PROJECT_SEARCH_DEPTH
+
+  while (frontier.length > 0) {
+    const next = []
+    for (const node of frontier) {
+      if (isUnityProject(node.path)) {
+        // Record it and stop: nothing inside a project is a better candidate.
+        found.push({ path: node.path, depth: node.depth })
+        continue
+      }
+      if (node.depth >= limit) continue
+      for (const child of subdirectories(node.path)) {
+        next.push({ path: child, depth: node.depth + 1 })
+      }
+    }
+    frontier = next
+  }
+
+  return found.sort((a, b) => a.depth - b.depth || a.path.localeCompare(b.path))
+}
+
+/** Child directory paths worth visiting: no dot dirs, no generated trees. */
+function subdirectories(dir) {
   let entries
   try {
     entries = readdirSync(dir, { withFileTypes: true })
@@ -43,9 +113,8 @@ export function unityProjectChildren(dir) {
     return []
   }
   return entries
-    .filter((entry) => entry.isDirectory() && !entry.name.startsWith('.'))
+    .filter((entry) => entry.isDirectory() && !entry.name.startsWith('.') && !SKIP_DIR_NAMES.has(entry.name))
     .map((entry) => join(dir, entry.name))
-    .filter(isUnityProject)
 }
 
 /**
@@ -54,7 +123,9 @@ export function unityProjectChildren(dir) {
  * Precedence:
  *   1. explicit `project_path` (absolute, or relative to the Session cwd);
  *   2. the Session working directory when it already is a Unity project;
- *   3. the single Unity project one level below the Session working directory;
+ *   3. the Unity project below the Session working directory, searched up to
+ *      `PROJECT_SEARCH_DEPTH` levels — the shallowest hit wins, and several
+ *      projects at that same depth are an error rather than a guess;
  *   4. an error naming the candidates / asking for `project_path`.
  *
  * Every branch validates before returning, so a wrong path fails here instead of
@@ -80,17 +151,21 @@ export function resolveProjectRoot(projectPath, ctx = {}) {
 
   if (isUnityProject(cwd)) return resolve(cwd)
 
-  const found = unityProjectChildren(cwd)
-  if (found.length === 1) return found[0]
-  if (found.length > 1) {
+  const found = findUnityProjects(cwd)
+  if (found.length > 0) {
+    // Only the shallowest tier is a real candidate set: a project three levels
+    // down never beats one found closer to the working directory.
+    const shallowest = found[0].depth
+    const nearest = found.filter((candidate) => candidate.depth === shallowest)
+    if (nearest.length === 1) return nearest[0].path
     throw new Error(
-      `The working directory ${cwd} contains several Unity projects (${found.join(', ')}); ` +
-        'pass project_path to choose one.',
+      `The working directory ${cwd} contains several Unity projects ${shallowest} level(s) down ` +
+        `(${nearest.map((candidate) => candidate.path).join(', ')}); pass project_path to choose one.`,
     )
   }
   throw new Error(
-    `The working directory ${cwd} is not a Unity project and has no Unity project directly inside it; ` +
-      'pass project_path (the folder containing Assets/ and ProjectSettings/).',
+    `The working directory ${cwd} is not a Unity project and has none within ${PROJECT_SEARCH_DEPTH} levels ` +
+      'below it; pass project_path (the folder containing Assets/ and ProjectSettings/).',
   )
 }
 

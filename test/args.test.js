@@ -11,7 +11,7 @@ import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 
-import { isUnityProject, resolveProjectRoot, unityProjectChildren } from '../src/args.js'
+import { findUnityProjects, isUnityProject, PROJECT_SEARCH_DEPTH, resolveProjectRoot } from '../src/args.js'
 
 /** Create a throwaway directory tree; `unity` names become Unity projects. */
 function sandbox(unity = [], plain = []) {
@@ -59,11 +59,110 @@ test('a repository cwd resolves the single Unity project directly inside it', ()
   // Unity project is a subdirectory (e.g. `unity-test/`).
   const root = sandbox(['unity-test'], ['src', 'docs'])
   try {
-    assert.deepEqual(
-      unityProjectChildren(root).map((p) => p.slice(root.length + 1)),
-      ['unity-test'],
-    )
     assert.equal(resolveProjectRoot(undefined, ctx(root)), resolve(join(root, 'unity-test')))
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+/** Build a Unity project nested `depth` directories below `root`. */
+function nestedProject(root, depth, name = 'Game') {
+  const segments = Array.from({ length: Math.max(0, depth - 1) }, (_unused, index) => `level${index + 1}`)
+  const dir = join(root, ...segments, name)
+  mkdirSync(join(dir, 'Assets'), { recursive: true })
+  mkdirSync(join(dir, 'ProjectSettings'), { recursive: true })
+  return dir
+}
+
+test('the implicit search reaches three levels but not four', () => {
+  assert.equal(PROJECT_SEARCH_DEPTH, 3)
+
+  for (const depth of [1, 2, 3]) {
+    const root = sandbox([], ['src'])
+    try {
+      const project = nestedProject(root, depth)
+      assert.equal(
+        resolveProjectRoot(undefined, ctx(root)),
+        resolve(project),
+        `a project ${depth} level(s) down must be found`,
+      )
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  }
+
+  const deep = sandbox([], ['src'])
+  try {
+    nestedProject(deep, 4)
+    assert.throws(() => resolveProjectRoot(undefined, ctx(deep)), /none within 3 levels/)
+  } finally {
+    rmSync(deep, { recursive: true, force: true })
+  }
+})
+
+test('the shallowest project wins over a deeper one', () => {
+  // Breadth-first: a project one level down is a better answer than one three
+  // levels down, so this must not be reported as an ambiguity.
+  const root = sandbox([], ['src'])
+  try {
+    const shallow = nestedProject(root, 1)
+    const deeper = nestedProject(root, 3, 'Deep')
+    const found = findUnityProjects(root)
+    assert.deepEqual(
+      found.map((candidate) => ({ depth: candidate.depth, path: candidate.path })),
+      [
+        { depth: 1, path: shallow },
+        { depth: 3, path: deeper },
+      ],
+    )
+    assert.equal(resolveProjectRoot(undefined, ctx(root)), resolve(shallow))
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('two projects at the same shallowest depth are an ambiguity, not a guess', () => {
+  const root = sandbox([], ['src'])
+  try {
+    nestedProject(root, 2, 'GameA')
+    nestedProject(root, 2, 'GameB')
+    // Deeper hits must not rescue an ambiguous shallow tier.
+    nestedProject(root, 3, 'Deeper')
+    assert.throws(
+      () => resolveProjectRoot(undefined, ctx(root)),
+      (error) => /several Unity projects 2 level\(s\) down/.test(error.message) && /GameA/.test(error.message) && /GameB/.test(error.message),
+    )
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('the search skips generated trees such as a project Library/', () => {
+  // Descending into `Library/` would be both slow and pointless; it must never
+  // be reported as a candidate path.
+  const root = sandbox([], ['src'])
+  try {
+    const project = nestedProject(root, 1)
+    const inside = join(project, 'Library', 'PackageCache', 'com.example.fake')
+    mkdirSync(join(inside, 'Assets'), { recursive: true })
+    mkdirSync(join(inside, 'ProjectSettings'), { recursive: true })
+    const found = findUnityProjects(root).map((candidate) => candidate.path)
+    assert.deepEqual(found, [project])
+    assert.equal(resolveProjectRoot(undefined, ctx(root)), resolve(project))
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('the search does not descend into a project it already found', () => {
+  const root = sandbox([], ['src'])
+  try {
+    const project = nestedProject(root, 1)
+    // A nested Unity project inside the outer one is not a separate candidate.
+    const nested = join(project, 'Packages', 'com.example.nested')
+    mkdirSync(join(nested, 'Assets'), { recursive: true })
+    mkdirSync(join(nested, 'ProjectSettings'), { recursive: true })
+    assert.deepEqual(findUnityProjects(root).map((candidate) => candidate.path), [project])
   } finally {
     rmSync(root, { recursive: true, force: true })
   }
