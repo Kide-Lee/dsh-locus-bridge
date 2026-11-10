@@ -137,7 +137,7 @@ unpacked directory to keep it outside the plugin directory.
 | `unity_execute` | Compile and execute a C# method body on the Unity main thread (`print`/`printJson`/`ctx.Progress`/`ctx.WaitFrame`), the escape hatch | `status` → `begin_edit_session` → `execute_code` + 250ms `execute_code_progress` → (cancel) `cancel_execute_code` → `end_edit_session` |
 | `unity_play_mode` | Switch to Play/Edit mode and wait for it to take effect | `status` → `set_editor_status` → poll `status` |
 | `unity_console_log` | Read the Unity Console (merged and deduplicated by level) | `unity_get_console_log` |
-| `unity_recompile` | Compile + domain reload + wait across the disconnect for convergence; `sync: none/targeted/full` controls asset import | `request_recompile` → disconnect → reconnect → poll `get_compile_result` |
+| `unity_recompile` | Compile + domain reload + wait across the disconnect for convergence; `editor_status` is required and must match the live state; `sync: none/targeted/full` controls asset import | `request_recompile` → disconnect → reconnect → poll `get_compile_result` |
 | `unity_test` | Discover and run Unity Test Framework tests, waiting for structured results (`list` / `run`) | `unity_test_list` / `unity_test_start` → 250ms `unity_test_status` → (cancel) `unity_test_cancel` |
 | `unity_asset` | Read serialized assets; revision-guarded atomic edits (`set` and array operations); undo; reload | `asset_api` (read / apply_batch / disk_reload) |
 | `unity_asset_graph` | Asset reference graph and script usages: `references` / `dependencies` / `usages` | generated `execute_code` (GUID comparison against serialized fields) |

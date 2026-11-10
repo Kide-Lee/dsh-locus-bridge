@@ -76,7 +76,11 @@ function sampleArgs(name) {
     case 'unity_console_log':
       return { levels: ['warn', 'error'], limit: 50 }
     case 'unity_recompile':
-      return { sync: { mode: 'targeted', paths: ['Assets/Scripts/Player.cs'] }, reason: 'validation sample' }
+      return {
+        editor_status: 'editing',
+        sync: { mode: 'targeted', paths: ['Assets/Scripts/Player.cs'] },
+        reason: 'validation sample',
+      }
     case 'unity_asset':
       return {
         action: 'apply',

@@ -76,7 +76,11 @@ test('unity_recompile waits across a dropped connection and converges', async ()
   await withEditor(
     async ({ broker }) => {
       const result = await tools.unity_recompile.execute(
-        { reason: 'test', sync: { mode: 'targeted', paths: ['Assets/Scripts/Player.cs'] } },
+        {
+          editor_status: 'editing',
+          reason: 'test',
+          sync: { mode: 'targeted', paths: ['Assets/Scripts/Player.cs'] },
+        },
         ctx(),
       )
       assert.equal(result.status, 'ok')
@@ -122,7 +126,7 @@ test('unity_recompile adopts an in-flight compile and polls its operation id', a
   const requests = []
   await withEditor(
     async () => {
-      const result = await tools.unity_recompile.execute({}, ctx())
+      const result = await tools.unity_recompile.execute({ editor_status: 'editing' }, ctx())
       assert.equal(result.status, 'ok')
       assert.match(result.text, /Adopted an in-flight compile \(operation op-existing\)/)
       const polls = requests.filter((item) => item.type === 'get_compile_result')
@@ -135,7 +139,7 @@ test('unity_recompile adopts an in-flight compile and polls its operation id', a
 test('unity_recompile surfaces compile errors as diagnostics', async () => {
   await withEditor(
     async () => {
-      const result = await tools.unity_recompile.execute({}, ctx())
+      const result = await tools.unity_recompile.execute({ editor_status: 'editing' }, ctx())
       assert.equal(result.status, 'error')
       assert.match(result.text, /CS1002: ; expected/)
     },
@@ -158,7 +162,12 @@ test('unity_recompile surfaces compile errors as diagnostics', async () => {
 test('unity_recompile refuses while Unity plays', async () => {
   await withEditor(
     async () => {
-      await assert.rejects(tools.unity_recompile.execute({}, ctx()), /Recompilation requires Edit Mode/)
+      // The claim must agree with the live editor first, so claim `playing`:
+      // the refusal then comes from the Edit-Mode requirement, not a mismatch.
+      await assert.rejects(
+        tools.unity_recompile.execute({ editor_status: 'playing' }, ctx()),
+        /Recompilation requires Edit Mode/,
+      )
     },
     {
       onMessage: (request, _helpers, socket) => {
@@ -174,7 +183,10 @@ test('unity_recompile refuses while Unity plays', async () => {
 
 test('unity_recompile rejects a stale editor_status argument', async () => {
   await withEditor(async () => {
-    await assert.rejects(tools.unity_recompile.execute({ editor_status: 'playing' }, ctx()), /not "playing"/)
+    await assert.rejects(
+      tools.unity_recompile.execute({ editor_status: 'playing' }, ctx()),
+      /editor_status mismatch: you claimed "playing", but the actual editor status is "editing"/,
+    )
   })
 })
 
@@ -454,4 +466,41 @@ test('scene set passes a string value through as plain text, not JSON', () => {
     value: 2,
   })
   assert.equal(JSON.parse(/var raw = (.+);/.exec(numeric)[1]), '2')
+})
+
+test('unity_recompile requires editor_status and validates its enum', async () => {
+  // Upstream `unity_recompile` (tool/builtins/unity.rs) makes the claim required
+  // and restricted to the four canonical values, so a caller never reaches Unity
+  // without having stated what it believes the editor state to be.
+  await withEditor(async () => {
+    await assert.rejects(
+      tools.unity_recompile.execute({}, ctx()),
+      /Missing required parameter: editor_status\..*disconnected \| editing \| playing \| playing_paused/s,
+    )
+    await assert.rejects(
+      tools.unity_recompile.execute({ editor_status: 'safe_mode' }, ctx()),
+      /Invalid editor_status: "safe_mode"\. Allowed values: disconnected \| editing \| playing \| playing_paused/,
+    )
+    // An empty string is "missing", not "invalid": that is what a model emits
+    // when it has no status to report.
+    await assert.rejects(tools.unity_recompile.execute({ editor_status: '   ' }, ctx()), /Missing required parameter/)
+  })
+})
+
+test('unity_recompile refuses a disconnected claim after the live check', async () => {
+  // Upstream compares the claim with the live status BEFORE rejecting
+  // `disconnected`, so an editor that is actually up but was claimed down reads
+  // as a mismatch rather than as "the editor is gone".
+  await withEditor(async () => {
+    await assert.rejects(
+      tools.unity_recompile.execute({ editor_status: 'disconnected' }, ctx()),
+      /editor_status mismatch: you claimed "disconnected", but the actual editor status is "editing"/,
+    )
+  })
+})
+
+test('unity_recompile advertises editor_status as a required four-value enum', () => {
+  const spec = tools.unity_recompile.parameters.editor_status
+  assert.deepEqual(spec.enum, ['disconnected', 'editing', 'playing', 'playing_paused'])
+  assert.equal(spec.required, true)
 })

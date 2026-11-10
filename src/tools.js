@@ -41,7 +41,7 @@ import { formatStatus } from './format.js'
 import { LocusError } from './locus-client.js'
 import { playModeMessage, setPlayMode } from './play-mode.js'
 import { formatSetup, inspectSetup } from './setup.js'
-import { clampExecuteTimeout, EXECUTE_IDLE_LIMIT_MS } from './protocol.js'
+import { clampExecuteTimeout, EDITOR_STATUS_DISCONNECTED, EXECUTE_IDLE_LIMIT_MS } from './protocol.js'
 import { beginUndoCheckpoint, endUndoCheckpoint, recordWrite } from './undo.js'
 import { recompile, readReloadState, assertRecompileableStatus } from './recompile.js'
 import { formatSceneTree, parseTree, readRequest, searchRequest, searchSceneObjects } from './scene.js'
@@ -416,6 +416,13 @@ const unityConsoleLog = {
 
 // ─── unity_recompile ────────────────────────────────────────────────────────
 
+/**
+ * The claim `unity_recompile` requires, mirroring upstream
+ * `UNITY_EDITOR_STATUS_SCHEMA`. `disconnected` is a legal claim (the caller may
+ * legitimately believe the editor is gone) but cannot run a recompile.
+ */
+const RECOMPILE_STATUS_SCHEMA = ['disconnected', 'editing', 'playing', 'playing_paused']
+
 const unityRecompile = {
   name: 'unity_recompile',
   description:
@@ -432,9 +439,12 @@ const unityRecompile = {
     project_path: PROJECT_PATH,
     editor_status: {
       type: 'string',
+      enum: [...RECOMPILE_STATUS_SCHEMA],
       description:
-        'Latest editor status you observed (editing / playing / playing_paused). Optional; when given it is ' +
-        'cross-checked against the live state and a mismatch fails before compiling.',
+        'Latest canonical Unity Editor status from the session announcement or a newer tool result. Pass it ' +
+        'exactly; the call requires the live editor to be editing, and a claim that disagrees with the actual ' +
+        'state fails before compiling.',
+      required: true,
     },
     sync: {
       type: 'object',
@@ -478,14 +488,36 @@ const unityRecompile = {
     const target = targetFor(args, exec)
     const sync = args.sync && typeof args.sync === 'object' ? args.sync : {}
     const timeout = Number.isInteger(args.timeout) ? Math.min(Math.max(args.timeout, 30), 3600) : 300
+    // Mirrors upstream `unity_recompile` (`tool/builtins/unity.rs`): the claimed
+    // status is required, must be one of the four canonical values, and must
+    // agree with the live editor before anything is compiled.
+    const claimed = typeof args.editor_status === 'string' ? args.editor_status.trim() : ''
+    if (!claimed) {
+      throw new Error(
+        'Missing required parameter: editor_status. Pass the latest Unity Editor status ' +
+          `(${RECOMPILE_STATUS_SCHEMA.join(' | ')}) from the session announcement or a newer tool result.`,
+      )
+    }
+    // Upstream `UNITY_EDITOR_STATUS_SCHEMA`: the four canonical values, including
+    // `disconnected`, which is legal to claim but cannot run a recompile.
+    if (!RECOMPILE_STATUS_SCHEMA.includes(claimed)) {
+      throw new Error(
+        `Invalid editor_status: "${claimed}". Allowed values: ${RECOMPILE_STATUS_SCHEMA.join(' | ')}.`,
+      )
+    }
     try {
       const client = await getClient(target)
       const state = await readEditorStatus(client)
       if (!state.connected) throw new Error(`Unity Editor not connected${state.error ? `: ${state.error}` : ''}.`)
-      if (args.editor_status && args.editor_status !== state.status) {
+      if (claimed !== state.status) {
         throw new Error(
-          `Unity Editor status is "${state.status}", not "${args.editor_status}". ` +
-            'Re-check with unity_status before recompiling.',
+          `editor_status mismatch: you claimed "${claimed}", but the actual editor status is "${state.status}". ` +
+            'Re-read the current editor state with unity_status and try again.',
+        )
+      }
+      if (claimed === EDITOR_STATUS_DISCONNECTED) {
+        throw new Error(
+          'Unity Editor status is "disconnected". `unity_recompile` is unavailable until the Editor reconnects.',
         )
       }
       assertRecompileableStatus(state.status)
