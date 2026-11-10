@@ -13,7 +13,7 @@
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { LocusClient, LocusError } from './locus-client.js'
-import { BROKER_ERRORS } from './protocol.js'
+import { BROKER_ERRORS, isReloading } from './protocol.js'
 import { resolvePipeName } from './pipe-name.js'
 
 const RECONNECT_ATTEMPTS = 5
@@ -54,7 +54,7 @@ function sleep(ms) {
  * Get a connected client for the target, reconnecting after a transport loss
  * (for example a domain reload).
  */
-export async function getClient(target) {
+export async function getClient(target, { deadline } = {}) {
   const { pipe } = describeTarget(target)
   if (!pipe) throw new LocusError('a Unity project path or an explicit pipe name is required')
   // A seeded (or already open) connection is trusted as-is; this keeps the
@@ -74,14 +74,25 @@ export async function getClient(target) {
 
   let lastError = null
   for (let attempt = 0; attempt < RECONNECT_ATTEMPTS; attempt += 1) {
+    // A caller with its own deadline (`deadline`) must not be held past it: the
+    // full retry budget below is ~76s (5 attempts x 15s), which inside a polling
+    // loop means one iteration can blow a 300s budget on its own. Hopping
+    // between a reloading editor used to do exactly that, so a loop whose
+    // compile had already finished kept reconnecting for minutes.
+    if (deadline !== undefined && Date.now() >= deadline) break
     if (attempt > 0) await sleep(RECONNECT_BACKOFF_MS[Math.min(attempt - 1, RECONNECT_BACKOFF_MS.length - 1)])
+    const attemptBudget =
+      deadline === undefined
+        ? CONNECT_ATTEMPT_TIMEOUT_MS
+        : Math.max(0, Math.min(CONNECT_ATTEMPT_TIMEOUT_MS, deadline - Date.now()))
+    if (deadline !== undefined && attemptBudget === 0) break
     try {
       const outcome = await Promise.race([
         client.connect().then(() => 'connected'),
-        new Promise((resolve) => setTimeout(() => resolve('stalled'), CONNECT_ATTEMPT_TIMEOUT_MS)),
+        new Promise((resolve) => setTimeout(() => resolve('stalled'), attemptBudget)),
       ])
       if (outcome === 'connected') return client
-      throw new LocusError(`locus connect attempt timed out after ${CONNECT_ATTEMPT_TIMEOUT_MS} ms`)
+      throw new LocusError(`locus connect attempt timed out after ${attemptBudget} ms`)
     } catch (error) {
       lastError = error
       // Only "not listening yet" is worth retrying; other OS errors (denied,
@@ -106,17 +117,77 @@ export async function getClient(target) {
  * reconnect once and retry. `exclusive: true` skips the retry (a mutating call
  * whose fate is unclear must not run twice).
  */
+/**
+ * Poll `status` until the broker answers without a reload error, mirroring
+ * upstream `wait_for_unity_bridge_ready`. Resolves false when the budget runs
+ * out (the caller then surfaces the original error).
+ */
+async function waitForBridgeReady(target, deadline) {
+  for (;;) {
+    if (Date.now() >= deadline) return false
+    try {
+      const client = await getClient(target, { deadline })
+      const ready = await client
+        .request('status', '', { timeoutMs: Math.max(500, Math.min(5_000, deadline - Date.now())) })
+        .catch(() => null)
+      if (ready?.ok) return true
+    } catch {
+      // Not ready yet (or not reachable): keep waiting until the budget ends.
+    }
+    await sleep(Math.min(READY_POLL_MS, Math.max(0, deadline - Date.now())))
+  }
+}
+
+/** Upstream `SHORT_MESSAGE_TRANSIENT_RETRY_ATTEMPTS`. */
+const TRANSIENT_RETRY_ATTEMPTS = 3
+/** Upstream `SHORT_MESSAGE_TRANSIENT_READY_WAIT`. */
+const TRANSIENT_READY_WAIT_MS = 30_000
+const READY_POLL_MS = 500
+
+/**
+ * Run `fn(client)`; on a transport failure or a broker "not executed" rejection,
+ * wait for the bridge and retry. `exclusive: true` skips the retry (a mutating
+ * call whose fate is unclear must not run twice).
+ *
+ * The wait matters as much as the retry: a domain reload answers
+ * `managed_reloading` for a moment, and an immediate retry lands in the same
+ * window. Upstream wraps every message in `send_message_with_transient_retry`,
+ * which retries three times and waits up to 30s for bridge readiness
+ * (`wait_for_unity_bridge_ready`). Without that wait, one recompile made every
+ * other tool fail for the following second or two — the failure a caller sees
+ * looks permanent even though the editor is merely reloading.
+ */
 export async function withClient(target, fn, { exclusive = false } = {}) {
-  const client = await getClient(target)
-  try {
-    return await fn(client)
-  } catch (error) {
-    if (!(error instanceof LocusError)) throw error
-    const transportLoss = error.code === undefined && !client.connected
-    const retryable = !exclusive && (error.notExecuted || transportLoss)
-    if (!retryable) throw error
-    const fresh = await getClient(target)
-    return fn(fresh)
+  const deadline = Date.now() + TRANSIENT_READY_WAIT_MS
+  let client = await getClient(target)
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      return await fn(client)
+    } catch (error) {
+      if (!(error instanceof LocusError)) throw error
+      const transportLoss = error.code === undefined && !client.connected
+      // Two different questions, deliberately separate (upstream keeps them
+      // apart too): `notExecuted` = "safe to replay", `isReloading` = "the
+      // editor is between domains, so try again shortly". A reload boundary is
+      // NOT in NOT_EXECUTED (`domain_reload_interrupted` may have reached the
+      // executor), which is why keying the retry on notExecuted alone left
+      // every tool except recompile failing right after a compile.
+      const reloadBoundary = isReloading(error.code)
+      const retryable = !exclusive && (error.notExecuted || transportLoss || reloadBoundary)
+      if (!retryable || attempt >= TRANSIENT_RETRY_ATTEMPTS) throw error
+      if (Date.now() >= deadline) throw error
+      // Wait for the bridge to actually become ready, not a fixed nap: a domain
+      // reload lasts as long as it lasts, and retrying into the same window just
+      // burns the attempt budget (3 quick retries finished in ~1s and reported
+      // failure while the editor was still coming back).
+      if (!(await waitForBridgeReady(target, deadline))) throw error
+      try {
+        client = await getClient(target, { deadline })
+      } catch {
+        if (Date.now() >= deadline) throw error
+        continue
+      }
+    }
   }
 }
 

@@ -101,8 +101,40 @@ export function attachHost(ctx) {
 }
 
 /** Surface a LocusError as a plain Error so DSH renders it as a tool error. */
+/**
+ * The broker's `unity_asset` gate is an EXTENSION WHITELIST, not a format probe
+ * (`LocusBridge.AssetApi.cs::ValidateAssetApiPath`): nine extensions, and
+ * anything else is rejected with "unsupported_capability: asset serialization
+ * format .ext". Verified live on a Force Text project where
+ * `Assets/NoFriction.physicsMaterial2D` is plain YAML and still refused. The
+ * message names the wrong cause, so restate it with the real rule.
+ */
+const ASSET_EXTENSIONS = [
+  '.asset',
+  '.mat',
+  '.prefab',
+  '.unity',
+  '.controller',
+  '.anim',
+  '.overrideController',
+  '.playable',
+  '.mask',
+]
+
+export function explainAssetBlocker(message) {
+  const text = String(message ?? '')
+  const match = /unsupported_capability: asset serialization format (\S+)/i.exec(text)
+  if (!match) return text
+  const extension = match[1]
+  return (
+    `${text} — this is an extension whitelist, not a serialization-format limit: the bridge reads and writes only ` +
+    `${ASSET_EXTENSIONS.join(', ')}. ${extension} assets are refused even when the project is Force Text and the ` +
+    'file is plain YAML. Use unity_execute (AssetDatabase / SerializedObject) for that asset type.'
+  )
+}
+
 function asToolError(error) {
-  if (error instanceof LocusError) return new Error(error.message)
+  if (error instanceof LocusError) return new Error(explainAssetBlocker(error.message))
   return error
 }
 
@@ -507,7 +539,11 @@ const unityRecompile = {
     }
     try {
       const client = await getClient(target)
-      const state = await readEditorStatus(client)
+      // A compile that is already running answers `managed_reloading` for a
+      // moment. Waiting that out keeps "run recompile again straight after the
+      // last one" from failing on a transient state; anything genuinely down
+      // still reports disconnected once the window expires.
+      const state = await readEditorStatus(client, { waitForReloadMs: 10_000 })
       if (!state.connected) throw new Error(`Unity Editor not connected${state.error ? `: ${state.error}` : ''}.`)
       if (claimed !== state.status) {
         throw new Error(

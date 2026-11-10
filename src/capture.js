@@ -61,9 +61,25 @@ export function parseCapture(message) {
 /** Capture one viewport and return the normalized answer (the PNG stays on disk). */
 export async function captureViewport(target, request, { signal } = {}) {
   if (signal?.aborted) throw new Error('cancelled')
-  const envelope = await withClient(target, (client) =>
-    client.call('capture_viewport', request, { timeoutMs: CAPTURE_TIMEOUT_MS }),
-  )
+  let envelope
+  try {
+    envelope = await withClient(target, (client) =>
+      client.call('capture_viewport', request, { timeoutMs: CAPTURE_TIMEOUT_MS }),
+    )
+  } catch (error) {
+    // The broker renders by repainting an EditorWindow, so a headless editor
+    // (`-batchmode -nographics`, CI) never produces a frame and answers with a
+    // bare "capture_viewport timed out" after 30s. Say what that actually means
+    // instead of leaving the caller to guess at a rendering bug.
+    if (/capture_viewport timed out/i.test(String(error?.message ?? ''))) {
+      throw new Error(
+        'capture_viewport timed out. The broker captures by repainting the target Editor window, which needs a ' +
+          'rendering editor: a headless one (-batchmode -nographics, CI) never paints a frame and will always ' +
+          'time out. In Game view the editor must also be in Play Mode. Everything except capture works headless.',
+      )
+    }
+    throw error
+  }
   return parseCapture(envelope.message)
 }
 

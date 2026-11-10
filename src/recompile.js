@@ -20,8 +20,37 @@ import { getClient } from './client-pool.js'
 import { LocusError } from './locus-client.js'
 import { BROKER_ERRORS } from './protocol.js'
 
-const POLL_INTERVAL_MS = 1_000
-const DEFAULT_START_TIMEOUT_MS = 120_000
+/**
+ * Poll cadence, from upstream's recompile loop (`sleep(500ms)` between
+ * `get_compile_result` reads). 1s made a run of tolerated register mismatches
+ * take twice as long as the desktop client would.
+ */
+const POLL_INTERVAL_MS = 500
+/**
+ * Per-read timeout for the compile-result register, from upstream
+ * `RECOMPILE_POLL_TIMEOUT`. A read is idempotent and the register answers it
+ * while the main thread is away, so a slow answer means "busy", never "dead":
+ * a long timeout only makes each iteration slow, which is what let a finished
+ * compile keep this loop running for minutes.
+ */
+const POLL_TIMEOUT_MS = 4_000
+/**
+ * Consecutive operation-mismatch reads tolerated before declaring the register
+ * taken over, from upstream `RECOMPILE_OPERATION_MISMATCH_LIMIT`. Unity can
+ * answer mismatch for a moment while our own compile is still being registered,
+ * so one read is not proof that another request replaced us.
+ */
+const OPERATION_MISMATCH_LIMIT = 20
+/**
+ * How long to wait for the start acknowledgement.
+ *
+ * Upstream `RECOMPILE_START_CONFIRM_TIMEOUT` is 90s, after which it switches to
+ * reconciling the persisted compile state. Waiting much longer only delays the
+ * fallback: the compile is already running either way, and the converge loop
+ * reports the real outcome. Kept well under the converge budget so a request
+ * queued behind a busy editor still produces an answer.
+ */
+const DEFAULT_START_TIMEOUT_MS = 90_000
 const DEFAULT_CONVERGE_TIMEOUT_MS = 300_000
 
 const CONVERGED = new Set(['ok', 'not_needed'])
@@ -88,6 +117,16 @@ export function isTransientBrokerError(error) {
   )
 }
 
+/**
+ * Broker refusals that mean "the editor is busy right now", mirroring upstream
+ * `is_main_thread_unresponsive_error` plus the older-plugin unresponsive code.
+ * These say nothing about the compile itself, so they are waited out.
+ */
+export function isBusyError(error) {
+  const value = String(error ?? '').trim()
+  return value === BROKER_ERRORS.MAIN_THREAD_UNRESPONSIVE || value === 'native_main_thread_unresponsive'
+}
+
 function isTransportFailure(error) {
   return error instanceof LocusError && (error.notExecuted || error.code === undefined)
 }
@@ -139,17 +178,39 @@ export async function recompile(target, options = {}) {
   // ── phase 1: start ──────────────────────────────────────────────────────
   onPhase('Requesting recompile')
   const first = await getClient(target)
+  // Explicit "we do not know whether it started" state, mirroring upstream's
+  // `RecompileStartAck::Unconfirmed`. Faking this as a broker error string was
+  // wrong twice over: it had to survive exact-match transient classification,
+  // and it read like a real broker refusal in diagnostics.
+  let unconfirmed = false
   let response
   try {
-    response = await first.request('request_recompile', request, { timeoutMs: 60_000 })
+    response = await first.request('request_recompile', request, { timeoutMs: startTimeoutMs })
   } catch (error) {
-    if (!isTransportFailure(error)) throw error
-    // The connection died while the (re)load started; the register still knows.
-    response = { ok: false, error: `${BROKER_ERRORS.MANAGED_RELOADING}: ${error.message}` }
+    // A timeout here does NOT mean the compile will not happen: the reply is
+    // queued behind the very work it asked for (a compile already running, or
+    // an AssetDatabase refresh holding the main thread). Upstream
+    // `request_recompile_and_wait_for_start` gives up after
+    // RECOMPILE_START_CONFIRM_TIMEOUT and returns `Unconfirmed`, then reconciles
+    // through the persisted `get_compile_result` register instead of failing.
+    // Reporting a hard failure (what this did: `locus_request_timeout` carries a
+    // code, so it was not seen as a transport failure) threw away a compile that
+    // was in fact running.
+    if (error?.message === 'locus_request_timeout' || error?.code === BROKER_ERRORS.REQUEST_TIMED_OUT) {
+      onPhase('Start acknowledgement not observed; reconciling the persisted compile state')
+      unconfirmed = true
+      response = { ok: false, error: '' }
+    } else if (isTransportFailure(error)) {
+      // The connection died while the (re)load started; the register still knows.
+      unconfirmed = true
+      response = { ok: false, error: '' }
+    } else {
+      throw error
+    }
   }
   let activeId = operationId
   let adopted = false
-  if (!response.ok) {
+  if (!response.ok && !unconfirmed) {
     const adoptedId = adoptedOperationId(response.error)
     if (adoptedId) {
       activeId = adoptedId
@@ -167,18 +228,26 @@ export async function recompile(target, options = {}) {
   // ── phase 2: converge on a fresh connection ─────────────────────────────
   const deadline = Date.now() + convergeTimeoutMs
   let last = 'starting'
+  let mismatches = 0
   while (Date.now() < deadline) {
-    await sleep(POLL_INTERVAL_MS, signal)
+    await sleep(Math.min(POLL_INTERVAL_MS, Math.max(0, deadline - Date.now())), signal)
+    if (Date.now() >= deadline) break
+    const remaining = deadline - Date.now()
     let client
     try {
-      client = await getClient(target)
+      // Bound the reconnect by what is left of the budget: an unbounded
+      // reconnect (~76s worst case) can consume the whole loop on its own, which
+      // is how a finished compile kept this running for minutes.
+      client = await getClient(target, { deadline })
     } catch {
       onPhase('Waiting for Unity to reconnect after reload')
       continue
     }
     let reply
     try {
-      reply = await client.request('get_compile_result', activeId, { timeoutMs: 30_000 })
+      reply = await client.request('get_compile_result', activeId, {
+        timeoutMs: Math.max(1_000, Math.min(POLL_TIMEOUT_MS, remaining)),
+      })
     } catch (error) {
       if (isTransportFailure(error)) {
         onPhase('Editor reloading')
@@ -187,6 +256,7 @@ export async function recompile(target, options = {}) {
       throw error
     }
     if (reply.ok) {
+      mismatches = 0
       const value = String(reply.message ?? '').trim()
       if (PENDING.has(value)) {
         if (value !== last) onPhase(`Compiling (${value})`)
@@ -200,16 +270,34 @@ export async function recompile(target, options = {}) {
     }
     const error = String(reply.error ?? '').trim()
     if (error === MISMATCH) {
-      // A different compile owns the register (for example a user Ctrl+R):
-      // nothing of ours is pending any more.
-      return {
-        operationId: activeId,
-        status: 'superseded',
-        message: 'another compilation owns the result register',
-        startedAt,
-        elapsedMs: Date.now() - startedAt,
-        adopted,
+      // The register can answer mismatch for a moment while our own compile is
+      // still being registered, so tolerate a run of them like upstream does
+      // rather than calling it superseded on the first read. An adopted compile
+      // is different: someone else owned it and we merely watched.
+      if (adopted) {
+        throw new LocusError('the adopted recompile was replaced by another request')
       }
+      mismatches += 1
+      if (mismatches >= OPERATION_MISMATCH_LIMIT) {
+        return {
+          operationId: activeId,
+          status: 'superseded',
+          message: `Unity's compile register belongs to another request; operation ${activeId} was replaced before it reported a result.`,
+          startedAt,
+          elapsedMs: Date.now() - startedAt,
+          adopted,
+        }
+      }
+      await sleep(POLL_INTERVAL_MS, signal)
+      continue
+    }
+    if (isBusyError(error)) {
+      // The editor is compiling, importing or initializing: the register is
+      // still authoritative, so keep waiting (upstream treats this as
+      // EditorBusy, not as a failure).
+      onPhase('Editor busy; still waiting for the compile result')
+      await sleep(POLL_INTERVAL_MS, signal)
+      continue
     }
     if (/没有开始编译|no active|not started/i.test(error)) {
       await sleep(POLL_INTERVAL_MS, signal)

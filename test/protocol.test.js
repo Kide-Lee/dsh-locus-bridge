@@ -96,3 +96,134 @@ test('longBlockNote uses upstream 15s threshold, not 5s', async () => {
   assert.equal(longBlockNote(14_999), '')
   assert.match(longBlockNote(15_000), /held Unity's main thread for 15\.0s/)
 })
+
+test('the broker asset-extension refusal is restated as the real rule', async () => {
+  const { explainAssetBlocker } = await import('../src/tools.js')
+  // Verified live: a Force Text project with a plain-YAML .physicsMaterial2D is
+  // still refused, because the gate is an extension whitelist. The broker's own
+  // wording blames "serialization format", which sends callers to the wrong fix.
+  const text = explainAssetBlocker('unsupported_capability: asset serialization format .physicsMaterial2D')
+  assert.match(text, /extension whitelist, not a serialization-format limit/)
+  assert.match(text, /\.physicsMaterial2D assets are refused even when the project is Force Text/)
+  assert.match(text, /unity_execute/)
+  // Anything else passes through untouched.
+  assert.equal(explainAssetBlocker('asset_not_found: Assets/X.asset'), 'asset_not_found: Assets/X.asset')
+})
+
+test('unregistered unity_test commands explain the test-framework version rule', async () => {
+  const { explainTestCommandError } = await import('../src/test-runner.js')
+  const text = explainTestCommandError('unknown message type: unity_test_list')
+  assert.match(text, /not registered/)
+  assert.match(text, /com\.unity\.test-framework >= 1\.4\.0/)
+  assert.match(text, /LOCUS_HAS_UNITY_TEST_FRAMEWORK/)
+  // A different unknown type is not this problem and must not be rewritten.
+  assert.equal(explainTestCommandError('unknown message type: unity_other'), 'unknown message type: unity_other')
+})
+
+test('readEditorStatus waits out managed_reloading instead of calling it disconnected', async () => {
+  const { readEditorStatus } = await import('../src/execute.js')
+  // Live observation: right after a compile the broker answers
+  // `managed_reloading` for a moment while the pipe is perfectly healthy. A
+  // precondition check that treats that as "disconnected" fails a call for a
+  // transient state.
+  let calls = 0
+  const client = {
+    async request() {
+      calls += 1
+      if (calls <= 2) return { ok: false, error: 'managed_reloading' }
+      return { ok: true, message: 'editing|Assets/Scenes/Level.unity' }
+    },
+  }
+  const state = await readEditorStatus(client, { waitForReloadMs: 5_000 })
+  assert.equal(state.connected, true)
+  assert.equal(state.status, 'editing')
+  assert.equal(calls, 3, 'retried until the reload finished')
+})
+
+test('readEditorStatus reports disconnected immediately when not told to wait', async () => {
+  const { readEditorStatus } = await import('../src/execute.js')
+  let calls = 0
+  const client = {
+    async request() {
+      calls += 1
+      return { ok: false, error: 'managed_reloading' }
+    },
+  }
+  const state = await readEditorStatus(client)
+  assert.equal(state.connected, false)
+  assert.equal(calls, 1, 'unity_status stays immediate')
+})
+
+test('readEditorStatus stops waiting at its window for a genuine outage', async () => {
+  const { readEditorStatus } = await import('../src/execute.js')
+  let calls = 0
+  const client = {
+    async request() {
+      calls += 1
+      return { ok: false, error: 'managed_reloading' }
+    },
+  }
+  const started = Date.now()
+  const state = await readEditorStatus(client, { waitForReloadMs: 400 })
+  assert.equal(state.connected, false)
+  assert.equal(state.error, 'managed_reloading')
+  assert.ok(Date.now() - started >= 300, 'did not give up before the window')
+  assert.ok(calls > 1)
+})
+
+test('recompile tolerates a run of register mismatches before calling it superseded', async () => {
+  const { mkdtempSync } = await import('node:fs')
+  const { tmpdir } = await import('node:os')
+  const { join } = await import('node:path')
+  const { resolvePipeName } = await import('../src/pipe-name.js')
+  const projectRoot = mkdtempSync(join(tmpdir(), 'locus-mismatch-'))
+  // Upstream RECOMPILE_OPERATION_MISMATCH_LIMIT = 20: Unity can answer mismatch
+  // for a moment while our own compile is still being registered, so one read is
+  // not proof another request replaced us.
+  const { recompile } = await import('../src/recompile.js')
+  const { startFakeBroker } = await import('./fake-broker.js')
+  const { LocusClient } = await import('../src/locus-client.js')
+  const { __resetPoolForTest, __setClientForTest, shutdownPool } = await import('../src/client-pool.js')
+
+  let polls = 0
+  const broker = await startFakeBroker({
+    onMessage(request, _helpers, socket) {
+      const respond = (body) =>
+        socket.write(JSON.stringify({ type: 'response', reply_to: request.id, ...body }) + '\n')
+      if (request.type === 'request_recompile') {
+        respond({ ok: true, message: 'recompile_started' })
+        return true
+      }
+      if (request.type === 'get_compile_result') {
+        polls += 1
+        if (polls <= 5) respond({ ok: false, error: 'recompile_result_operation_mismatch' })
+        else respond({ ok: true, message: 'ok' })
+        return true
+      }
+      return undefined
+    },
+  })
+  const client = new LocusClient({ pipe: 'fake-mismatch', stream: broker.stream })
+  await client.connect()
+  __resetPoolForTest()
+  __setClientForTest(resolvePipeName({ projectRoot }), client)
+  try {
+    const out = await recompile({ projectRoot }, { convergeTimeoutMs: 20_000 })
+    assert.equal(out.status, 'ok')
+    assert.ok(polls > 5, `expected several mismatch reads, got ${polls}`)
+  } finally {
+    await shutdownPool()
+    __resetPoolForTest()
+    await broker.close()
+  }
+})
+
+test('isBusyError waits out an unresponsive main thread instead of failing', async () => {
+  const { isBusyError } = await import('../src/recompile.js')
+  // Upstream is_main_thread_unresponsive_error: the broker could not queue the
+  // read because the editor holds the main thread (a compile does exactly that).
+  assert.equal(isBusyError('native_main_thread_unresponsive'), true)
+  for (const code of ['managed_reloading', 'recompile_result_operation_mismatch', 'error CS1002', '']) {
+    assert.equal(isBusyError(code), false)
+  }
+})

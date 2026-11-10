@@ -7,6 +7,7 @@
 // new client and polling continues against it.
 
 import { readEditorStatus } from './execute.js'
+import { LocusError } from './locus-client.js'
 import { parseStatusMessage } from './protocol.js'
 
 const POLL_INTERVAL_MS = 250
@@ -28,7 +29,14 @@ export async function setPlayMode(client, mode, { signal, reconnect } = {}) {
   const { message, desired } = statusForMode(mode)
   const before = await readEditorStatus(client)
   if (!before.connected) {
-    throw new Error(`Unity Editor is unavailable${before.error ? `: ${before.error}` : ''}.`)
+    // Carry the broker's code so the shared retry layer can tell a reload apart
+    // from a real outage. A bare Error was invisible to it, which is why
+    // unity_play_mode failed outright right after a compile while every tool
+    // going through withClient recovered.
+    throw new LocusError(
+      `Unity Editor is unavailable${before.error ? `: ${before.error}` : ''}.`,
+      { code: before.error ?? null },
+    )
   }
   if (desired.includes(before.status)) {
     return { mode, changed: false, status: before.status, scenes: before.scenes }

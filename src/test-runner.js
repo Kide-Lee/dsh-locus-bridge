@@ -100,9 +100,33 @@ export function parseTestSnapshot(message) {
   }
 }
 
+/**
+ * Turn a broker "unknown message type: unity_test_*" into the real cause.
+ *
+ * The four `unity_test_*` commands are extension handlers registered by
+ * `Editor/Testing/Locus.UnityTesting.Editor`, whose asmdef is conditionally
+ * compiled on `LOCUS_HAS_UNITY_TEST_FRAMEWORK` for
+ * `com.unity.test-framework >= 1.4.0`. On an older project the assembly is
+ * excluded entirely, so the broker answers the generic unknown-type error — true
+ * but impossible to act on without knowing the version rule. Verified live
+ * against a project on test-framework 1.1.33.
+ */
+export function explainTestCommandError(error) {
+  const text = String(error ?? '').trim()
+  if (!/^unknown message type:\s*unity_test_/i.test(text)) return text
+  return (
+    `${text} — the Unity Test commands are not registered. They live in ` +
+    'Editor/Testing/Locus.UnityTesting.Editor, which Unity excludes unless the project has ' +
+    'com.unity.test-framework >= 1.4.0 (it uses the LOCUS_HAS_UNITY_TEST_FRAMEWORK versionDefine). ' +
+    'Check the version in Packages/manifest.json; the framework itself still works below 1.4.0, ' +
+    'this tool cannot drive it. Everything else in the bridge is unaffected.'
+  )
+}
+
 function unwrap(envelope, what) {
   if (!envelope.ok) {
-    throw new LocusError(envelope.error || `${what} failed`, {
+    const message = explainTestCommandError(envelope.error || `${what} failed`)
+    throw new LocusError(message, {
       code: envelope.error,
       responses: [envelope],
     })
@@ -116,7 +140,7 @@ export async function listTests(client, options = {}) {
   if (filter.max_results === undefined) filter.max_results = DEFAULT_RESULT_LIMIT
   const envelope = await client.request('unity_test_list', JSON.stringify(filter), { timeoutMs: LIST_TIMEOUT_MS })
   if (!envelope.ok) {
-    throw new LocusError(envelope.error || 'Unity Test listing failed', {
+    throw new LocusError(explainTestCommandError(envelope.error || 'Unity Test listing failed'), {
       code: envelope.error,
       responses: [envelope],
     })

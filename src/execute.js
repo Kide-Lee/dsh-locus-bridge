@@ -12,6 +12,7 @@ import {
   EDITOR_STATUS_DISCONNECTED,
   executePayload,
   isKnownEditorStatus,
+  isReloading,
   parseStatusMessage,
 } from './protocol.js'
 import { LocusError } from './locus-client.js'
@@ -25,19 +26,46 @@ const STATUS_TIMEOUT_MS = 5_000
 const BUDGET_GRACE_MS = 30_000
 /** Upstream `UNITY_EXECUTE_LONG_BLOCK_NOTE_MS`. */
 const LONG_BLOCK_NOTE_MS = 15_000
+/**
+ * How long a `execute_code` may sit with neither acceptance nor progress, from
+ * upstream `UNITY_EXECUTE_START_TIMEOUT_SECS`. Without it a request that never
+ * leaves the sending stage (the editor's main thread is stuck) is
+ * indistinguishable from a long-running snippet, so the caller waits the whole
+ * budget for an answer that cannot come.
+ */
+const START_STALL_TIMEOUT_MS = 15_000
+/** Pause between status retries while the domain reloads. */
+const RELOAD_STATUS_RETRY_MS = 250
 
 export const UNITY_EXECUTE_CANCELLED = '__locus_execute_cancelled__'
 
-/** Read the canonical editor status; returns `disconnected` instead of throwing. */
-export async function readEditorStatus(client, { timeoutMs = STATUS_TIMEOUT_MS } = {}) {
-  try {
-    const envelope = await client.request('status', '', { timeoutMs })
-    if (!envelope.ok) {
-      return { connected: false, status: EDITOR_STATUS_DISCONNECTED, scenes: [], error: envelope.error }
+/**
+ * Read the canonical editor status; returns `disconnected` instead of throwing.
+ *
+ * `waitForReloadMs` covers the one case where "disconnected" is misleading: the
+ * editor answered `managed_reloading`, which means the pipe is fine and the
+ * managed side is mid-domain-reload — typically for a second or two right after
+ * a compile. A precondition check that refuses in that window reports a
+ * permanent-looking failure for a transient state, so callers that are about to
+ * touch the editor anyway can ask to wait it out.
+ */
+export async function readEditorStatus(client, { timeoutMs = STATUS_TIMEOUT_MS, waitForReloadMs = 0 } = {}) {
+  const deadline = waitForReloadMs > 0 ? Date.now() + waitForReloadMs : 0
+  for (;;) {
+    let reloading = false
+    try {
+      const envelope = await client.request('status', '', { timeoutMs })
+      if (envelope.ok) return { connected: true, ...parseStatusMessage(envelope.message) }
+      reloading = isReloading(envelope.error)
+      if (!reloading || Date.now() >= deadline) {
+        return { connected: false, status: EDITOR_STATUS_DISCONNECTED, scenes: [], error: envelope.error }
+      }
+    } catch (error) {
+      if (Date.now() >= deadline) {
+        return { connected: false, status: EDITOR_STATUS_DISCONNECTED, scenes: [], error: error.message }
+      }
     }
-    return { connected: true, ...parseStatusMessage(envelope.message) }
-  } catch (error) {
-    return { connected: false, status: EDITOR_STATUS_DISCONNECTED, scenes: [], error: error.message }
+    await delay(RELOAD_STATUS_RETRY_MS)
   }
 }
 
@@ -78,6 +106,7 @@ export async function executeSnippet(client, { code, executionId, timeoutMs, sig
   let pollInFlight = false
   let pollHandle = null
   let rejectCancelled = null
+  let sawProgress = false
 
   const poll = async () => {
     if (pollInFlight) return
@@ -85,6 +114,7 @@ export async function executeSnippet(client, { code, executionId, timeoutMs, sig
     try {
       const envelope = await client.request('execute_code_progress', executionId, { timeoutMs: 5_000 })
       if (envelope.ok && envelope.message) {
+        sawProgress = true
         lastProgress = safeJson(envelope.message)
         onProgress?.(lastProgress)
       }
@@ -118,10 +148,33 @@ export async function executeSnippet(client, { code, executionId, timeoutMs, sig
 
   const run = client.request('execute_code', payload, { timeoutMs: budget + BUDGET_GRACE_MS })
 
+  // Stalled-before-start watchdog: no response and no progress for 15s means the
+  // request never reached Unity's executor (upstream resets the pipe and reports
+  // exactly this). The timer is stopped as soon as either arrives, so a genuinely
+  // long snippet is never cut short.
+  const stalled = new Promise((_resolve, reject) => {
+    const tick = setInterval(() => {
+      if (sawProgress) {
+        clearInterval(tick)
+        return
+      }
+      clearInterval(tick)
+      reject(
+        new LocusError(
+          `execute_code did not leave the sending stage within ${START_STALL_TIMEOUT_MS / 1000}s: the editor never ` +
+            'accepted the request or reported progress. Its main thread may be blocked; check unity_status and the ' +
+            'Unity Console.',
+        ),
+      )
+    }, START_STALL_TIMEOUT_MS)
+    tick.unref?.()
+    run.then(() => clearInterval(tick)).catch(() => clearInterval(tick))
+  })
+
   try {
     void poll()
     pollHandle = setInterval(poll, PROGRESS_POLL_MS)
-    const envelope = await Promise.race([run, cancelPromise, timedOut])
+    const envelope = await Promise.race([run, cancelPromise, timedOut, stalled])
     if (!envelope.ok) {
       if (cancelled) throw new LocusError(UNITY_EXECUTE_CANCELLED, { code: 'cancelled' })
       throw new LocusError(envelope.error || 'execute_code failed', {

@@ -504,3 +504,67 @@ test('unity_recompile advertises editor_status as a required four-value enum', (
   assert.deepEqual(spec.enum, ['disconnected', 'editing', 'playing', 'playing_paused'])
   assert.equal(spec.required, true)
 })
+
+test('a recompile start-ack timeout reconciles the persisted state instead of failing', async () => {
+  // Observed live: `request_recompile` is queued behind the very compile it asks
+  // for (or an AssetDatabase refresh), so the reply can time out while a compile
+  // is genuinely running. Upstream `request_recompile_and_wait_for_start` gives
+  // up after 90s and returns `Unconfirmed`, then reconciles through
+  // `get_compile_result`; reporting a hard failure here threw away real work.
+  const { recompile } = await import('../src/recompile.js')
+  const requests = []
+  await withEditor(
+    async ({ client }) => {
+      const result = await recompile(
+        { projectRoot: PROJECT },
+        {
+          signal: new AbortController().signal,
+          startTimeoutMs: 300,
+          convergeTimeoutMs: 10_000,
+        },
+      )
+      assert.equal(result.status, 'ok')
+      assert.ok(
+        requests.some((item) => item.type === 'get_compile_result'),
+        'fell back to polling the persisted compile result',
+      )
+    },
+    {
+      onMessage: (request, _helpers, socket) => {
+        if (request.type === 'status') {
+          socket.write(JSON.stringify({ type: 'response', reply_to: request.id, ok: true, message: 'editing|Assets/Scenes/Level.unity' }) + '\n')
+          return true
+        }
+        if (request.type === 'get_compile_result') {
+          requests.push(request)
+          socket.write(JSON.stringify({ type: 'response', reply_to: request.id, ok: true, message: 'ok' }) + '\n')
+          return true
+        }
+        if (request.type === 'request_recompile') {
+          requests.push(request)
+          // Never answer: the start acknowledgement times out.
+          return true
+        }
+        return undefined
+      },
+    },
+  )
+})
+
+test('the converge loop honours its budget even when reconnects keep failing', async () => {
+  // Live: a finished compile kept the loop alive for ~287s because one
+  // iteration could spend ~76s inside getClient (5 attempts x 15s timeout) with
+  // the deadline only checked between iterations. The budget must bound each
+  // reconnect, not just the loop condition.
+  const { recompile } = await import('../src/recompile.js')
+  const started = Date.now()
+  await assert.rejects(
+    recompile(
+      { projectRoot: PROJECT, pipe: join(PROJECT, 'Library', 'Locus', 'no-such.sock') },
+      { convergeTimeoutMs: 1_500, startTimeoutMs: 500 },
+    ),
+    /not connected|timed out|did not converge/i,
+  )
+  const elapsed = Date.now() - started
+  assert.ok(elapsed < 20_000, `must give up near its budget, took ${elapsed}ms`)
+})
