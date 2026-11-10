@@ -57,3 +57,9 @@ native/**/target/
 
 # Local Rust toolchain (installed into the workspace)
 .tooling/
+
+# Release assets staged locally for a manual GitHub upload: a tarball of the
+# payload tree plus standalone copies of the two brokers. Build output only —
+# dist/ is regenerated, never committed. The payload tree itself stays tracked
+# under payload/, which is what makes `dsh plugin add github:…` self-contained.
+dist/
