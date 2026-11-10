@@ -75,3 +75,24 @@ test('broker error classification drives retry safety', () => {
 test('capabilities split on commas', () => {
   assert.deepEqual(splitCapabilities('broker_v1, broker_compile_result_v1,'), ['broker_v1', 'broker_compile_result_v1'])
 })
+
+test('isTransientBrokerError matches exactly the three reload codes', async () => {
+  const { isTransientBrokerError } = await import('../src/recompile.js')
+  // Upstream `is_transient_broker_error` (unity_bridge/mod.rs) is an exact match
+  // on these three. A `native_*` prefix used to be accepted by a regex here,
+  // which turned real broker refusals into infinite convergence polling.
+  for (const code of ['managed_reloading', 'managed_not_ready', 'domain_reload_interrupted']) {
+    assert.equal(isTransientBrokerError(code), true, `${code} is a reload boundary`)
+  }
+  for (const code of ['native_payload_too_large', 'native_queue_full', 'error CS1002', '', null]) {
+    assert.equal(isTransientBrokerError(code), false, `${code} must surface, not be retried`)
+  }
+})
+
+test('longBlockNote uses upstream 15s threshold, not 5s', async () => {
+  const { longBlockNote } = await import('../src/execute.js')
+  // Upstream `UNITY_EXECUTE_LONG_BLOCK_NOTE_MS = 15_000`.
+  assert.equal(longBlockNote(5_000), '', '5s of editor work is not worth a warning')
+  assert.equal(longBlockNote(14_999), '')
+  assert.match(longBlockNote(15_000), /held Unity's main thread for 15\.0s/)
+})

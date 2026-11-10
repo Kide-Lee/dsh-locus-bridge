@@ -19,7 +19,12 @@ import { LocusError } from './locus-client.js'
 const PROGRESS_POLL_MS = 250
 const CANCEL_DRAIN_MS = 500
 const STATUS_TIMEOUT_MS = 5_000
-const BUDGET_GRACE_MS = 60_000
+// Upstream `UNITY_EXECUTE_BUDGET_GRACE` is 30s: Unity enforces the budget
+// itself, the host only keeps a backstop past it. 60s made a hung snippet hold
+// the caller twice as long as the desktop client would.
+const BUDGET_GRACE_MS = 30_000
+/** Upstream `UNITY_EXECUTE_LONG_BLOCK_NOTE_MS`. */
+const LONG_BLOCK_NOTE_MS = 15_000
 
 export const UNITY_EXECUTE_CANCELLED = '__locus_execute_cancelled__'
 
@@ -144,7 +149,10 @@ function delay(ms) {
 /** Notes Locus appends when a snippet blocked the editor for a long time. */
 export function longBlockNote(maxMainThreadBlockedMs) {
   const ms = Number(maxMainThreadBlockedMs)
-  if (!Number.isFinite(ms) || ms < 5_000) return ''
+  // 15s, matching upstream `UNITY_EXECUTE_LONG_BLOCK_NOTE_MS`. A lower threshold
+  // (this used to be 5s) makes ordinary editor work look pathological and trains
+  // callers to ignore the note.
+  if (!Number.isFinite(ms) || ms < LONG_BLOCK_NOTE_MS) return ''
   return (
     `Note: this snippet held Unity's main thread for ${(ms / 1000).toFixed(1)}s ` +
     '(the editor was frozen meanwhile). Prefer print/ctx.Progress plus await ctx.WaitFrame() for long work.'

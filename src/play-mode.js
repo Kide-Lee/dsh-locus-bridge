@@ -10,9 +10,8 @@ import { readEditorStatus } from './execute.js'
 import { parseStatusMessage } from './protocol.js'
 
 const POLL_INTERVAL_MS = 250
+/** Upstream `set_editor_status` waits at most 30s, polling every 250ms. */
 const PLAY_MODE_TIMEOUT_MS = 30_000
-/** A handful of reloads is normal; more means the editor is stuck cycling. */
-const RECONNECT_LIMIT = 8
 
 /** Map the public tool mode (`play` / `edit`) to an editor status request. */
 export function statusForMode(mode) {
@@ -53,9 +52,10 @@ export async function setPlayMode(client, mode, { signal, reconnect } = {}) {
       if (!reconnect) {
         throw new Error(`Unity Editor disconnected while entering "${mode}" mode.`)
       }
-      if (reconnects >= RECONNECT_LIMIT) {
-        throw new Error(`Unity Editor kept disconnecting while entering "${mode}" mode (${reconnects} attempts).`)
-      }
+      // No attempt cap: upstream `set_editor_status` just polls until its 30s
+      // budget runs out. A fixed limit (this used to be 8) made a large project
+      // fail with "kept disconnecting" even though Play Mode had been entered —
+      // the budget below is the only real bound.
       reconnects += 1
       try {
         active = await reconnect()

@@ -71,6 +71,23 @@ export function adoptedOperationId(error) {
   return match && match[1].trim() ? match[1].trim() : null
 }
 
+/**
+ * Whether a broker rejection only means "the editor is between domains".
+ *
+ * Mirrors upstream `is_transient_broker_error` (`unity_bridge/mod.rs`), which is
+ * an exact match on three codes. The previous regex here accepted any `native_*`
+ * prefix, so a real broker refusal (for example `native_payload_too_large`) was
+ * silently retried for the whole convergence budget instead of surfacing.
+ */
+export function isTransientBrokerError(error) {
+  const value = String(error ?? '').trim()
+  return (
+    value === BROKER_ERRORS.MANAGED_RELOADING ||
+    value === BROKER_ERRORS.MANAGED_NOT_READY ||
+    value === BROKER_ERRORS.RELOAD_INTERRUPTED
+  )
+}
+
 function isTransportFailure(error) {
   return error instanceof LocusError && (error.notExecuted || error.code === undefined)
 }
@@ -142,7 +159,7 @@ export async function recompile(target, options = {}) {
       // Not an "in progress" owner: keep polling; `get_compile_result` tells
       // whether a compile is running for this operation (or a stale register).
       onPhase('Waiting for the compile to start')
-    } else if (!/managed_reloading|domain_reload_interrupted|native_/.test(String(response.error))) {
+    } else if (!isTransientBrokerError(response.error)) {
       throw new LocusError(response.error || 'request_recompile failed')
     }
   }
@@ -198,7 +215,7 @@ export async function recompile(target, options = {}) {
       await sleep(POLL_INTERVAL_MS, signal)
       continue
     }
-    if (/managed_reloading|domain_reload_interrupted|native_/.test(error)) {
+    if (isTransientBrokerError(error)) {
       onPhase('Editor reloading')
       continue
     }

@@ -276,3 +276,48 @@ test('setPlayMode without a reconnect still fails loudly on disconnect', async (
     }
   }, drop)
 })
+
+test('setPlayMode survives more reloads than the old 8-attempt cap', async () => {
+  // Bug report BUG-7: a large project reloads the domain many times while Play
+  // Mode starts, so a fixed attempt cap reported "kept disconnecting" even
+  // though the editor HAD entered Play Mode. Upstream's `set_editor_status`
+  // bounds this by the 30s budget alone, so only the deadline may stop it.
+  const RELOADS = 12
+  let statusCalls = 0
+  const reload = {
+    onMessage(request, { broadcast }, socket) {
+      const respond = (body) =>
+        socket.write(JSON.stringify({ type: 'response', reply_to: request.id, ...body }) + '\n')
+      if (request.type === 'set_editor_status') {
+        respond({ ok: true, message: 'set_editor_status:ok' })
+        return true
+      }
+      if (request.type !== 'status') return undefined
+      statusCalls += 1
+      // Poll 1 is the `before` read and must report the pre-change state.
+      if (statusCalls === 1) {
+        respond({ ok: true, message: 'editing|Assets/Scenes/Main.unity' })
+        return true
+      }
+      // Then RELOADS disconnects, then convergence.
+      if (statusCalls < 2 + RELOADS) {
+        respond({ ok: false, error: 'managed_reloading' })
+        return true
+      }
+      respond({ ok: true, message: 'playing|Assets/Scenes/Main.unity' })
+      return true
+    },
+  }
+  await withBroker(async (broker) => {
+    const client = await connected(broker)
+    let reconnects = 0
+    const reconnect = async () => {
+      reconnects += 1
+      return client
+    }
+    const result = await setPlayMode(client, 'play', { reconnect })
+    assert.equal(result.status, 'playing')
+    assert.equal(reconnects, RELOADS, 'every reload is retried, not capped')
+    await client.close()
+  }, reload)
+})
