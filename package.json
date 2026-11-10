@@ -1,18 +1,50 @@
 {
   "name": "dsh-locus-bridge",
   "version": "0.1.0",
-  "description": "DSH plugin that acts as a Locus client for the in-Unity native broker (Win32 named pipe or Unix domain socket).",
+  "description": "DSH plugin acting as a Locus client for the Unity native broker (Win32 named pipe or Unix domain socket).",
   "license": "GPL-3.0-or-later",
-  "private": true,
   "type": "module",
   "main": "src/index.js",
   "exports": {
     ".": "./src/index.js",
     "./src/*": "./src/*"
   },
+  "files": [
+    "src",
+    "cordis.patch.yml",
+    "README.md",
+    "README.en.md",
+    "LICENSE",
+    "NOTICE",
+    "native/locus_unix_native/Cargo.toml",
+    "native/locus_unix_native/Cargo.lock",
+    "native/locus_unix_native/src",
+    "native/locus_unix_native/tests",
+    "native/locus-native-protocol/Cargo.toml",
+    "native/locus-native-protocol/Cargo.lock",
+    "native/locus-native-protocol/src"
+  ],
   "engines": {
     "node": ">=22.12"
   },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Kide-Lee/dsh-locus-bridge.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Kide-Lee/dsh-locus-bridge/issues"
+  },
+  "homepage": "https://github.com/Kide-Lee/dsh-locus-bridge#readme",
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "unity",
+    "unity-editor",
+    "locus",
+    "game-development",
+    "csharp"
+  ],
   "scripts": {
     "test": "node --test --test-concurrency=1 \"test/*.test.js\"",
     "test:live": "node scripts/live-smoke.mjs",
