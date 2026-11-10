@@ -1,13 +1,15 @@
 # Locus Unity 服务端 Linux 版：移植说明
 
-基于 `Locus/`（commit `4ee37ed0`，src-tauri `0.9.3`）。目标：在 **Linux 版 Unity Editor**（本机 2022.3.62f3，Mono 运行时）里运行
+基于上游 Locus（commit `4ee37ed0`，src-tauri `0.9.3`）。目标：在 **Linux 版 Unity Editor**（验证于 2022.3.62f3，Mono 运行时）里运行
 `locus_unity_native` broker，并让 Unity 项目通过标准包安装方式接入 Locus。
+
+移植产物在本仓库 `native/locus_unix_native/`（`npm run build:native` 构建）。下文表格是移植过程的记录，提到的 `unity-test/` 是当时的本地验证工程，不在本仓库内。
 
 ## 已完成（本轮）
 
 | 项 | 状态 | 说明 |
 |---|---|---|
-| 父仓库 git 忽略 `unity-test/` | 完成 | 工作区当前**不是** git 仓库；已准备好根级 `.gitignore`，`unity-test/Library、Temp、Obj、Logs、UserSettings…` 全部忽略，另附 Unity 标准模板条目 |
+| 本地验证工程不纳入版本库 | 完成 | 根级 `.gitignore` 忽略 `unity-test/`（含 `Library、Temp、Obj、Logs、UserSettings`）。该工程只在本地为验证而存在 |
 | Rust 工具链 | 完成 | `/home` 只读、rustup 默认目录不可用 → 装到工作区 `.tooling/`（`CARGO_HOME=.tooling/cargo`、`RUSTUP_HOME=.tooling/rustup`），cargo 1.99.1 / rustc 1.99.1 |
 | Unity Editor | 确认 | `<Unity Hub>/Editor/2022.3.62f3/Editor/Unity`（ELF x64，Mono） |
 | Unity 参考程序集编译链 | 验证 | 用 Unity 自带 csc 引用的 `unity-4.8-api` + `Facades` 能编译 Locus 的 C# 插件；即使 `Assets/` 为空，`UnityEditor.dll`（约 2.7 万类型）在非 Unity 进程中反射也**无需初始化**、属性读取不报错 |

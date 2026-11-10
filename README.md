@@ -30,7 +30,7 @@ Linux:    Unity Editor ──(<runtime>/locus/locus_unity_native_<key>.sock)─�
 | 版本 | [Releases](https://github.com/r1n7aro/Locus/releases) · 本项目对齐 [`4ee37ed0`](https://github.com/r1n7aro/Locus/tree/4ee37ed0) / v0.9.3 |
 | 许可证 | [GPL-3.0-or-later](https://github.com/r1n7aro/Locus/blob/main/LICENSE) |
 
-本仓库**包含**从上游派生的代码（Linux/macOS 的 broker 移植与协议 crate），因此整体按 **GPL-3.0-or-later** 发布；具体哪些文件来自上游、改了哪里，见 [`NOTICE`](NOTICE)。仓库里的 `Locus/` 目录是本地 upstream checkout（独立 git 仓库，已被 `.gitignore` 忽略），仅供对照，构建本仓库不需要它。
+本仓库**包含**从上游派生的代码（Linux/macOS 的 broker 移植与协议 crate），因此整体按 **GPL-3.0-or-later** 发布；具体哪些文件来自上游、改了哪里，见 [`NOTICE`](NOTICE)。从零构建不需要上游 checkout。
 
 ### 许可证
 
@@ -61,9 +61,9 @@ Linux:    Unity Editor ──(<runtime>/locus/locus_unity_native_<key>.sock)─�
 ## 前提条件（Unity 端，无需改动）
 
 1. 项目已安装 Locus Unity 包（`com.farlocus.locus`）。
-2. `locus_unity/Editor/Native/x86_64/locus_unity_native.dll` 存在（仓库中由 `bun run unity:bundle-native` 构建）。
+2. Windows 需要 Locus 包自带的 `locus_unity_native.dll`（位于该包的 `Editor/Native/x86_64/`）；Linux/macOS 用本仓库构建的 `liblocus_unity_native.so`（见下文「构建」）。
 3. 原生桥已启用：`<Project>/Library/Locus/NativeBridge.enabled` 存在（内容第一行可指定管道名），或编辑器进程环境变量 `LOCUS_UNITY_NATIVE_BRIDGE=1`。
-4. **broker 与平台匹配**：Windows 用 `locus_unity_native.dll`（Win32 命名管道）；Linux/macOS 用 `liblocus_unity_native.so`（Unix 域套接字，即 `native/locus_unix_native/` 的产物，随包放在 `locus_unity/Editor/Native/linux-x86_64/`）。
+4. **broker 与平台匹配**：Windows 用命名管道（`locus_unity_native.dll`）；Linux/macOS 用 Unix 域套接字（`liblocus_unity_native.so`，由本仓库 `native/locus_unix_native/` 构建，放进 Locus 包的 `Editor/Native/linux-x86_64/`）。
 5. 可选：`Library/Locus/BackgroundHook.enabled` —— Unity 窗口失焦时仍持续 tick；否则主线程心跳停滞 >30s 后 broker 会拒绝请求（`native_main_thread_unresponsive`）。
 
 管道名默认为 `\\.\pipe\locus_unity_native_<sha256(规范化项目路径)[0:32]>`，与 Locus 桌面端逐字节一致（`src/pipe-name.js`），也可显式指定。
@@ -88,13 +88,13 @@ dsh plugin --profile <profile> add /path/to/dsh-locus-bridge
 
 1. 显式 `project_path`（绝对路径，或相对 Session 工作目录）——**并校验**目录同时含 `Assets/` 与 `ProjectSettings/`；
 2. 否则若 Session 工作目录本身就是 Unity 工程，就用它；
-3. 否则在 Session 工作目录**向下最多三层**找 Unity 工程（例如仓库根的 `unity-test/`）。广度优先，**最浅的那一层优先**——三层深处才找到的工程不会和一层深处找到的冲突；
-4. 向下没找到时，再在每个**祖先目录**旁找一层（到最近的 `.git` 为止）。这样从 `src/`、`docs/`、甚至工程自己的 `Assets/` 里发起调用，也能找到本仓库驱动的工程；
+3. 否则在 Session 工作目录**向下最多三层**找 Unity 工程（工程就近放在仓库子目录时可直接命中）。广度优先，**最浅的那一层优先**——三层深处才找到的工程不会和一层深处找到的冲突；
+4. 向下没找到时，再在每个**祖先目录**旁找一层（到最近的 `.git` 为止）。这样从 `src/`、`docs/`、甚至工程自己的 `Assets/` 里发起调用，也能找到该工程；
 5. 同一最浅层有多个 → 报错列出候选；都没有 → 报错提示传 `project_path`。
 
 ### 让 agent 自行选择工程
 
-插件**不记录**仓库该用哪个工程，也没有额外的配置文件：选择由模型根据仓库里的说明自行判断。本仓库的 `AGENTS.md` 就写明了唯一的工程是 `unity-test/`，DSH 会自动加载 `AGENTS.md` / `CLAUDE.md` 到上下文，模型据此决定是否传 `project_path`。
+插件**不记录**仓库该用哪个工程，也没有额外的配置文件：选择由模型根据仓库里的说明自行判断。把工程名与用途写进仓库的 `AGENTS.md`，DSH 会自动把它加载进上下文，模型据此决定是否传 `project_path`。
 
 这样做的理由是避免两处真相：机器可读的配置和散文说明一旦不一致，读配置的那条路径就会覆盖掉人的意图。工程唯一时第 2–3 步本来就能自动命中，配置只是多余的一层。搜索会跳过 `.git`、`node_modules`、Unity 的 `Library/Temp/Obj/Logs/UserSettings` 等生成目录，且**不会深入已识别的工程内部**（工程自己的 `Packages/` 里嵌套的包不算候选）。符号链接不跟随，理由与下面 `realpath` 那条相同。
 
@@ -107,7 +107,7 @@ dsh plugin --profile <profile> add /path/to/dsh-locus-bridge
 ## 开发与验证（在 Linux/macOS 上也能跑）
 
 ```bash
-node --test --test-concurrency=1 "test/*.test.js"   # 68 个测试（含假 broker 的 Stream 通道与真 Unix socket）
+node --test --test-concurrency=1 "test/*.test.js"   # 71 个测试（含假 broker 的 Stream 通道与真 Unix socket）
 node scripts/dump-tools.mjs                          # 工具 schema 是否在 DSH 支持子集内
 node scripts/typecheck.mjs                           # 跨模块 import/调用一致性（纯 ESM，无 TS）
 DSH_TOOLS_PATH=/abs/.../dsh-tools/lib/index.js \
