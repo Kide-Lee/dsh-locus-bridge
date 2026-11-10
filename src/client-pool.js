@@ -1,11 +1,14 @@
 // Per-project client pool with reconnection, plus the edit-session owners this
 // process holds on a Unity Editor.
 //
-// Mirrors the desktop client: one connection per pipe name, reused across tool
-// calls; dropped on transport failure; reconnected with a short backoff. Every
-// write path (snippet, asset edit, scene edit) opens an owner-scoped edit
-// session so Auto Refresh stays suppressed until the last tool that touched the
-// editor releases it — the same contract the Locus agent uses.
+// Mirrors the desktop client: one connection per endpoint, reused across tool
+// calls; dropped on transport failure; reconnected with a short backoff. The
+// endpoint is a Win32 named pipe on Windows and an absolute Unix socket path on
+// Linux/macOS (the `Locus/locus_unix_native` broker port); both speak the same
+// protocol. Every write path (snippet, asset edit, scene edit) opens an
+// owner-scoped edit session so Auto Refresh stays suppressed until the last tool
+// that touched the editor releases it — the same contract the Locus agent uses.
+
 
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -38,8 +41,9 @@ export function describeTarget({ projectRoot, pipe } = {}) {
   return { projectRoot: projectRoot ?? null, pipe: resolvePipeName({ projectRoot, pipe, markerLines }) }
 }
 
-function isWindowsHost() {
-  return process.platform === 'win32'
+/** The native library the broker ships as, for the "not connected" hint. */
+function nativeLibraryName() {
+  return process.platform === 'win32' ? 'locus_unity_native.dll' : 'liblocus_unity_native.so'
 }
 
 function sleep(ms) {
@@ -57,12 +61,6 @@ export async function getClient(target) {
   // Stream test seam working on non-Windows hosts.
   const seeded = pool.get(pipe)
   if (seeded && (seeded.connected || seeded.state === 'connecting')) return seeded.connect().then(() => seeded)
-  if (!isWindowsHost()) {
-    throw new LocusError(
-      `Locus native bridges require Windows (${pipe}); this host is ${process.platform}.`,
-      { code: 'ENOTWINDOWS' },
-    )
-  }
 
   let client = pool.get(pipe)
   if (client && client.state !== 'connecting') {
@@ -87,8 +85,8 @@ export async function getClient(target) {
     } catch (error) {
       lastError = error
       // Only "not listening yet" is worth retrying; other OS errors (denied,
-      // unsupported platform) and a hung connect fail fast.
-      if (error?.code === 'ENOTWINDOWS' || !NOT_LISTENING.has(error?.code)) break
+      // a wrong endpoint shape) and a hung connect fail fast.
+      if (!NOT_LISTENING.has(error?.code)) break
     }
   }
   if (pool.get(pipe) === client) pool.delete(pipe)
@@ -96,8 +94,9 @@ export async function getClient(target) {
 
   throw new LocusError(
     `Unity Editor not connected (${pipe}): ${lastError?.message ?? 'unknown error'}. ` +
-      'Check that the project has the Locus package, the native broker DLL, ' +
-      'and a Library/Locus/NativeBridge.enabled marker (or LOCUS_UNITY_NATIVE_BRIDGE=1).',
+      'Check that the project has the Locus package, the native broker library ' +
+      `(${nativeLibraryName()}), and a Library/Locus/NativeBridge.enabled marker ` +
+      '(or LOCUS_UNITY_NATIVE_BRIDGE=1).',
     { code: BROKER_ERRORS.MANAGED_NOT_READY },
   )
 }

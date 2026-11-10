@@ -1,11 +1,18 @@
 // The `unity_set_play_mode` flow: request the target state, then poll `status`
 // until the editor reports it (documented 30s budget in the desktop client).
+//
+// Entering or leaving Play Mode reloads the scripting domain on the default
+// settings, so the broker connection drops mid-flight and a fresh one appears a
+// moment later. That is the expected path, not a failure: `reconnect` supplies a
+// new client and polling continues against it.
 
 import { readEditorStatus } from './execute.js'
 import { parseStatusMessage } from './protocol.js'
 
 const POLL_INTERVAL_MS = 250
 const PLAY_MODE_TIMEOUT_MS = 30_000
+/** A handful of reloads is normal; more means the editor is stuck cycling. */
+const RECONNECT_LIMIT = 8
 
 /** Map the public tool mode (`play` / `edit`) to an editor status request. */
 export function statusForMode(mode) {
@@ -18,7 +25,7 @@ export function statusForMode(mode) {
  * Change Play Mode and wait for convergence.
  * @returns {{ mode: string, changed: boolean, status: string, scenes: string[] }}
  */
-export async function setPlayMode(client, mode, { signal } = {}) {
+export async function setPlayMode(client, mode, { signal, reconnect } = {}) {
   const { message, desired } = statusForMode(mode)
   const before = await readEditorStatus(client)
   if (!before.connected) {
@@ -34,15 +41,32 @@ export async function setPlayMode(client, mode, { signal } = {}) {
   }
 
   const deadline = Date.now() + PLAY_MODE_TIMEOUT_MS
+  let active = client
+  let reconnects = 0
   while (Date.now() < deadline) {
     if (signal?.aborted) throw new Error('cancelled')
     await delay(POLL_INTERVAL_MS, signal)
-    const current = await readEditorStatus(client)
+    const current = await readEditorStatus(active)
     if (current.status === 'disconnected') {
-      throw new Error(`Unity Editor disconnected while entering "${mode}" mode.`)
+      // A domain reload is dropping the transport; reconnect and keep waiting
+      // instead of reporting a failure the caller cannot act on.
+      if (!reconnect) {
+        throw new Error(`Unity Editor disconnected while entering "${mode}" mode.`)
+      }
+      if (reconnects >= RECONNECT_LIMIT) {
+        throw new Error(`Unity Editor kept disconnecting while entering "${mode}" mode (${reconnects} attempts).`)
+      }
+      reconnects += 1
+      try {
+        active = await reconnect()
+      } catch (error) {
+        // The editor may still be reloading: retry until the deadline.
+        continue
+      }
+      continue
     }
     if (desired.includes(current.status)) {
-      return { mode, changed: true, status: current.status, scenes: current.scenes }
+      return { mode, changed: true, status: current.status, scenes: current.scenes, reconnects }
     }
   }
   throw new Error(`Timed out after ${PLAY_MODE_TIMEOUT_MS / 1000}s waiting for Unity Editor mode "${mode}".`)

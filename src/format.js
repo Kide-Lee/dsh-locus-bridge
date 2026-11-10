@@ -37,7 +37,7 @@ export function formatStatus({ connected, status, scenes = [], pipe, projectRoot
   if (!connected) {
     lines.push(
       'Hint: require the Locus Unity package + native broker DLL, and Library/Locus/NativeBridge.enabled ' +
-        '(or LOCUS_UNITY_NATIVE_BRIDGE=1). Locus native bridges are Windows-only.',
+        '(or LOCUS_UNITY_NATIVE_BRIDGE=1).',
     )
   }
   return lines.join('\n')

@@ -1,13 +1,14 @@
 /**
  * Fake Locus native broker for tests.
  *
- * The Locus broker is a Windows named pipe server; Windows lets a client use
- * `fs` on `\\.\pipe\…`, but on Linux/macOS `fs.open` on a Unix socket fails.
- * The fake therefore speaks the same newline-JSON protocol over a stream pair:
- *   - on non-Windows it is an in-process Duplex pair (`clientStream`), which the
- *     test pipes into `LocusClient` through its `stream` test seam;
- *   - on Windows it is a real TCP loopback server whose address can be opened
- *     with `fs` (pass `{ tcp: true }`).
+ * Three transports, one protocol:
+ *   - `{ unix: true }` — a real Unix domain socket server in a temporary
+ *     directory. This exercises the actual Linux/macOS transport (`socket-io.js`
+ *     + the worker) end to end, including connect, framing and EOF;
+ *   - `{ tcp: true }` — a TCP loopback server (the Windows pipe path can be
+ *     opened with `fs`, so this is what the Windows transport test uses);
+ *   - default — an in-process Duplex pair (`clientStream`) piped into
+ *     `LocusClient` through its `stream` test seam.
  *
  * It reproduces the broker behaviour the client depends on: ping /
  * bridge_capabilities / status answered without the executor, `ok:false`
@@ -15,13 +16,17 @@
  * broadcast events.
  */
 import { createServer } from 'node:net'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { Duplex, Transform } from 'node:stream'
 import { LineAssembler } from '../src/line-framer.js'
 
-export async function startFakeBroker({ onMessage, tcp = false } = {}) {
+export async function startFakeBroker({ onMessage, tcp = false, unix = false } = {}) {
   const clients = new Set()
   let server = null
   let path = null
+  let unixDir = null
 
   const broadcast = (envelope) => {
     const line = JSON.stringify(envelope) + '\n'
@@ -158,7 +163,22 @@ export async function startFakeBroker({ onMessage, tcp = false } = {}) {
 
   let clientStream = null
   let sides = null
-  if (!tcp) {
+  if (unix) {
+    // A real Unix domain socket: the transport the Linux/macOS broker port uses.
+    unixDir = mkdtempSync(join(tmpdir(), 'locus-fake-broker-'))
+    const socketPath = join(unixDir, 'broker.sock')
+    server = createServer((socket) => {
+      socket.setNoDelay(true)
+      attach(socket)
+    })
+    await new Promise((resolve, reject) => {
+      server.once('error', reject)
+      server.listen(socketPath, () => {
+        path = socketPath
+        resolve()
+      })
+    })
+  } else if (!tcp) {
     // broker side (duplex) <-> client side exposed to the test
     // Object-mode Transform stages: PassThrough in object mode drops string
     // writes (`typeof chunk !== 'string|Buffer'`), Transform keeps them.
@@ -242,6 +262,10 @@ export async function startFakeBroker({ onMessage, tcp = false } = {}) {
       if (server) {
         await new Promise((resolve) => server.close(resolve))
         server = null
+      }
+      if (unixDir) {
+        rmSync(unixDir, { recursive: true, force: true })
+        unixDir = null
       }
     },
   }

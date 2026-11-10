@@ -179,16 +179,7 @@ export class LocusClient {
       this.#stream = null
       return
     }
-    const worker = this.#worker
-    this.#worker = null
-    if (worker) {
-      try {
-        worker.postMessage({ op: 'shutdown' })
-      } catch {
-        // worker already gone
-      }
-      await worker.terminate().catch(() => {})
-    }
+    this.#disposeWorker()
   }
 
   // ── internals ──────────────────────────────────────────────────────────
@@ -246,6 +237,10 @@ export class LocusClient {
   }
 
   #startWorker() {
+    // A previous attempt may have left a worker behind (a failed connect, a
+    // domain-reload loss): a Worker keeps the event loop alive, so it must be
+    // terminated before a new one replaces it or the process never exits.
+    this.#disposeWorker()
     const worker = new Worker(WORKER_URL)
     this.#worker = worker
     worker.on('message', (message) => this.#onWorkerMessage(message))
@@ -324,15 +319,34 @@ export class LocusClient {
   }
 
   #onDisconnected(error, { report = true } = {}) {
-    const wasConnectedOrConnecting = this.#state === 'connected' || this.#state === 'connecting'
+    // Capture the phase BEFORE transitioning: an open failure must reject the
+    // pending connect() immediately instead of letting it sit until the timeout.
+    const wasConnecting = this.#state === 'connecting'
+    const wasConnectedOrConnecting = wasConnecting || this.#state === 'connected'
     this.#state = this.#closing ? 'closed' : 'disconnected'
     if (wasConnectedOrConnecting && report) this.#lastDisconnect = error
-    if (this.#state === 'connecting') {
+    if (wasConnecting) {
       const fail = this.#openFailed
       this.#openFailed = null
       fail?.(error)
     }
+    // Nothing can arrive on a dead connection, and a live Worker/stream keeps
+    // the process alive: release the transport here, not on the next connect.
+    this.#disposeWorker()
     this.#failAll(error)
+  }
+
+  /** Terminate the worker (idempotent). The stream seam is owned by its caller. */
+  #disposeWorker() {
+    const worker = this.#worker
+    if (!worker) return
+    this.#worker = null
+    try {
+      worker.postMessage({ op: 'shutdown' })
+    } catch {
+      // already gone
+    }
+    worker.terminate().catch(() => {})
   }
 
   #failAll(error) {

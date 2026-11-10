@@ -5,9 +5,12 @@
 // There are no file events for pipes, so reads are blocking reads on the same
 // worker that owns the handle; the main thread only sends newline-framed lines.
 //
+// Unix domain sockets (the Linux/macOS broker port) live in `socket-io.js`; both
+// feed the same newline-framed protocol into `LocusClient`.
+//
 // NOTE: unverified on Windows (the checkout was researched on Linux). The
 // shape follows the Tauri client (duplex open, `read_until(b'\n')`, whole-line
-// writes); the live-smoke script exists to validate it on a real editor.
+// writes); `scripts/live-smoke.mjs` exists to validate it on a real editor.
 
 import { closeSync, fstatSync, openSync, readSync, writeSync } from 'node:fs'
 import { LineAssembler } from './line-framer.js'
@@ -21,6 +24,11 @@ export function isWindows() {
   return process.platform === 'win32'
 }
 
+/** True for an absolute Unix socket path (`/…`). Win32 pipes start with `\\.\pipe\`. */
+export function isSocketPath(endpoint) {
+  return String(endpoint ?? '').trim().startsWith('/')
+}
+
 export class PipeError extends Error {
   constructor(message, code) {
     super(message)
@@ -29,18 +37,33 @@ export class PipeError extends Error {
   }
 }
 
-/** Open the client end of a named pipe. Throws PipeError with the raw OS code. */
+/**
+ * Open the client end of one broker endpoint.
+ *
+ * A Win32 named pipe is opened as a duplex fd and read with blocking `readSync`;
+ * an absolute Unix socket path is refused here because a stream socket cannot be
+ * read with `readSync` — the worker routes those to `socket-io.js` instead.
+ */
 export function openPipeClient(pipeName) {
-  // Real Locus brokers are Windows named pipes; nothing equivalent exists on
-  // other platforms (tests use the LocusClient Stream seam instead).
+  const target = String(pipeName ?? '').trim()
+  if (!target) throw new PipeError('a broker pipe name is required', 'EINVAL')
+  if (isSocketPath(target)) {
+    throw new PipeError(
+      `a Unix socket path needs the stream transport, not the pipe transport: ${target}`,
+      'EUSESTREAM',
+    )
+  }
   if (!isWindows()) {
-    throw new PipeError('Locus native broker pipes are Windows-only', 'ENOTWINDOWS')
+    throw new PipeError(
+      `Win32 named pipes are Windows-only (got ${target}); a Locus broker on this host listens on a Unix socket path`,
+      'ENOTWINDOWS',
+    )
   }
   try {
     // 'r+' = read + write on the same handle; Win32 requires both for a duplex pipe.
-    return openSync(pipeName, 'r+')
+    return openSync(target, 'r+')
   } catch (error) {
-    throw new PipeError(`cannot open ${pipeName}: ${error.message}`, error.code ?? null)
+    throw new PipeError(`cannot open ${target}: ${error.message}`, error.code ?? null)
   }
 }
 

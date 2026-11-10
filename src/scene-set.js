@@ -67,17 +67,27 @@ function csInt(value, fallback = -1) {
   return Number.isInteger(value) ? String(value) : String(fallback)
 }
 
+// `SerializedProperty.displayValue` is internal to UnityEditor, so the snippet
+// reads every printable scalar through the public typed accessors instead; a
+// property type without one reports its type name (never a compile error, which
+// would block the write itself).
 const PRELUDE = `Func<SerializedProperty, object> CurrentValue = p => {
+  if (p.isArray && p.propertyType != SerializedPropertyType.String) return "array[" + p.arraySize + "]";
   switch (p.propertyType) {
-    case SerializedPropertyType.Integer: case SerializedPropertyType.Enum: case SerializedPropertyType.LayerMask: case SerializedPropertyType.Character: return p.longValue;
+    case SerializedPropertyType.Integer: case SerializedPropertyType.LayerMask: case SerializedPropertyType.Character: return p.longValue;
+    case SerializedPropertyType.Enum: return p.enumValueIndex;
     case SerializedPropertyType.Boolean: return p.boolValue;
     case SerializedPropertyType.Float: return p.doubleValue;
     case SerializedPropertyType.String: return p.stringValue;
     case SerializedPropertyType.Color: { var c = p.colorValue; return "#" + ColorUtility.ToHtmlStringRGBA(c); }
     case SerializedPropertyType.Vector2: { var v = p.vector2Value; return v.x + "," + v.y; }
     case SerializedPropertyType.Vector3: { var v = p.vector3Value; return v.x + "," + v.y + "," + v.z; }
+    case SerializedPropertyType.Vector4: { var v = p.vector4Value; return v.x + "," + v.y + "," + v.z + "," + v.w; }
+    case SerializedPropertyType.Quaternion: { var q = p.quaternionValue; return q.x + "," + q.y + "," + q.z + "," + q.w; }
+    case SerializedPropertyType.Rect: { var r = p.rectValue; return r.x + "," + r.y + "," + r.width + "," + r.height; }
+    case SerializedPropertyType.Bounds: { var b = p.boundsValue; return b.center.x + "," + b.center.y + "," + b.center.z + ";" + b.size.x + "," + b.size.y + "," + b.size.z; }
     case SerializedPropertyType.ObjectReference: return p.objectReferenceValue != null ? AssetDatabase.GetAssetPath(p.objectReferenceValue) + "|" + p.objectReferenceValue.name : "(null)";
-    default: return p.isArray ? "array[" + p.arraySize + "]" : p.displayValue;
+    default: return "(" + p.propertyType + ")";
   }
 };`
 

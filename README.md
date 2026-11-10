@@ -1,10 +1,13 @@
 # dsh-locus-bridge
 
-一个 **DSH 插件**：让 DSH 直接扮演 **Locus 客户端**，通过 Locus 原生 broker 的 Windows 命名管道操作 Unity 编辑器 —— 不需要启动 Locus 桌面程序，Unity 端也不需要改一行代码。
+一个 **DSH 插件**：让 DSH 直接扮演 **Locus 客户端**，通过 Locus 原生 broker 操作 Unity 编辑器 —— 不需要启动 Locus 桌面程序，Unity 端也不需要改一行代码。传输层随平台选择：Windows 用命名管道，Linux/macOS 用 Unix 域套接字（配合 `Locus/locus_unix_native` 的 broker 移植）。
 
 ```
-Unity Editor ──(\\.\pipe\locus_unity_native_<key>)── worker(fs 阻塞 I/O) ── LocusClient ── DSH 工具
+Windows:  Unity Editor ──(\\.\pipe\locus_unity_native_<key>)──────── worker(fs 阻塞 I/O) ── LocusClient ── DSH 工具
+Linux:    Unity Editor ──(<runtime>/locus/locus_unity_native_<key>.sock)── worker(net 流)      ── LocusClient ── DSH 工具
 ```
+
+两条传输共用同一套换行 JSON 协议、`reply_to` 路由与错误码，插件其余部分（重连、`edit session`、撤销守卫）完全一致。
 
 > 研究依据与完整协议说明见 [`docs/locus-client-bridge.md`](docs/locus-client-bridge.md)（对应 `Locus/` checkout，src-tauri `0.9.3`）。
 
@@ -35,7 +38,7 @@ Unity Editor ──(\\.\pipe\locus_unity_native_<key>)── worker(fs 阻塞 I/
 1. 项目已安装 Locus Unity 包（`com.farlocus.locus`）。
 2. `locus_unity/Editor/Native/x86_64/locus_unity_native.dll` 存在（仓库中由 `bun run unity:bundle-native` 构建）。
 3. 原生桥已启用：`<Project>/Library/Locus/NativeBridge.enabled` 存在（内容第一行可指定管道名），或编辑器进程环境变量 `LOCUS_UNITY_NATIVE_BRIDGE=1`。
-4. **Windows**（broker 是 Win32 命名管道实现）。DSH 插件在非 Windows 上会立即返回明确错误。
+4. **broker 与平台匹配**：Windows 用 `locus_unity_native.dll`（Win32 命名管道）；Linux/macOS 用 `liblocus_unity_native.so`（Unix 域套接字，即 `Locus/locus_unix_native` 的移植，随包放在 `locus_unity/Editor/Native/linux-x86_64/`）。
 5. 可选：`Library/Locus/BackgroundHook.enabled` —— Unity 窗口失焦时仍持续 tick；否则主线程心跳停滞 >30s 后 broker 会拒绝请求（`native_main_thread_unresponsive`）。
 
 管道名默认为 `\\.\pipe\locus_unity_native_<sha256(规范化项目路径)[0:32]>`，与 Locus 桌面端逐字节一致（`src/pipe-name.js`），也可显式指定。
@@ -66,7 +69,7 @@ node scripts/dump-tools.mjs                          # 工具 schema 是否在 D
 node scripts/typecheck.mjs                           # 跨模块 import/调用一致性（纯 ESM，无 TS）
 DSH_TOOLS_PATH=/abs/.../dsh-tools/lib/index.js \
   node scripts/validate-dsh-tools.mjs                # 用真实 DSH 编译+校验参数
-node scripts/live-smoke.mjs --project "F:/Projects/Game" [--recompile]   # 真机冒烟（Windows）
+node scripts/live-smoke.mjs --project "F:/Projects/Game" [--recompile]   # 真机冒烟（Windows 管道 / Linux 套接字均可）
 ```
 
 - `test/fake-broker.js` 实现了一个按 broker 语义应答的假服务端（`ping`/`status`/`capabilities`/`execute_code`/`asset_api`/`property_tree_read`/`recompile` 寄存器/事件广播），并能在「域重载」后接受新连接；`LocusClient` 的 `stream` 测试缝对着它，覆盖重连、接管编译、取消、超时、断线、资产修订守卫与 undo、场景 set、edit session 顺序、Console 渲染等。
@@ -82,6 +85,7 @@ src/
   client-pool.js   按管道名复用连接、重连、owner 级 edit session、关停
   pipe-worker.js   worker 线程：独占阻塞句柄
   pipe-io.js       Win32 命名管道 fs I/O（open/read/write/close）
+  socket-io.js     Unix 域套接字 I/O（net 连接、分帧、EOF/背压）
   line-framer.js   换行分帧（跨 chunk、BOM/CR、超长帧保护）
   protocol.js      协议常量/错误码/状态解析/哨兵行/超时夹取
   execute.js       execute_code 流程（状态闸门、轮询、取消、有界清理）
@@ -100,7 +104,8 @@ test/     pipe-name / protocol / client / tools / tools-workflow + fake-broker
 
 ## 已知限制
 
-- 仓库在 Linux 上开发与测试：**真实的 Win32 管道读写、worker 阻塞读循环、Unity 失焦心跳**只能在 Windows 实机上用 `scripts/live-smoke.mjs` 验证。
+- Win32 管道路径仍未经 Windows 实机验证（仓库在 Linux 上开发）；Linux 套接字路径已在 Unity 2022.3 + Mono 上端到端跑通（见 `docs/locus-linux-port.md`）。Unity 失焦心跳依赖 `Library/Locus/BackgroundHook.enabled`，Linux 移植里没有等价的 Win32 钩子。
+- 无 GPU 的环境里 Unity 必须用 `-batchmode -nographics` 启动；普通 GUI 启动会因 `Failed to initialize unity graphics` 退出。
 - `unity_asset` 只支持标量/数组字段；Vector3/Color/四元数等复合字段请用 `unity_scene set` 或 `unity_execute`。继承自 Prefab 的字段（Locus 需要 effective-value 适配器）会返回 `unsupported_capability`。
 - `unity_scene set` 只做单字段写入；数组操作是「先写末元素再增删」的 Locus 等价实现，复杂结构建议 `unity_execute`。
 - `enable_non_public_access`（私有成员直访）依赖 Locus compile server（Roslyn sidecar），未接入。

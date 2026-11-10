@@ -207,3 +207,72 @@ test('console log request validation and formatting', () => {
   assert.match(text, /\[warn\] slow$/)
   assert.match(formatConsoleLog('{"entries":[],"matchedCount":0,"uniqueCount":0}'), /<empty>/)
 })
+
+test('setPlayMode reconnects and keeps polling through a domain reload', async () => {
+  // Entering Play Mode reloads the scripting domain: the status poll right after
+  // the request reports the reload. The flow must hand control to `reconnect`
+  // and converge instead of surfacing "disconnected", which callers cannot act on.
+  let statusCalls = 0
+  const reload = {
+    onMessage(request, { broadcast }, socket) {
+      const respond = (body) =>
+        socket.write(JSON.stringify({ type: 'response', reply_to: request.id, ...body }) + '\n')
+      if (request.type === 'set_editor_status') {
+        respond({ ok: true, message: 'set_editor_status:ok' })
+        return true
+      }
+      if (request.type !== 'status') return undefined
+      statusCalls += 1
+      // Poll 1 = the `before` read, poll 2 = first poll after the request.
+      if (statusCalls === 2) {
+        respond({ ok: false, error: 'managed_reloading' })
+        return true
+      }
+      if (statusCalls >= 3) {
+        respond({ ok: true, message: 'playing|Assets/Scenes/Main.unity' })
+        return true
+      }
+      return undefined
+    },
+  }
+  await withBroker(async (broker) => {
+    const client = await connected(broker)
+    let reconnects = 0
+    const reconnect = async () => {
+      reconnects += 1
+      return client
+    }
+    const result = await setPlayMode(client, 'play', { reconnect })
+    assert.equal(result.mode, 'play')
+    assert.equal(result.status, 'playing')
+    assert.equal(reconnects, 1, 'the reload must hand over to the reconnect exactly once')
+    await client.close()
+  }, reload)
+})
+
+test('setPlayMode without a reconnect still fails loudly on disconnect', async () => {
+  let statusCalls = 0
+  const drop = {
+    onMessage(request, { broadcast }, socket) {
+      if (request.type === 'set_editor_status') {
+        socket.write(JSON.stringify({ type: 'response', reply_to: request.id, ok: true, message: 'set_editor_status:ok' }) + '\n')
+        return true
+      }
+      if (request.type !== 'status') return undefined
+      statusCalls += 1
+      if (statusCalls === 3) {
+        socket.write(JSON.stringify({ type: 'response', reply_to: request.id, ok: false, error: 'managed_reloading' }) + '\n')
+        return true
+      }
+      return undefined
+    },
+  }
+  await withBroker(async (broker) => {
+    const client = await connected(broker)
+    try {
+      await assert.rejects(() => setPlayMode(client, 'play'), /disconnected while entering "play" mode/)
+    } finally {
+      await client.close()
+    }
+  }, drop)
+})

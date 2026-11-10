@@ -51,8 +51,9 @@ const PROJECT_PATH = {
 }
 
 const CONNECTION_DESCRIPTION =
-  'Requires a running Unity Editor with the Locus package, the native broker DLL, and the native bridge enabled ' +
-  '(Library/Locus/NativeBridge.enabled or LOCUS_UNITY_NATIVE_BRIDGE=1). Windows only.'
+  'Requires a running Unity Editor with the Locus package, the native broker library (locus_unity_native.dll on ' +
+  'Windows, liblocus_unity_native.so on Linux/macOS), and the native bridge enabled ' +
+  '(Library/Locus/NativeBridge.enabled or LOCUS_UNITY_NATIVE_BRIDGE=1).'
 
 /** Plain JSON parameter map (the shape `defineTool` consumes). */
 export function parameterSpecs(definition) {
@@ -278,7 +279,11 @@ const unityPlayMode = {
   async execute(args, exec) {
     const target = targetFor(args, exec)
     try {
-      const result = await withClient(target, (client) => setPlayMode(client, args.mode, { signal: exec.signal }))
+      // Play Mode reloads the domain, so the connection dies mid-flight: hand
+      // the flow a reconnect instead of treating that as a hard failure.
+      const result = await withClient(target, (client) =>
+        setPlayMode(client, args.mode, { signal: exec.signal, reconnect: () => getClient(target) }),
+      )
       return { text: playModeMessage(result), status: result.status }
     } catch (error) {
       throw asToolError(error)
@@ -551,12 +556,17 @@ const unityAsset = {
     try {
       if (action === 'read') {
         const snapshot = await readAsset(target, args.path)
-        return { text: formatAssetSnapshot(snapshot), revision: snapshot.revision }
+        // `apply` is documented to take this snapshot (it carries the revision
+        // guard), so return it instead of dropping it: the caller would otherwise
+        // have to re-read and could never build a guarded edit.
+        return { text: formatAssetSnapshot(snapshot), revision: snapshot.revision, snapshot }
       }
       if (action === 'apply') {
         const owner = activeEditOwner(target.pipe) ?? `dsh-${process.pid}-${randomUUID()}`
         const result = await withBarriers(exec, owner, target, () => applyAssetEdit(target, args, owner), 'unity_asset')
-        return { text: formatAssetApply(result), revision: '' }
+        // The undo token is the documented way to revert; return it as data so a
+        // caller can pass it straight back to `action: "undo"`.
+        return { text: formatAssetApply(result), revision: '', undo: result.undo }
       }
       if (action === 'undo') {
         const undo = args.undo && typeof args.undo === 'object' ? args.undo : null

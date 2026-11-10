@@ -173,6 +173,10 @@ test('unity_asset read renders the snapshot and revision', async () => {
     async () => {
       const result = await tools.unity_asset.execute({ action: 'read', path: 'Assets/Config/Balance.asset' }, ctx())
       assert.equal(result.revision, 'live:revision-1')
+      // `apply` is documented to take this snapshot; returning it is what makes
+      // a revision-guarded edit possible without a second read.
+      assert.equal(result.snapshot?.revision, 'live:revision-1')
+      assert.equal(result.snapshot?.objects?.[0]?.object_id, '11400000')
       assert.match(result.text, /object_id 11400000 \(MySO\)/)
       assert.match(result.text, /m_Name \[string\] = "Balance"/)
     },
@@ -235,6 +239,10 @@ test('unity_asset apply sends a revision-guarded batch in one edit session', asy
       )
       assert.match(result.text, /Applied 2 operations?\(s\) to 1 asset file\(s\)/)
       assert.match(result.text, /Undo token/)
+      // The token must come back as data: `action: "undo"` takes exactly this
+      // object, and scraping it out of the rendered text is not the contract.
+      assert.equal(result.undo?.kind, 'asset')
+      assert.equal(result.undo?.files?.length, 1)
       const order = seen.map((item) => item.type)
       assert.ok(order.indexOf('begin_edit_session') < order.indexOf('asset_api'))
       assert.ok(order.indexOf('end_edit_session') > order.indexOf('asset_api'))

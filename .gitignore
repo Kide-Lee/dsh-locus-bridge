@@ -2,6 +2,11 @@
 node_modules/
 .tmp/
 
+# The Unity test project is a disposable fixture: it is created locally by
+# `scripts/live-smoke` setup and must never be version-controlled from here.
+unity-test/
+unity-test/**
+
 # Unity editor / Locus runtime state — never tracked even if the parent repo is
 # initialised later (Library/ holds the Locus edit-session primitives Unity's
 # Linux named-mutex emulation creates, user settings, caches).
