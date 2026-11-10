@@ -2,10 +2,17 @@
 //
 // Upstream Locus answers `unity_ref_search` / `unity_code_usages` from its Rust
 // `asset_db` index (`src-tauri/src/asset_db/`), which this plugin does not have.
-// The broker's `search_yaml` is NOT a substitute for that index: it matches
-// GameObject *names and hierarchy paths* only. Passing a GUID as `query` always
-// yields "Total matches: 0", which is why earlier versions of this module
-// reported zero references for assets that plainly exist.
+// Two broker commands were considered as substitutes and both fall short:
+//
+//   * `search_yaml` matches GameObject *names and hierarchy paths* only. Passing
+//     a GUID as `query` always yields "Total matches: 0", which is why earlier
+//     versions reported zero references for assets that plainly exist.
+//   * `property_tree_discover` (what upstream's `unity_yaml_search` drives) does
+//     walk scene properties and can match field values, but it compares
+//     `displayValue` as a case-insensitive SUBSTRING. For an object reference
+//     that display value is the asset path, not the GUID, so a script's attach
+//     points can only be found by path — and only as a substring, where
+//     `Probe.cs` also matches `MyProbe.cs`. Exact GUID identity is unavailable.
 //
 // These actions therefore run a compiled snippet over the open scenes instead:
 // the GUID from the asset's `.meta` is compared against the `m_Script` /
@@ -110,8 +117,11 @@ function attachPointBody({ guid, member, limit, scenePath }) {
         totalMemberUses++;
       }`
     : ''
+  // No `wantedMember` variable: the member name only ever entered through
+  // `memberCheck`, so carrying a separate binding served nothing — and its
+  // `var wantedMember = null` form was CS0815 whenever `member` was absent,
+  // which made every `usages` call without a member fail to compile.
   return `var targetGuid = ${csString(guid)};
-var wantedMember = ${member ? csString(member) : 'null'};
 string sceneFilter = ${sceneFilter};
 var limit = ${limit};
 var results = new List<Dictionary<string, object>>();

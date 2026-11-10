@@ -8,6 +8,7 @@ import { LocusClient } from '../src/locus-client.js'
 import { __resetPoolForTest, __setClientForTest, shutdownPool } from '../src/client-pool.js'
 import { resolvePipeName } from '../src/pipe-name.js'
 import { toolDefinitions } from '../src/tools.js'
+import { sceneSetCode } from '../src/scene-set.js'
 import { startFakeBroker } from './fake-broker.js'
 
 const tools = Object.fromEntries(toolDefinitions.map((definition) => [definition.name, definition]))
@@ -425,4 +426,32 @@ test('unity_status reports the reload state of a connected editor', async () => 
     const result = await tools.unity_status.execute({}, ctx())
     assert.match(result.text, /Reload state: converged serial 3/)
   })
+})
+
+test('scene set passes a string value through as plain text, not JSON', () => {
+  // `WriteValue` reads scalars with Convert.*, so a JSON-quoted string stored
+  // the quotes in the scene ("Hello World" with literal quotation marks).
+  const body = sceneSetCode({
+    scenePath: 'Assets/S.unity',
+    objectPath: 'A',
+    componentType: 'TextMesh',
+    propertyPath: 'm_Text',
+    op: 'set',
+    value: 'Hello World',
+  })
+  const raw = /var raw = (.+);/.exec(body)
+  assert.ok(raw, 'the snippet binds the encoded value to `raw`')
+  // The C# literal must evaluate to the bare text.
+  assert.equal(JSON.parse(raw[1]), 'Hello World')
+
+  // A number keeps a form Convert.ToInt64/ToSingle accepts unchanged.
+  const numeric = sceneSetCode({
+    scenePath: 'Assets/S.unity',
+    objectPath: 'A',
+    componentType: 'Camera',
+    propertyPath: 'm_ClearFlags',
+    op: 'set',
+    value: 2,
+  })
+  assert.equal(JSON.parse(/var raw = (.+);/.exec(numeric)[1]), '2')
 })

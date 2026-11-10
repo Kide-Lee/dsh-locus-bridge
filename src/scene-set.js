@@ -63,6 +63,36 @@ export function csString(value) {
   return `"${String(value).replace(/[\\"\n\r\t]/g, (ch) => CS_ESCAPE[ch])}"`
 }
 
+/**
+ * Encode a JSON argument into the *plain text* the snippets' `WriteValue`
+ * parses — the exact inverse of what `ReadValue` prints.
+ *
+ * `WriteValue` reads scalars with `Convert.ToInt64`/`ToSingle`/`ToBoolean` and
+ * strings with `Convert.ToString`, so the text it must receive is the bare
+ * value: `hello`, not `"hello"`. Passing `JSON.stringify(value)` instead made
+ * every string write store the quotes as part of the string (`m_Text` became
+ * `"Hello World"`), which no scalar-only test could catch because numbers
+ * happen to survive JSON encoding unchanged.
+ *
+ * Returns `null` for `undefined` (the "no value" case the snippet checks for).
+ */
+export function valueText(value) {
+  if (value === null || value === undefined) return null
+  // Objects and arrays have no plain-text form `WriteValue` can apply; refusing
+  // here keeps that failure next to the offending argument instead of surfacing
+  // as a snippet type_mismatch after the scene was already touched.
+  if (typeof value === 'object') {
+    throw new Error(
+      'value must be a scalar (string, number, boolean) for scene property writes; ' +
+        'use unity_execute for compound or array values.',
+    )
+  }
+  if (typeof value === 'number' && !Number.isFinite(value)) {
+    throw new Error('value must be a finite number.')
+  }
+  return String(value)
+}
+
 function csInt(value, fallback = -1) {
   return Number.isInteger(value) ? String(value) : String(fallback)
 }
@@ -97,8 +127,8 @@ const PRELUDE = `Func<SerializedProperty, object> CurrentValue = p => {
  */
 export function buildSceneSetBody(request) {
   const literal = (text) => csString(text)
-  const valueJson = request.value === undefined ? null : JSON.stringify(request.value)
-  const raw = valueJson === null ? 'null' : literal(valueJson)
+  const encoded = valueText(request.value)
+  const raw = encoded === null ? 'null' : literal(encoded)
   const op = literal(request.op)
   return `var scene = default(Scene);
 for (var i = 0; i < SceneManager.sceneCount; i++) { var s = SceneManager.GetSceneAt(i); if (s.path == ${literal(request.scenePath)}) { scene = s; break; } }

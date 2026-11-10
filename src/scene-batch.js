@@ -12,7 +12,7 @@
 //   undo-batch       revert those writes from a token the batch returned, so a
 //                    half-applied edit is recoverable without the user's Ctrl+Z.
 
-import { csString } from './scene-set.js'
+import { csString, valueText } from './scene-set.js'
 
 /** Writes accepted in one batch; each is one SerializedProperty operation. */
 const BATCH_LIMIT = 200
@@ -194,7 +194,9 @@ function validateWrite(write, index) {
     componentType,
     componentIndex: Number.isInteger(write.component_index) ? write.component_index : null,
     propertyPath,
-    value: JSON.stringify(write.value),
+    // The snippet hands this straight to `WriteValue`, which reads plain text
+    // (see `valueText`); a JSON encoding would store the quotes for strings.
+    value: valueText(write.value),
   }
 }
 

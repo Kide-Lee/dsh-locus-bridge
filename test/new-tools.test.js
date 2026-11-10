@@ -18,6 +18,7 @@ import {
 import { buildCaptureRequest, parseCapture } from '../src/capture.js'
 import { readAssetGuid, projectRelative, assertSearchableAsset } from '../src/asset-graph.js'
 import {
+  batchBody,
   batchUndoToken,
   componentSearchBody,
   validateBatch,
@@ -298,7 +299,11 @@ test('usages list attach points for the script guid', async () => {
   )
   assert.equal(requests.length, 1)
   assert.match(requests[0], /var targetGuid = "fedcba9876543210fedcba9876543210"/)
-  assert.match(requests[0], /var wantedMember = null/)
+  // Regression: a `var wantedMember = null` binding was CS0815 whenever no
+  // member was asked for, so the whole snippet failed to compile. The member
+  // name only ever entered through the inline check, so no such binding exists.
+  assert.doesNotMatch(requests[0], /var wantedMember/)
+  assert.doesNotMatch(requests[0], /=\s*null;\s*$/m)
 })
 
 test('usages with a member name that field in the scan', async () => {
@@ -320,8 +325,56 @@ test('usages with a member name that field in the scan', async () => {
       return undefined
     } },
   )
-  assert.match(requests[0], /var wantedMember = "maxHealth"/)
   assert.match(requests[0], /FindProperty\("maxHealth"\)/)
+})
+
+// ── generated C# must compile ───────────────────────────────────────────────
+
+/**
+ * Every generated snippet is compiled by Unity, so a text-only assertion can
+ * bless source that no C# compiler accepts (`var x = null` → CS0815). These
+ * checks catch the two shapes that actually shipped broken.
+ */
+test('generated snippets never assign null to an implicitly typed variable', async () => {
+  // `usages` without a member is the shape that shipped broken: the snippet
+  // carried `var wantedMember = null` and Unity answered CS0815, so the whole
+  // call failed before doing any work. Capture the snippet the tool really
+  // sends rather than re-deriving it.
+  const requests = []
+  await withEditor(
+    async () => {
+      await tools.unity_asset_graph.execute(
+        { action: 'usages', path: 'Assets/Scripts/PlayerController.cs', file_path: 'Assets/Scenes/Main.unity' },
+        ctx(),
+      )
+    },
+    { onMessage: (request) => {
+      if (request.type === 'execute_code') requests.push(request.message)
+      return undefined
+    } },
+  )
+  assert.equal(requests.length, 1)
+  assert.doesNotMatch(requests[0], /\bvar\s+\w+\s*=\s*null\b/, 'usages must not emit "var x = null" (CS0815)')
+
+  const local = {
+    'find(component)': componentSearchBody(validateComponentSearch({ component_type: 'Transform' })),
+    'batch': batchBody(
+      validateBatch({
+        edits: [
+          {
+            scene_path: 'Assets/Scenes/Main.unity',
+            object_path: 'Root/Player',
+            component_type: 'Transform',
+            property_path: 'm_LocalPosition.x',
+            value: 1,
+          },
+        ],
+      }),
+    ),
+  }
+  for (const [label, body] of Object.entries(local)) {
+    assert.doesNotMatch(body, /\bvar\s+\w+\s*=\s*null\b/, `${label} must not emit "var x = null" (CS0815)`)
+  }
 })
 
 // ── unity_scene find / batch / undo ─────────────────────────────────────────
@@ -360,8 +413,36 @@ test('batch validates every write and reports the offending index', () => {
     ],
   })
   assert.equal(request.writes.length, 1)
-  assert.equal(request.writes[0].value, '"1,2,3"')
+  // Plain text, not JSON: the snippet's WriteValue reads the bare value. A JSON
+  // encoding stored the quotes as part of a string (`"1,2,3"` in the scene).
+  assert.equal(request.writes[0].value, '1,2,3')
   assert.equal(request.save, true)
+})
+
+test('batch encodes scalar values as the plain text WriteValue parses', () => {
+  const write = (value) =>
+    validateBatch({
+      edits: [
+        {
+          scene_path: 'S',
+          object_path: 'P',
+          component_type: 'T',
+          property_path: 'x',
+          value,
+        },
+      ],
+    }).writes[0].value
+  // Strings keep no JSON quotes; numbers/bools keep their C#-parseable form.
+  assert.equal(write('Hello World'), 'Hello World')
+  assert.equal(write('say "hi"'), 'say "hi"')
+  assert.equal(write(1.5), '1.5')
+  assert.equal(write(true), 'true')
+  // A vector stays the comma text the snippet splits on.
+  assert.equal(write('0,1,0'), '0,1,0')
+  // Compound values have no plain-text form the snippet can apply.
+  assert.throws(() => write({ x: 1 }), /value must be a scalar/)
+  assert.throws(() => write([1, 2]), /value must be a scalar/)
+  assert.throws(() => write(Number.NaN), /finite number/)
 })
 
 test('an undo token carries the value each batch write replaced', () => {
