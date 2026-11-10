@@ -14,9 +14,10 @@
 
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { formatSetup, inspectSetup, installPackage, manifestDependency, writeMarker } from '../src/setup.js'
+import { editorRunningError, formatSetup, inspectSetup, installPackage, manifestDependency, writeMarker } from '../src/setup.js'
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
+const SELF = fileURLToPath(import.meta.url)
 
 function parseArgs(argv) {
   const options = { project: null, install: false, markerOnly: false }
@@ -41,10 +42,23 @@ function main() {
 
   const changed = []
   let installed = null
-  if (!options.markerOnly && !before.package) {
-    installed = installPackage(project)
-    changed.push(`installed ${installed.relativeTarget} (v${installed.version})`)
-    if (installed.keptSkills > 0) changed.push(`kept ${installed.keptSkills} file(s) under Editor/Skills`)
+  if (!options.markerOnly) {
+    // A running editor holds the package assemblies. Say so before the copy
+    // starts, and exit non-zero: this is a precondition, not a crash.
+    if (before.editorRunning) {
+      console.error(editorRunningError(project).message)
+      console.error(`\nClose the editor, then run:\n  node "${SELF}" "${project}" --install`)
+      process.exit(2)
+    }
+    // Reinstall when anything about the package is stale, not only when it is
+    // absent: an incomplete or out-of-date copy is exactly what --install fixes.
+    const stale = !before.package || before.package.declaredOnly || before.brokerMissingForHost ||
+      (before.package.missingAssemblies?.length ?? 0) > 0
+    if (stale) {
+      installed = installPackage(project)
+      changed.push(`installed ${installed.relativeTarget} (v${installed.version})`)
+      if (installed.keptSkills > 0) changed.push(`kept ${installed.keptSkills} file(s) under Editor/Skills`)
+    }
   }
   if (!before.marker.present) {
     const marker = writeMarker(project, before.endpoint)

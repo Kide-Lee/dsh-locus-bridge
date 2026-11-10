@@ -72,6 +72,18 @@ node scripts/install-unity-package.mjs <project> --install
 That copies the bundled package into `Packages/com.farlocus.locus`, writes
 `Library/Locus/NativeBridge.enabled`, and verifies the result. It requires the editor to be closed.
 
+**A running editor is refused.** The test is `<project>/Temp/UnityLockfile`: Unity creates it on
+launch and holds an exclusive lock, while a file left by a crash does not count (taking the lock
+proves nobody owns it). When it is held the install never starts, exits 2, and asks for a restart:
+
+```
+The Unity Editor has <project> open. Close the editor and run this again: ...
+```
+
+Failing halfway instead is worse than useless: on Windows removing the old package fails with
+`EPERM`, and even where the delete succeeds the editor keeps the assemblies it already loaded, so
+the next reload misbehaves for reasons nothing local explains.
+
 When the project is fine and only the editor is shut, the diagnosis prints **nothing**: "the package is in
 place" is the absence of a finding, and no finding costs no context. The tool definitions therefore match the
 official client's exactly: installing is rare enough that it must not occupy context permanently.

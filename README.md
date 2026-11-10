@@ -69,6 +69,17 @@ node scripts/install-unity-package.mjs <工程路径> --install
 它会把随包附带的 Locus 包复制进 `Packages/com.farlocus.locus`、写好
 `Library/Locus/NativeBridge.enabled`，并复核结果。要求编辑器已关闭。
 
+**编辑器开着时会被拒绝。** 判据是 `<工程>/Temp/UnityLockfile`：Unity 启动工程时创建它
+并持有独占锁，异常退出留下的陈旧文件不算（能拿到锁就说明没人持有）。命中时安装不会开始，
+退出码 2，并提示先关闭编辑器：
+
+```
+The Unity Editor has <工程> open. Close the editor and run this again: ...
+```
+
+之所以不接受「复制到一半再报错」：Windows 上删除旧包会以 `EPERM` 失败，而即便删除成功，
+编辑器仍持着已加载的程序集，之后重载会出现难以归因的行为。
+
 项目本身没问题、只是编辑器没开时，诊断**不输出任何内容**——「插件已就位」不是结论，
 没有结论就不占上下文。工具定义因此与官方客户端**完全一致**：安装这件事不常发生，
 不该长期占用上下文。

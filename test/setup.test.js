@@ -16,7 +16,17 @@ import assert from 'node:assert/strict'
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
-import { formatSetup, inspectSetup, installPackage, manifestDependency, nativeBrokerFor, payloadDir, writeMarker } from '../src/setup.js'
+import {
+  editorIsRunning,
+  editorRunningError,
+  formatSetup,
+  inspectSetup,
+  installPackage,
+  manifestDependency,
+  nativeBrokerFor,
+  payloadDir,
+  writeMarker,
+} from '../src/setup.js'
 
 /**
  * Point this process at a fixture package for the duration of one test.
@@ -80,7 +90,11 @@ test('inspectSetup reports an empty project as missing both package and marker',
     result.problems.map((p) => p.code).sort(),
     ['marker_missing', 'package_missing'],
   )
-  assert.match(result.endpoint, /\.sock$/)
+  // The endpoint shape follows the host, not the `platform` override above:
+  // `resolvePipeName` asks `process.platform` whether to derive a socket path or
+  // a Win32 pipe name. Asserting `.sock` unconditionally only passed on POSIX.
+  const expectedShape = process.platform === 'win32' ? /^\\\\\.\\pipe\\locus_unity_native_/ : /\.sock$/
+  assert.match(result.endpoint, expectedShape)
 })
 
 test('the payload broker is reported for the host platform', () => {
@@ -285,4 +299,108 @@ test('a broken package does not advertise an install it cannot fix', (t) => {
   const text = formatSetup(inspectSetup(root, { platform: 'linux' }))
   assert.match(text, /Locus\.Json\.dll/)
   assert.doesNotMatch(text, /--install/, 're-copying cannot supply a missing assembly')
+})
+
+// ── a running editor ────────────────────────────────────────────────────────
+//
+// Unity holds an exclusive lock on `Temp/UnityLockfile` for the life of the
+// process. That lock is cross-process: no second `open()` inside this process
+// can reproduce it on POSIX, where an in-process reopen always succeeds. The
+// probe is therefore injectable, and these tests stand in an `open` that fails
+// the way the real syscall does when another process owns the file.
+
+/** A probe that behaves as if an editor holds the lockfile. */
+function lockedByEditor() {
+  return () => {
+    const error = new Error('EPERM: resource busy or locked, open Temp/UnityLockfile')
+    error.code = 'EPERM'
+    throw error
+  }
+}
+
+/** Create `Temp/UnityLockfile` the way a crashed editor leaves one behind. */
+function staleLockfile(root) {
+  mkdirSync(join(root, 'Temp'), { recursive: true })
+  writeFileSync(join(root, 'Temp', 'UnityLockfile'), '')
+}
+
+test('a project with no Temp/UnityLockfile has no editor running', () => {
+  const root = project()
+  assert.equal(editorIsRunning(root), false)
+})
+
+test('a stale UnityLockfile with no holder does not count as a running editor', () => {
+  const root = project()
+  staleLockfile(root)
+  // A crashed editor leaves the file behind; only a held lock proves it is up.
+  assert.equal(editorIsRunning(root), false)
+})
+
+test('an unreadable lockfile that is not a lock failure is not "editor running"', () => {
+  const root = project()
+  const probe = () => {
+    const error = new Error('EACCES: permission denied')
+    error.code = 'EACCES'
+    throw error
+  }
+  // EACCES is in the held set: an unreadable file is reported as "close it",
+  // because that is the only advice that can help either way.
+  assert.equal(editorIsRunning(root, { open: probe }), true)
+})
+
+test('inspectSetup reports editorRunning so a caller can ask for a restart', () => {
+  const root = project()
+  staleLockfile(root)
+  assert.equal(inspectSetup(root, { platform: 'linux' }).editorRunning, false)
+  assert.equal(inspectSetup(root, { platform: 'linux', open: lockedByEditor() }).editorRunning, true)
+})
+
+test('installPackage refuses while the editor holds the project', (t) => {
+  const root = project()
+  usePayloadFixture(t, fakePackage)
+  staleLockfile(root)
+  assert.throws(
+    () => installPackage(root, { open: lockedByEditor() }),
+    (error) => {
+      assert.equal(error.code, 'EDITOR_RUNNING', 'callers branch on the code, not the text')
+      assert.equal(error.name, 'EditorRunningError')
+      assert.match(error.message, /close the editor/i)
+      return true
+    },
+  )
+})
+
+test('a refused install leaves the project untouched', (t) => {
+  const root = project()
+  usePayloadFixture(t, fakePackage)
+  staleLockfile(root)
+  assert.throws(() => installPackage(root, { open: lockedByEditor() }))
+  assert.equal(existsSync(join(root, 'Packages', 'com.farlocus.locus')), false, 'nothing was copied')
+  assert.equal(
+    existsSync(join(root, 'Library', 'Locus', 'package-staging')),
+    false,
+    'no staging directory survives the refusal',
+  )
+})
+
+test('the install guide tells the caller to close a running editor', (t) => {
+  const root = project()
+  usePayloadFixture(t, fakePackage)
+  staleLockfile(root)
+
+  const closed = formatSetup(inspectSetup(root, { platform: 'linux' }))
+  assert.match(closed, /has no Locus Unity package/)
+  assert.match(closed, /Run it with the Unity Editor closed/)
+
+  const open = formatSetup(inspectSetup(root, { platform: 'linux', open: lockedByEditor() }))
+  assert.match(open, /Close the Unity Editor first/)
+  assert.doesNotMatch(open, /Run it with the Unity Editor closed/)
+})
+
+test('editorRunningError carries the project and one actionable sentence', () => {
+  const root = project()
+  const error = editorRunningError(root)
+  assert.equal(error.code, 'EDITOR_RUNNING')
+  assert.equal(error.projectRoot, root)
+  assert.match(error.message, /Close the editor and run this again/)
 })

@@ -21,7 +21,7 @@
 //     editor is closed or not yet installed.
 
 import { createHash } from 'node:crypto'
-import { mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { closeSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { resolvePipeName } from './pipe-name.js'
@@ -30,6 +30,8 @@ const PACKAGE_ID = 'com.farlocus.locus'
 /** Where the editor loads the package from, matching upstream's install layout. */
 const INSTALL_DIR = join('Packages', PACKAGE_ID)
 const MARKER = join('Library', 'Locus', 'NativeBridge.enabled')
+/** Unity's own "this project is open" advert: created on launch, locked while it runs. */
+const UNITY_LOCKFILE = join('Temp', 'UnityLockfile')
 
 /** Assemblies the package needs on disk, matched by file name at any depth. */
 const REQUIRED_ASSEMBLIES = [
@@ -93,6 +95,52 @@ function isDir(path) {
     return false
   }
 }
+
+/**
+ * Whether the Unity Editor currently has this project open.
+ *
+ * Unity creates `Temp/UnityLockfile` on launch and holds an exclusive lock on it
+ * for the life of the process (that lock is what stops a second editor opening
+ * the same project). The file is only deleted on a clean exit, so its mere
+ * presence proves nothing: a crashed editor leaves it behind. Trying to take the
+ * same exclusive handle is the test — if it fails, an editor owns the file.
+ *
+ * Windows reports a locked file as EBUSY or EPERM depending on the share mode
+ * Unity asked for, and POSIX locks surface as EAGAIN/EWOULDBLOCK; every one of
+ * them means "someone holds it". A missing file means the editor has never run
+ * or exited cleanly, so nothing holds the project either way.
+ *
+ * `open` exists for tests: an in-process second open of a file is allowed on
+ * POSIX, so no fixture can reproduce Unity's cross-process lock without a
+ * stand-in for the failing syscall.
+ *
+ * @param projectRoot - the folder containing `Assets/` and `ProjectSettings/`.
+ * @param options.open - probe used instead of `fs.openSync` (tests only).
+ * @returns true when an editor process is holding the project.
+ */
+export function editorIsRunning(projectRoot, { open = openSync } = {}) {
+  const lockfile = join(projectRoot, UNITY_LOCKFILE)
+  let fd
+  try {
+    // `r+` because the lock Unity takes is exclusive: a read-only handle would
+    // be refused on Windows for reasons unrelated to the lock.
+    fd = open(lockfile, 'r+')
+  } catch (error) {
+    if (error?.code === 'ENOENT' || error?.code === 'ENOTDIR') return false
+    return LOCK_HELD.has(error?.code)
+  }
+  // We got the handle, so no editor is holding it. Drop it immediately: the
+  // caller may then delete the file as part of a clean install.
+  try {
+    closeSync(fd)
+  } catch {
+    // A close failure cannot change the answer.
+  }
+  return false
+}
+
+/** errno values that mean "another process holds this file". */
+const LOCK_HELD = new Set(['EBUSY', 'EPERM', 'EACCES', 'EAGAIN', 'EWOULDBLOCK'])
 
 /** First path under `root` whose base name is `name` (breadth-first), or null. */
 function findByName(root, name) {
@@ -193,7 +241,7 @@ export function manifestDependency(projectRoot) {
  * and `installPackage` acts on them. `ready` means "connectable as-is", which
  * requires the package, the broker library, and the marker.
  */
-export function inspectSetup(projectRoot, { platform = process.platform, env = process.env } = {}) {
+export function inspectSetup(projectRoot, { platform = process.platform, env = process.env, open } = {}) {
   const pkg = installedPackage(projectRoot)
   const dependency = manifestDependency(projectRoot)
   const broker = nativeBrokerFor(platform)
@@ -217,6 +265,10 @@ export function inspectSetup(projectRoot, { platform = process.platform, env = p
   const payloadBrokerPresent = broker ? isFile(join(payloadRoot, broker.relative)) : false
 
   const problems = []
+  // Not a defect — the editor simply owns the package right now. Reported so the
+  // caller can ask for a restart instead of running into EPERM several steps
+  // into an install.
+  const editorRunning = editorIsRunning(projectRoot, { open })
   if (!packageRoot) problems.push({ code: 'package_missing', detail: `${PACKAGE_ID} is not installed in this project.` })
   if (packageRoot && missingAssemblies.length > 0) {
     problems.push({ code: 'package_incomplete', detail: `The installed package is missing ${missingAssemblies.join(', ')}.` })
@@ -263,6 +315,7 @@ export function inspectSetup(projectRoot, { platform = process.platform, env = p
     brokerMissingForHost: Boolean(broker && !brokerPresent && packageRoot),
     marker: { present: markerPresent, endpoint: markerEndpoint, envOverride },
     endpoint,
+    editorRunning,
     payload: { available: payloadAvailable, version: payloadVersion(env), brokerForHost: payloadBrokerPresent },
     problems,
     ready: problems.length === 0,
@@ -319,7 +372,7 @@ function walk(root, dir, out) {
  * silently rewritten — deleting another tool's manifest line is not this
  * module's decision.
  */
-export function installPackage(projectRoot) {
+export function installPackage(projectRoot, { open } = {}) {
   const payloadRoot = payloadDir()
   if (!isFile(join(payloadRoot, 'package.json'))) {
     throw new Error(
@@ -327,6 +380,13 @@ export function installPackage(projectRoot) {
         'Run `npm run sync:payload` against a Locus checkout that has the compiled DLLs.',
     )
   }
+
+  // Refuse before touching anything. The editor holds the package assemblies
+  // open, so replacing the tree cannot succeed while it runs: on Windows the
+  // delete of the old package fails with EPERM, and even where it succeeds the
+  // editor keeps the previous assemblies loaded and a later reload surprises the
+  // person. A clear "close it first" beats a bare errno from step five.
+  if (editorIsRunning(projectRoot, { open })) throw editorRunningError(projectRoot)
 
   const target = join(projectRoot, INSTALL_DIR)
   const staging = join(projectRoot, 'Library', 'Locus', 'package-staging')
@@ -344,7 +404,15 @@ export function installPackage(projectRoot) {
       writeFileSync(dest, readFileSync(source))
     }
     writeFileSync(join(staging, '.locus_plugin_hash'), `${payloadDigest(payloadRoot)}\n`)
-    rmSync(target, { recursive: true, force: true })
+    try {
+      rmSync(target, { recursive: true, force: true })
+    } catch (error) {
+      // A lock taken between the probe above and now, or a stray handle inside
+      // the editor, arrives as a filesystem error. Translate it: the raw text
+      // names a path in the temp tree and reads as a permissions bug.
+      if (LOCK_HELD.has(error?.code)) throw editorRunningError(projectRoot)
+      throw error
+    }
     mkdirSync(dirname(target), { recursive: true })
     try {
       renameSync(staging, target)
@@ -360,6 +428,25 @@ export function installPackage(projectRoot) {
   }
 
   return { target, relativeTarget: INSTALL_DIR.split('\\').join('/'), keptSkills: preserved.length, version: payloadVersion() }
+}
+
+/**
+ * The refusal a running editor earns, as one actionable sentence.
+ *
+ * Exported so the installer script can recognise the condition without
+ * string-matching, and so a caller can report it as a state rather than a crash.
+ */
+export function editorRunningError(projectRoot) {
+  const error = new Error(
+    `The Unity Editor has ${projectRoot} open. Close the editor and run this again: ` +
+      'it holds the package assemblies, so the install would either fail or leave ' +
+      'the already-loaded assemblies in place.',
+  )
+  error.name = 'EditorRunningError'
+  /** Lets callers branch on the condition instead of parsing the message. */
+  error.code = 'EDITOR_RUNNING'
+  error.projectRoot = projectRoot
+  return error
 }
 
 /** Files under `Editor/Skills` the user wrote, which an upgrade must keep. */
@@ -466,7 +553,10 @@ function installInstructions(result) {
       `  node ${installerScript()} ${result.projectRoot} --install`,
       'That copies the package into ' + INSTALL_DIR.split('\\').join('/') + ', writes ' +
         'Library/Locus/NativeBridge.enabled, and verifies the result.',
-      'Run it with the Unity Editor closed: Unity holds the package assemblies open.',
+      result.editorRunning
+        ? 'Close the Unity Editor first: it has this project open and holds the package assemblies, ' +
+          'so the install will refuse to run until it is closed.'
+        : 'Run it with the Unity Editor closed: Unity holds the package assemblies open.',
       'Then reopen the editor and run unity_status again.',
     )
   } else {
