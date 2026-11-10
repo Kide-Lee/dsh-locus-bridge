@@ -2,30 +2,21 @@
 
 Instructions for AI agents working in this repository.
 
-## Unity project selection
+## Choosing the Unity project
 
-This repository drives one Unity project, already recorded in `.locus.json`:
+**Decide for yourself which Unity project a call targets; do not ask the human.**
 
-```json
-{ "project": "unity-test" }
-```
+There is exactly one Unity project here — `unity-test/` (it holds `Assets/` and
+`ProjectSettings/`, which is what makes a directory a Unity project). Because of
+that, the `unity_*` tools find it unaided: they search the working directory and
+up to three levels below it, so `unity_status` with no `project_path` resolves
+`unity-test/` from the repository root or any subdirectory.
 
-**Do not ask the human which Unity project to use.** Call the `unity_*` tools
-without `project_path`; resolution reads `.locus.json` and targets
-`unity-test/`. If a call fails with "not a Unity project", fix the resolved path
-the error names — do not fall back to asking.
-
-Resolution order (highest first), implemented in `src/args.js`:
-
-1. an explicit `project_path` argument;
-2. the nearest `.locus.json` / `locus.json` at or above the working directory;
-3. the working directory itself, when it is a Unity project;
-4. the shallowest Unity project within three levels below the working directory;
-5. otherwise an error listing the candidates.
-
-Only pass `project_path` to override the recorded choice (for example to point at
-a different checkout). When several Unity projects exist and none is recorded,
-add `{"project": "<dir>"}` to `.locus.json` rather than asking a human per call.
+If this repository grows a second Unity project, or you need to target a
+different checkout, pass `project_path` explicitly. When a call reports several
+candidates, pick the one the request is about and pass it — the ambiguity is
+information, not a reason to ask. Only ask a human when nothing in the request
+or the repository indicates which project is meant.
 
 ## What the Unity tools need
 
@@ -42,8 +33,8 @@ add `{"project": "<dir>"}` to `.locus.json` rather than asking a human per call.
 
 ## Editing this plugin
 
-- `npm test` runs the suite (68+ tests). `npm run typecheck` checks module
-  wiring; `node scripts/dump-tools.mjs` validates every tool schema.
+- `npm test` runs the suite. `npm run typecheck` checks module wiring;
+  `node scripts/dump-tools.mjs` validates every tool schema.
 - `src/tools.js` holds the seven tool definitions; `src/args.js` owns project
   resolution and is covered by `test/args.test.js`.
 - `Locus/` is a separate upstream checkout (its own git repository). The Linux

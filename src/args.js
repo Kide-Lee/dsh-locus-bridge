@@ -2,21 +2,18 @@
 //
 // Precedence (highest first):
 //   1. an explicit `project_path` argument;
-//   2. the nearest Locus project config found in the Session cwd or above it
-//      (`.locus.json` / `.locus.yaml`-free simple JSON, see `locus.json` below);
-//   3. the Session cwd when it is a Unity project;
-//   4. the shallowest Unity project found within `PROJECT_SEARCH_DEPTH` levels;
-//   5. an error that lists the candidates.
+//   2. the Session cwd when it is a Unity project;
+//   3. the shallowest Unity project found within `PROJECT_SEARCH_DEPTH` levels,
+//      which covers a repository whose project sits in a subdirectory;
+//   4. an error that lists the candidates.
 //
-// Step 2 exists so a repository can name its editor project once — either in a
-// checked-in config file or by pointing AGENTS.md at it — instead of the agent
-// having to ask a human on every call.
+// There is deliberately no recorded-project file: workspace instructions
+// (AGENTS.md and friends) already tell the model which project a repository
+// drives, and an explicit `project_path` is how that choice becomes concrete.
+// A second, machine-readable copy would only be able to contradict the prose.
 
-import { readdirSync, readFileSync, statSync } from 'node:fs'
-import { dirname, isAbsolute, join, parse, resolve } from 'node:path'
-
-/** Names the Locus project config may use, nearest one wins. */
-export const PROJECT_CONFIG_FILES = ['.locus.json', 'locus.json']
+import { existsSync, readdirSync, statSync } from 'node:fs'
+import { dirname, isAbsolute, join, resolve } from 'node:path'
 
 /** Windows drive / UNC paths are absolute even when the host is Linux or macOS. */
 export function isAbsoluteProjectPath(value) {
@@ -123,103 +120,15 @@ function subdirectories(dir) {
 }
 
 /**
- * Read the Locus project config from `dir`, or `null` when there is none.
- *
- * Only `project` is consumed here; the file is intentionally tiny and shared
- * with other tooling, so unknown keys are ignored rather than rejected.
- * `project` is resolved relative to the config file, which is what a checked-in
- * `{ "project": "unity-test" }` at a repository root means.
- */
-export function readProjectConfig(dir) {
-  for (const name of PROJECT_CONFIG_FILES) {
-    const file = join(dir, name)
-    let text
-    try {
-      text = readFileSync(file, 'utf8')
-    } catch {
-      continue
-    }
-    let parsed
-    try {
-      parsed = JSON.parse(stripJsonComments(text))
-    } catch (error) {
-      throw new Error(`${file} is not valid JSON: ${error.message}`)
-    }
-    const value = typeof parsed?.project === 'string' ? parsed.project.trim() : ''
-    if (!value) continue
-    const project = isAbsoluteProjectPath(value) ? value : resolve(dir, value)
-    return { file, project: isAbsolute(project) ? resolve(project) : project, raw: value }
-  }
-  return null
-}
-
-/**
- * The nearest project config at or above `dir`.
- *
- * Stops at the filesystem root. A config whose `project` names something that is
- * not a Unity project is reported rather than skipped: silently ignoring a
- * deliberate setting would send the agent back to guessing.
- */
-export function findProjectConfig(dir) {
-  let current = resolve(dir)
-  const root = parse(current).root
-  for (;;) {
-    const config = readProjectConfig(current)
-    if (config) return config
-    if (current === root) return null
-    const parent = dirname(current)
-    if (parent === current) return null
-    current = parent
-  }
-}
-
-/** Strip `//` and `/* *\/` comments so a config may be annotated. */
-function stripJsonComments(text) {
-  let out = ''
-  let index = 0
-  let inString = false
-  let escaped = false
-  while (index < text.length) {
-    const ch = text[index]
-    if (inString) {
-      out += ch
-      if (escaped) escaped = false
-      else if (ch === '\\') escaped = true
-      else if (ch === '"') inString = false
-      index += 1
-      continue
-    }
-    if (ch === '"') {
-      inString = true
-      out += ch
-      index += 1
-      continue
-    }
-    if (ch === '/' && text[index + 1] === '/') {
-      while (index < text.length && text[index] !== '\n') index += 1
-      continue
-    }
-    if (ch === '/' && text[index + 1] === '*') {
-      index += 2
-      while (index < text.length && !(text[index] === '*' && text[index + 1] === '/')) index += 1
-      index += 2
-      continue
-    }
-    out += ch
-    index += 1
-  }
-  return out
-}
-
-/**
  * Resolve the Unity project root for a call.
  *
  * Precedence:
  *   1. explicit `project_path`;
- *   2. the nearest project config at or above the Session cwd;
- *   3. the Session cwd when it already is a Unity project;
- *   4. the shallowest Unity project within `PROJECT_SEARCH_DEPTH` levels;
- *   5. an error naming the candidates / asking for `project_path`.
+ *   2. the Session cwd when it already is a Unity project;
+ *   3. the shallowest Unity project within `PROJECT_SEARCH_DEPTH` levels below
+ *      the cwd, then below each ancestor up to the repository root — covering a
+ *      session that starts inside `src/` or inside the project itself;
+ *   4. an error naming the candidates / asking for `project_path`.
  *
  * Every branch validates before returning, so a wrong path fails here instead of
  * deriving a project key that silently matches no broker socket.
@@ -238,17 +147,6 @@ export function resolveProjectRoot(projectPath, ctx = {}) {
     return root
   }
 
-  const config = findProjectConfig(cwd)
-  if (config) {
-    if (!isUnityProject(config.project)) {
-      throw new Error(
-        `${config.file} names project "${config.raw}", which is not a Unity project ` +
-          `(expected Assets/ and ProjectSettings/ in ${config.project}).`,
-      )
-    }
-    return config.project
-  }
-
   if (isUnityProject(cwd)) return resolve(cwd)
 
   const found = findUnityProjects(cwd)
@@ -260,15 +158,39 @@ export function resolveProjectRoot(projectPath, ctx = {}) {
     if (nearest.length === 1) return nearest[0].path
     throw new Error(
       `The working directory ${cwd} contains several Unity projects ${shallowest} level(s) down ` +
-        `(${nearest.map((candidate) => candidate.path).join(', ')}); pick one with project_path, ` +
-        `or record it once in ${join(cwd, PROJECT_CONFIG_FILES[0])} as {"project": "<name>"} ` +
-        '(or name it in AGENTS.md) so later calls need no choice.',
+        `(${nearest.map((candidate) => candidate.path).join(', ')}); pass project_path to choose one.`,
     )
   }
+  // Nothing below the cwd: a session started inside a subdirectory of the
+  // repository (`src/`, or the project's own `Assets/`) should still find the
+  // project its repository drives, so look below each ancestor in turn.
+  for (const ancestor of ancestors(cwd)) {
+    const up = findUnityProjects(ancestor, { maxDepth: 1 })
+    if (up.length === 1) return up[0].path
+    if (up.length > 1) break
+  }
+
   throw new Error(
     `The working directory ${cwd} is not a Unity project and has none within ${PROJECT_SEARCH_DEPTH} levels ` +
-      'below it; pass project_path (the folder containing Assets/ and ProjectSettings/).',
+      'below it or beside its ancestors; pass project_path (the folder containing Assets/ and ProjectSettings/).',
   )
+}
+
+/**
+ * Parent directories of `dir`, nearest first, stopping below the repository root
+ * (the directory holding `.git`) so a search never escapes the project.
+ */
+function ancestors(dir) {
+  const chain = []
+  let current = resolve(dir)
+  for (;;) {
+    const parent = dirname(current)
+    if (parent === current) break
+    chain.push(parent)
+    if (existsSync(join(parent, '.git'))) break
+    current = parent
+  }
+  return chain
 }
 
 /**

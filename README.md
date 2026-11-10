@@ -62,36 +62,27 @@ dsh plugin --profile <profile> add /path/to/dsh-locus-bridge
 `project_path` 的解析对齐 Locus 桌面端（`unity_bridge::is_unity_project` + `cli_driver::resolve_project_path`）：
 
 1. 显式 `project_path`（绝对路径，或相对 Session 工作目录）——**并校验**目录同时含 `Assets/` 与 `ProjectSettings/`；
-2. 否则读 Session 工作目录**及其祖先目录**里最近的 `.locus.json` / `locus.json` 的 `project` 字段；
-3. 否则若 Session 工作目录本身就是 Unity 工程，就用它；
-4. 否则在 Session 工作目录**向下最多三层**找 Unity 工程（例如仓库根的 `unity-test/`）。广度优先，**最浅的那一层优先**——三层深处才找到的工程不会和一层深处找到的冲突；
-5. 同一最浅层有多个 → 报错列出候选；三层内一个都没有 → 报错提示传 `project_path`。
+2. 否则若 Session 工作目录本身就是 Unity 工程，就用它；
+3. 否则在 Session 工作目录**向下最多三层**找 Unity 工程（例如仓库根的 `unity-test/`）。广度优先，**最浅的那一层优先**——三层深处才找到的工程不会和一层深处找到的冲突；
+4. 向下没找到时，再在每个**祖先目录**旁找一层（到最近的 `.git` 为止）。这样从 `src/`、`docs/`、甚至工程自己的 `Assets/` 里发起调用，也能找到本仓库驱动的工程；
+5. 同一最浅层有多个 → 报错列出候选；都没有 → 报错提示传 `project_path`。
 
-### 让 agent 免于每次询问
+### 让 agent 自行选择工程
 
-第 2 步是为了满足「AI 自行选择工程，而不是每次问人」。在仓库根放一个 `.locus.json`（支持 `//` 与 `/* */` 注释）：
+插件**不记录**仓库该用哪个工程，也没有额外的配置文件：选择由模型根据仓库里的说明自行判断。本仓库的 `AGENTS.md` 就写明了唯一的工程是 `unity-test/`，DSH 会自动加载 `AGENTS.md` / `CLAUDE.md` 到上下文，模型据此决定是否传 `project_path`。
 
-```json
-{
-  // 本仓库驱动的 Unity 工程
-  "project": "unity-test"
-}
-```
+这样做的理由是避免两处真相：机器可读的配置和散文说明一旦不一致，读配置的那条路径就会覆盖掉人的意图。工程唯一时第 2–3 步本来就能自动命中，配置只是多余的一层。搜索会跳过 `.git`、`node_modules`、Unity 的 `Library/Temp/Obj/Logs/UserSettings` 等生成目录，且**不会深入已识别的工程内部**（工程自己的 `Packages/` 里嵌套的包不算候选）。符号链接不跟随，理由与下面 `realpath` 那条相同。
 
-`project` 相对该配置文件解析。之后所有 `unity_*` 调用都可以省略 `project_path`，即使 agent 从子目录发起调用（会向上找到仓库根的配置）。若仓库里有多个 Unity 工程，写这一行即可避免歧义报错。
+、`node_modules`、Unity 的 `Library/Temp/Obj/Logs/UserSettings` 等生成目录，且**不会深入已识别的工程内部**（工程自己的 `Packages/` 里嵌套的包不算候选）。符号链接不跟随，理由与下面 `realpath` 那条相同。
 
-配置指向的目录不是 Unity 工程时**报错而不是忽略** —— 悄悄回退会让 agent 重新去猜，正是这个字段要消除的行为。也可以只在 `AGENTS.md` 里点名工程（DSH 会自动加载 `AGENTS.md` / `CLAUDE.md`），但 `.locus.json` 更强：它是机器可读的，任何工具都能用。
-
-搜索会跳过 `.git`、`node_modules`、Unity 的 `Library/Temp/Obj/Logs/UserSettings` 等生成目录，且**不会深入已识别的工程内部**（工程自己的 `Packages/` 里嵌套的包不算候选）。符号链接不跟随，理由与下面 `realpath` 那条相同。
-
-桌面端没有第 3 步（它只有「显式 `--project`」或「GUI 当前聚焦的 workspace」）。这里放宽一步，是因为 DSH 的 Session 通常起在仓库根而不是 Unity 工程内。路径只做 `resolve()` 折叠 `.`/`..`，**不做 `realpath`**：Unity 用它打开时的路径派生 broker key，跟随符号链接反而可能与编辑器不一致。
+桌面端没有第 3–4 步（它只有「显式 `--project`」或「GUI 当前聚焦的 workspace」）。这里放宽，是因为 DSH 的 Session 可能起在仓库根、也可能起在任意子目录。路径只做 `resolve()` 折叠 `.`/`..`，**不做 `realpath`**：Unity 用它打开时的路径派生 broker key，跟随符号链接反而可能与编辑器不一致。
 
 > 关于 schema：DSH 的 `defineTool()` 用**参数 DSL** 编译 `parameters`（对象节点必须显式 `additionalProperties`、自由 JSON 值用 author-only 的 `type: 'json'`、`required` 只能写在隐式参数属性上），而本插件直接以符合该子集的 JSON Schema 对象书写（隐式参数根、`required: true` 标注、`json` 自由值），`ctx.tools.register` 接受这种定义（与 MCP 桥接一致），`scripts/dump-tools.mjs` 按同一子集校验。若要让 `defineTool` 再编译一遍，用 `registerLocusTools(defineTool)`；`scripts/validate-dsh-tools.mjs` 已用真实 DSH 验证全部 7 个工具。
 
 ## 开发与验证（在 Linux/macOS 上也能跑）
 
 ```bash
-node --test --test-concurrency=1 "test/*.test.js"   # 69 个测试（含假 broker 的 Stream 通道与真 Unix socket）
+node --test --test-concurrency=1 "test/*.test.js"   # 68 个测试（含假 broker 的 Stream 通道与真 Unix socket）
 node scripts/dump-tools.mjs                          # 工具 schema 是否在 DSH 支持子集内
 node scripts/typecheck.mjs                           # 跨模块 import/调用一致性（纯 ESM，无 TS）
 DSH_TOOLS_PATH=/abs/.../dsh-tools/lib/index.js \
