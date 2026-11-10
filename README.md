@@ -6,38 +6,25 @@
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-4b5563?style=flat-square)](#前提条件unity-端无需改动)
 [![Upstream: Locus](https://img.shields.io/badge/upstream-r1n7aro%2FLocus-2d6cdf?style=flat-square&logo=github)](https://github.com/r1n7aro/Locus)
 
-一个 **DSH 插件**：让 DSH 直接扮演 **Locus 客户端**，通过 Locus 原生 broker 操作 Unity 编辑器 —— 不需要启动 Locus 桌面程序，Unity 端也不需要改一行代码。传输层随平台选择：Windows 用命名管道，Linux/macOS 用 Unix 域套接字（配合本仓库 `native/locus_unix_native/` 的 broker 移植）。
+dsh-locus-bridge是一个**DeepSeek harness 插件**。它能让 DSH 直接扮演 Locus 客户端，通过 Locus 原生 broker 操作 Unity 编辑器。
 
-> **本项目是 [Locus](https://github.com/r1n7aro/Locus) 的第三方客户端实现，并非 Locus 官方项目。**
-> Locus 本身（Unity 插件、`locus-native-broker`、桌面端）由 [@r1n7aro](https://github.com/r1n7aro) 开发，文档见 [unity.farlocus.com](https://unity.farlocus.com/)。
-> 本仓库包含基于其 `locus-native-broker` 派生的 POSIX 移植（`native/locus_unix_native/`），按 GPL-3.0-or-later 发布。
+在本项目的`native/`目录中包含了 Locus 官方的 Unity 插件，以及本项目自行构建的兼容Linux/macOS的 Locus Unity 插件。关于 Locus 的更多信息，参见：
 
+- 上游项目： https://github.com/r1n7aro/Locus
+- 文档： https://unity.farlocus.com
+
+## 安装
+可以在DSH中输入如下提示词，来让 AI 安装本插件：
 ```
-Windows:  Unity Editor ──(\\.\pipe\locus_unity_native_<key>)──────── worker(fs 阻塞 I/O) ── LocusClient ── DSH 工具
-Linux:    Unity Editor ──(<runtime>/locus/locus_unity_native_<key>.sock)── worker(net 流)      ── LocusClient ── DSH 工具
+请你帮我安装插件：https://github.com/Kide-Lee/dsh-locus-bridge。如果我的Unity项目没有Locus插件，也请你帮我安装好。
 ```
 
-两条传输共用同一套换行 JSON 协议、`reply_to` 路由与错误码，插件其余部分（重连、`edit session`、撤销守卫）完全一致。
+亦或者也可以在克隆本项目后手动安装：
+```bash
+dsh plugin --profile <profile> add /path/to/dsh-locus-bridge
+```
 
-> 研究依据与完整协议说明见 [`docs/locus-client-bridge.md`](docs/locus-client-bridge.md)，对应 [Locus `4ee37ed0`](https://github.com/r1n7aro/Locus/tree/4ee37ed0)（[v0.9.3](https://github.com/r1n7aro/Locus/releases)，src-tauri `0.9.3`）。
-
-## 上游 Locus
-
-| | |
-|---|---|
-| 仓库 | [github.com/r1n7aro/Locus](https://github.com/r1n7aro/Locus) |
-| 文档 | [unity.farlocus.com/en](https://unity.farlocus.com/en)（[中文](https://unity.farlocus.com/)） |
-| 版本 | [Releases](https://github.com/r1n7aro/Locus/releases) · 本项目对齐 [`4ee37ed0`](https://github.com/r1n7aro/Locus/tree/4ee37ed0) / v0.9.3 |
-| 许可证 | [GPL-3.0-or-later](https://github.com/r1n7aro/Locus/blob/main/LICENSE) |
-
-本仓库**包含**从上游派生的代码（Linux/macOS 的 broker 移植与协议 crate），因此整体按 **GPL-3.0-or-later** 发布；具体哪些文件来自上游、改了哪里，见 [`NOTICE`](NOTICE)。从零构建不需要上游 checkout。
-
-### 许可证
-
-本项目采用 [GPL-3.0-or-later](LICENSE)。`native/locus-native-protocol/` 为上游原样拷贝，`native/locus_unix_native/` 为上游 `locus-native-broker` 的 POSIX 移植（已修改），两者均继承上游的 GPL-3.0-or-later。详见 [`NOTICE`](NOTICE)。
-
-## 工具
-
+安装后模型会看到 7 个以`unity_`开头的工具。
 | 工具 | 作用 | 底层指令 |
 |---|---|---|
 | `unity_status` | 连接检查、编辑器状态（editing/playing/playing_paused）、打开的场景、capabilities、域重载状态 | `status` / `bridge_capabilities` / `get_reload_state` |
@@ -48,126 +35,5 @@ Linux:    Unity Editor ──(<runtime>/locus/locus_unity_native_<key>.sock)─�
 | `unity_asset` | 资产序列化读取 / 带 revision 守卫的原子编辑（`set` 与数组操作）/ undo / reload | `asset_api`（read / apply_batch / disk_reload） |
 | `unity_scene` | 场景对象 search / get（属性树）/ 原子 set（Undo、保存场景） | `search_scene_objects` / `property_tree_read` / 生成的 `execute_code` |
 
-与 Locus 桌面 Agent 对齐的行为：
-
-- `request_editor_status` 必须与实际状态一致，否则直接报错（不自动切模式；切模式用 `unity_play_mode`）。
-- 写操作（`unity_execute` 非 readonly、`unity_asset apply`、`unity_scene set`）自动打开 owner 级 `begin_edit_session`，最后一个写工具结束时 `end_edit_session`（抑制 Auto Refresh，避免写入过程中触发导入/编译）。
-- `unity_recompile`：域重载期间连接会断，插件自动重连并继续轮询 `get_compile_result`；遇到 `recompile_in_progress` 会**接管**正在进行的编译；`superseded` 表示用户 Ctrl+R 等其他编译占用了结果寄存器。
-- `unity_asset`：编辑必须带读取得到的 `snapshot`（或 `expected_revision`），修订号不一致时 Unity 拒绝写入（`revision_conflict`）；undo 依据读取到的旧值生成反向批次，同样带修订号守卫。
-- `unity_scene set`：一次 `execute_code` 完成「解析对象 → Undo → 写 SerializedProperty → 标记并保存场景 → 打印结果」，类型必须已在加载的程序集中（改完 C# 先 `unity_recompile`）。
-- 进度轮询同时充当「客户端还活着」的心跳：Unity 会在 snippet **30 秒无输出**时强制停止。
-- DSH 调用取消 → `cancel_execute_code` + 500ms 有界等待；断线（域重载）→ 返回错误结果，下一次调用自动重连。
-
-## 前提条件（Unity 端，无需改动）
-
-1. 项目已安装 Locus Unity 包（`com.farlocus.locus`）。
-2. Windows 需要 Locus 包自带的 `locus_unity_native.dll`（位于该包的 `Editor/Native/x86_64/`）；Linux/macOS 用本仓库构建的 `liblocus_unity_native.so`（见下文「构建」）。
-3. 原生桥已启用：`<Project>/Library/Locus/NativeBridge.enabled` 存在（内容第一行可指定管道名），或编辑器进程环境变量 `LOCUS_UNITY_NATIVE_BRIDGE=1`。
-4. **broker 与平台匹配**：Windows 用命名管道（`locus_unity_native.dll`）；Linux/macOS 用 Unix 域套接字（`liblocus_unity_native.so`，由本仓库 `native/locus_unix_native/` 构建，放进 Locus 包的 `Editor/Native/linux-x86_64/`）。
-5. 可选：`Library/Locus/BackgroundHook.enabled` —— Unity 窗口失焦时仍持续 tick；否则主线程心跳停滞 >30s 后 broker 会拒绝请求（`native_main_thread_unresponsive`）。
-
-管道名默认为 `\\.\pipe\locus_unity_native_<sha256(规范化项目路径)[0:32]>`，与 Locus 桌面端逐字节一致（`src/pipe-name.js`），也可显式指定。
-
-## 安装到 DSH
-
-插件只依赖 Node 内置模块（`node:worker_threads` / `node:fs` / `node:net`），不需要安装任何 npm 依赖。
-
-```bash
-dsh plugin --profile <profile> add /path/to/dsh-locus-bridge
-```
-
-然后在 profile 的 `cordis.patch.yml` 中启用（插件导出 `name` / `inject: ['tools']` / `apply` / `registerLocusTools`）：
-
-```yaml
-- name: dsh-locus-bridge
-```
-
-安装后模型会看到上面 7 个以 `unity_` 开头的工具。
-
-`project_path` 的解析对齐 Locus 桌面端（`unity_bridge::is_unity_project` + `cli_driver::resolve_project_path`）：
-
-1. 显式 `project_path`（绝对路径，或相对 Session 工作目录）——**并校验**目录同时含 `Assets/` 与 `ProjectSettings/`；
-2. 否则若 Session 工作目录本身就是 Unity 工程，就用它；
-3. 否则在 Session 工作目录**向下最多三层**找 Unity 工程（工程就近放在仓库子目录时可直接命中）。广度优先，**最浅的那一层优先**——三层深处才找到的工程不会和一层深处找到的冲突；
-4. 向下没找到时，再在每个**祖先目录**旁找一层（到最近的 `.git` 为止）。这样从 `src/`、`docs/`、甚至工程自己的 `Assets/` 里发起调用，也能找到该工程；
-5. 同一最浅层有多个 → 报错列出候选；都没有 → 报错提示传 `project_path`。
-
-### 让 agent 自行选择工程
-
-插件**不记录**仓库该用哪个工程，也没有额外的配置文件：选择由模型根据仓库里的说明自行判断。把工程名与用途写进仓库的 `AGENTS.md`，DSH 会自动把它加载进上下文，模型据此决定是否传 `project_path`。
-
-这样做的理由是避免两处真相：机器可读的配置和散文说明一旦不一致，读配置的那条路径就会覆盖掉人的意图。工程唯一时第 2–3 步本来就能自动命中，配置只是多余的一层。搜索会跳过 `.git`、`node_modules`、Unity 的 `Library/Temp/Obj/Logs/UserSettings` 等生成目录，且**不会深入已识别的工程内部**（工程自己的 `Packages/` 里嵌套的包不算候选）。符号链接不跟随，理由与下面 `realpath` 那条相同。
-
-、`node_modules`、Unity 的 `Library/Temp/Obj/Logs/UserSettings` 等生成目录，且**不会深入已识别的工程内部**（工程自己的 `Packages/` 里嵌套的包不算候选）。符号链接不跟随，理由与下面 `realpath` 那条相同。
-
-桌面端没有第 3–4 步（它只有「显式 `--project`」或「GUI 当前聚焦的 workspace」）。这里放宽，是因为 DSH 的 Session 可能起在仓库根、也可能起在任意子目录。路径只做 `resolve()` 折叠 `.`/`..`，**不做 `realpath`**：Unity 用它打开时的路径派生 broker key，跟随符号链接反而可能与编辑器不一致。
-
-> 关于 schema：DSH 的 `defineTool()` 用**参数 DSL** 编译 `parameters`（对象节点必须显式 `additionalProperties`、自由 JSON 值用 author-only 的 `type: 'json'`、`required` 只能写在隐式参数属性上），而本插件直接以符合该子集的 JSON Schema 对象书写（隐式参数根、`required: true` 标注、`json` 自由值），`ctx.tools.register` 接受这种定义（与 MCP 桥接一致），`scripts/dump-tools.mjs` 按同一子集校验。若要让 `defineTool` 再编译一遍，用 `registerLocusTools(defineTool)`；`scripts/validate-dsh-tools.mjs` 已用真实 DSH 验证全部 7 个工具。
-
-## 开发与验证（在 Linux/macOS 上也能跑）
-
-```bash
-node --test --test-concurrency=1 "test/*.test.js"   # 71 个测试（含假 broker 的 Stream 通道与真 Unix socket）
-node scripts/dump-tools.mjs                          # 工具 schema 是否在 DSH 支持子集内
-node scripts/typecheck.mjs                           # 跨模块 import/调用一致性（纯 ESM，无 TS）
-DSH_TOOLS_PATH=/abs/.../dsh-tools/lib/index.js \
-  node scripts/validate-dsh-tools.mjs                # 用真实 DSH 编译+校验参数
-node scripts/live-smoke.mjs --project "F:/Projects/Game" [--recompile]   # 真机冒烟（Windows 管道 / Linux 套接字均可）
-```
-
-- `test/fake-broker.js` 实现了一个按 broker 语义应答的假服务端（`ping`/`status`/`capabilities`/`execute_code`/`asset_api`/`property_tree_read`/`recompile` 寄存器/事件广播），并能在「域重载」后接受新连接；`LocusClient` 的 `stream` 测试缝对着它，覆盖重连、接管编译、取消、超时、断线、资产修订守卫与 undo、场景 set、edit session 顺序、Console 渲染等。
-- `scripts/live-smoke.mjs` 在真机上依次验证连接、capabilities、执行、Console、资产读取、场景搜索（可选重编译）与取消。
-
-## 目录
-
-```
-src/
-  index.js         DSH 插件入口（name/inject/apply + registerLocusTools）
-  tools.js         7 个工具定义与结果渲染（无 DSH 依赖）
-  locus-client.js  管道客户端：reply_to 路由、事件、pending 表、Stream 测试缝
-  client-pool.js   按管道名复用连接、重连、owner 级 edit session、关停
-  pipe-worker.js   worker 线程：独占阻塞句柄
-  pipe-io.js       Win32 命名管道 fs I/O（open/read/write/close）
-  socket-io.js     Unix 域套接字 I/O（net 连接、分帧、EOF/背压）
-  line-framer.js   换行分帧（跨 chunk、BOM/CR、超长帧保护）
-  protocol.js      协议常量/错误码/状态解析/哨兵行/超时夹取
-  execute.js       execute_code 流程（状态闸门、轮询、取消、有界清理）
-  recompile.js     request_recompile → 断线 → 重连 → get_compile_result 收敛
-  asset-api.js     asset_api 请求构造（revision 守卫、值编码）
-  scene.js         场景搜索 / 属性树读取与渲染
-  scene-set.js     unity_scene set 的 C# 代码生成（转义、类型检查）
-  play-mode.js     Play/Edit 模式切换与收敛轮询
-  console.js       Console 参数校验与渲染
-  format.js        status 展示
-  args.js          项目根解析（project_path → cwd → 三层搜索 → 祖先旁）、代码规范化
-  undo.js          写操作的 undo checkpoint 记录
-scripts/  dump-tools / typecheck / validate-dsh-tools / live-smoke
-test/     pipe-name / args / protocol / client / socket-transport / tools / tools-workflow + fake-broker
-
-native/
-  locus_unix_native/      Linux/macOS broker 移植（Unix 域套接字；上游 locus-native-broker 派生，GPL-3.0+）
-  locus-native-protocol/  上游协议 crate（原样拷贝，GPL-3.0+）
-```
-
-## 构建 Linux/macOS broker
-
-`native/` 是 Rust crate，独立构建（非 Cargo workspace 成员，各自带 `Cargo.lock`）：
-
-```bash
-# 需要 Rust（cargo 1.7x+）
-npm run build:native     # 等价于 cargo build --release --manifest-path native/locus_unix_native/Cargo.toml
-npm run test:native      # 跑该 crate 的协议测试（含真实 Unix socket 端到端）
-
-# 产物：native/locus_unix_native/target/release/liblocus_unity_native.so
-# 放进 Locus Unity 包的 Editor/Native/linux-x86_64/ 即可被 Unity 载入
-```
-
-## 已知限制
-
-- Win32 管道路径仍未经 Windows 实机验证（仓库在 Linux 上开发）；Linux 套接字路径已在 Unity 2022.3 + Mono 上端到端跑通（见 `docs/locus-linux-port.md`）。Unity 失焦心跳依赖 `Library/Locus/BackgroundHook.enabled`，Linux 移植里没有等价的 Win32 钩子。
-- 无 GPU 的环境里 Unity 必须用 `-batchmode -nographics` 启动；普通 GUI 启动会因 `Failed to initialize unity graphics` 退出。
-- `unity_asset` 只支持标量/数组字段；Vector3/Color/四元数等复合字段请用 `unity_scene set` 或 `unity_execute`。继承自 Prefab 的字段（Locus 需要 effective-value 适配器）会返回 `unsupported_capability`。
-- `unity_scene set` 只做单字段写入；数组操作是「先写末元素再增删」的 Locus 等价实现，复杂结构建议 `unity_execute`。
-- `enable_non_public_access`（私有成员直访）依赖 Locus compile server（Roslyn sidecar），未接入。
-- 资产 undo 是「读取旧值 → 反向批次」的实现，不是文件级快照；换行、注释等格式差异不会被还原。
-- 尚未实现：Locus 的 `/view`、知识系统、hot-reload 面板、`run_states` 逐帧采样、`capture_viewport` 截图。协议细节见设计文档 §2.6。
+## 与 Locus 客户端的不同之处
+- DSH会话的工作目录无需在Unity项目中，插件会**向下最多三层**寻找 Unity 工程，广度优先。如果没找到，插件会到**祖先目录**里寻找 Unity 工程。
