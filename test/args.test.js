@@ -7,7 +7,7 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 
@@ -230,4 +230,144 @@ test('a Windows-style path is treated as absolute, not joined to the cwd', () =>
     () => resolveProjectRoot('F:/Projects/Game', ctx('/home/someone/repo')),
     /is not a Unity project/,
   )
+})
+
+// ── Recorded project choice ────────────────────────────────────────────────
+// A repository can name its editor project once so the agent never has to ask a
+// human per call (the point of AGENTS.md): the nearest config at or above the
+// Session cwd wins over both the cwd project and the depth search.
+
+test('a config in the cwd picks the project over the depth search', () => {
+  const root = sandbox(['GameA', 'GameB'])
+  try {
+    writeFileSync(join(root, '.locus.json'), JSON.stringify({ project: 'GameB' }))
+    assert.equal(resolveProjectRoot(undefined, ctx(root)), resolve(join(root, 'GameB')))
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('a config above the cwd applies to nested invocations', () => {
+  // The agent often runs from a subdirectory; walking up finds the repository's
+  // recorded choice instead of re-searching from there.
+  const root = sandbox(['GameA', 'GameB'], ['tools/scripts'])
+  try {
+    writeFileSync(join(root, '.locus.json'), JSON.stringify({ project: 'GameA' }))
+    const nested = join(root, 'tools', 'scripts')
+    assert.equal(resolveProjectRoot(undefined, ctx(nested)), resolve(join(root, 'GameA')))
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('the nearest config wins when several are present', () => {
+  const root = sandbox(['GameA', 'GameB'])
+  try {
+    writeFileSync(join(root, '.locus.json'), JSON.stringify({ project: 'GameA' }))
+    writeFileSync(join(root, 'GameB', '.locus.json'), JSON.stringify({ project: '.' }))
+    // From inside GameB its own config (`"."` = GameB) applies.
+    assert.equal(resolveProjectRoot(undefined, ctx(join(root, 'GameB'))), resolve(join(root, 'GameB')))
+    // From the root the root config applies.
+    assert.equal(resolveProjectRoot(undefined, ctx(root)), resolve(join(root, 'GameA')))
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('an explicit project_path still beats the config', () => {
+  const root = sandbox(['GameA', 'GameB'])
+  try {
+    writeFileSync(join(root, '.locus.json'), JSON.stringify({ project: 'GameA' }))
+    assert.equal(resolveProjectRoot('GameB', ctx(root)), resolve(join(root, 'GameB')))
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('a config naming a non-project is reported, not ignored', () => {
+  // Silently falling back would send the agent back to guessing, which is the
+  // behaviour the config exists to remove.
+  const root = sandbox(['Game'], ['NotAProject'])
+  try {
+    writeFileSync(join(root, '.locus.json'), JSON.stringify({ project: 'NotAProject' }))
+    assert.throws(
+      () => resolveProjectRoot(undefined, ctx(root)),
+      (error) => /\.locus\.json names project "NotAProject"/.test(error.message),
+    )
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('malformed config JSON is a clear error', () => {
+  const root = sandbox(['Game'])
+  try {
+    writeFileSync(join(root, '.locus.json'), '{ project: Game }')
+    assert.throws(() => resolveProjectRoot(undefined, ctx(root)), /is not valid JSON/)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('config comments are tolerated so the file can be annotated', () => {
+  const root = sandbox(['Game'])
+  try {
+    writeFileSync(
+      join(root, '.locus.json'),
+      '{\n  // the editor project for this repo\n  "project": "Game" /* relative */\n}\n',
+    )
+    assert.equal(resolveProjectRoot(undefined, ctx(root)), resolve(join(root, 'Game')))
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('`locus.json` is accepted as well, and `.locus.json` wins when both exist', () => {
+  const root = sandbox(['GameA', 'GameB'])
+  try {
+    writeFileSync(join(root, 'locus.json'), JSON.stringify({ project: 'GameA' }))
+    assert.equal(resolveProjectRoot(undefined, ctx(root)), resolve(join(root, 'GameA')))
+    writeFileSync(join(root, '.locus.json'), JSON.stringify({ project: 'GameB' }))
+    assert.equal(resolveProjectRoot(undefined, ctx(root)), resolve(join(root, 'GameB')))
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('a config with no project key is ignored', () => {
+  const root = sandbox(['Game'])
+  try {
+    writeFileSync(join(root, '.locus.json'), JSON.stringify({ theme: 'dark' }))
+    // Falls through to the search and still finds the only project.
+    assert.equal(resolveProjectRoot(undefined, ctx(root)), resolve(join(root, 'Game')))
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('the ambiguity error tells the caller how to stop being asked', () => {
+  const root = sandbox(['GameA', 'GameB'])
+  try {
+    assert.throws(
+      () => resolveProjectRoot(undefined, ctx(root)),
+      (error) => /record it once in/.test(error.message) && /AGENTS\.md/.test(error.message),
+    )
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('the runtime socket directory does not shadow the config file', () => {
+  // `.locus/` holds the broker socket and is git-ignored; `.locus.json` is a
+  // tracked config. They must stay independent: a config lookup that resolved
+  // through the directory would silently lose the recorded project.
+  const root = sandbox(['Game'])
+  try {
+    mkdirSync(join(root, '.locus'), { recursive: true })
+    writeFileSync(join(root, '.locus', 'ignored.sock'), '')
+    writeFileSync(join(root, '.locus.json'), JSON.stringify({ project: 'Game' }))
+    assert.equal(resolveProjectRoot(undefined, ctx(root)), resolve(join(root, 'Game')))
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
 })

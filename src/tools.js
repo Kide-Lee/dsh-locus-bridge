@@ -48,8 +48,9 @@ const PROJECT_PATH = {
   type: 'string',
   description:
     'Unity project root (the folder containing Assets/ and ProjectSettings/). Relative paths resolve from the ' +
-    'Session working directory. Omit it when the working directory is the Unity project, or when exactly one ' +
-    'Unity project sits within three levels below it; otherwise pass the path explicitly.',
+    'Session working directory. Omit it in normal use: the nearest .locus.json / locus.json at or above the ' +
+    'working directory supplies the project, then the working directory itself, then the shallowest Unity project ' +
+    'within three levels below it. Pass it only to override that recorded choice.',
 }
 
 const CONNECTION_DESCRIPTION =

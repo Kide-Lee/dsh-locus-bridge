@@ -1,0 +1,6 @@
+{
+  // The Unity project this repository drives. Recorded once so the agent never
+  // has to ask which project to use: `unity-test/` is the only Unity project
+  // here, and the Locus package is installed into it from `Locus/locus_unity`.
+  "project": "unity-test"
+}
