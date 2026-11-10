@@ -119,7 +119,7 @@ Windows 用的就是上游 crate 本身，未作修改，导出符号与上游 `
 | `unity_test` | 发现并运行 Unity Test Framework 测试，等待结构化结果（`list` / `run`） | `unity_test_list` / `unity_test_start` → 250ms `unity_test_status` →（取消）`unity_test_cancel` |
 | `unity_asset` | 资产序列化读取；带 revision 守卫的原子编辑（`set` 与数组操作）；undo；reload | `asset_api`（read / apply_batch / disk_reload） |
 | `unity_asset_graph` | 资产引用图与脚本用法：`references` / `dependencies` / `usages` | `search_yaml`（配 `.meta` 里的 GUID） |
-| `unity_capture` | 截取 Game / Scene / 编辑器窗口的 PNG，返回文件路径供 `read_image` 读取 | `capture_viewport` |
+| `unity_capture` | 截取 Game / Scene / 编辑器窗口，图像直接随结果返回（`ImageBlock`），一次调用即可看见 | `capture_viewport` + `attachments.saveImage` |
 | `unity_scene` | 场景对象检索（`search` 按名称、`find` 按组件类型）、属性树读取、原子 `set`、单事务 `batch` 与 `undo` | `search_scene_objects` / `property_tree_read` / 生成的 `execute_code` |
 
 ## 三个新能力的边界
@@ -139,9 +139,10 @@ Windows 用的就是上游 crate 本身，未作修改，导出符号与上游 `
 调用方给出 `file_path`。搜索结果覆盖的是 Unity 序列化数据，二进制资产、自定义序列化、Preset 以及
 运行时拼接的字符串引用都不在其中。
 
-**`unity_capture`** 只负责抓图并返回路径，不返回图像数据。DSH 自带的 `read_image` 已经把「磁盘上的
-文件 → 模型可见的附件」这条路走完了，在插件里再实现一遍是重复；因此拿到 `path` 后调用
-`read_image` 即可。这也意味着截图对模型可见的前提是当前模型声明了图片输入。
+**`unity_capture`** 走的是 `read_image` 同一条路：抓图后把 PNG 交给 Host 的 `attachments.saveImage`，
+再在工具结果里挂一个 `ImageBlock`，因此**一次调用就同时拿到文字摘要和图像本身**，不需要再读一次。
+提交附件之前先做图片能力检查（`llm.resolveModelInfo` 的 `inputModalities`）——纯文本模型会直接拒绝，
+而不是先存一张它永远看不到的图。若部署没挂附件服务，就退回只返回路径的文字结果。
 
 ## 与 Locus 桌面端的差异
 

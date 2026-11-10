@@ -7,6 +7,7 @@
 // an attachment, and duplicating it here would mean a second image pipeline.
 
 import { existsSync, statSync } from 'node:fs'
+import { readFile } from 'node:fs/promises'
 import { isAbsolute, resolve } from 'node:path'
 import { withClient } from './client-pool.js'
 
@@ -81,8 +82,54 @@ export function readablePath(projectRoot, captured) {
   }
 }
 
-/** Render a capture for the model, pointing at `read_image` for the pixels. */
-export function formatCapture(captured, resolved, { target } = {}) {
+/**
+ * Commit a captured PNG to the attachment store so the tool result can carry
+ * the image itself. This is the same call `read_image` makes
+ * (`@deepseek-ai/dsh-tool-fs`): `attachments.saveImage` validates and durably
+ * normalizes the raster and returns the reference an `ImageBlock` carries.
+ *
+ * @param attachments - the Host `attachments` service.
+ * @param resolved - the `readablePath` answer.
+ * @returns the durable image reference, or throws when the store refuses.
+ */
+export async function commitImage(attachments, resolved) {
+  const data = await readFile(resolved.absolute)
+  const ref = await attachments.saveImage({ data, mediaType: 'image/png', name: 'unity-capture.png' })
+  return {
+    attachmentId: ref.attachmentId,
+    mediaType: ref.mediaType,
+    bytes: ref.bytes,
+    width: ref.width,
+    height: ref.height,
+    ...(ref.name === undefined ? {} : { name: ref.name }),
+    ...(ref.originalDimensions === undefined ? {} : { originalDimensions: { ...ref.originalDimensions } }),
+  }
+}
+
+/**
+ * Whether the calling route can actually inspect an image. `read_image` refuses
+ * the same way: an image block for a text-only model is wasted tokens, so the
+ * capability is checked before the attachment is committed.
+ */
+export async function assertImageCapableRoute(ctx, exec, requestedPath) {
+  const routed = exec.agent?.session?.requestHeader?.()?.config
+  const provider = routed?.provider ?? exec.agent?.options?.provider
+  const model = routed?.model ?? exec.agent?.options?.model
+  const llm = ctx.get('llm')
+  if (provider === undefined || model === undefined || llm === undefined) {
+    throw new Error(`cannot return "${requestedPath}" as an image: the current model route could not be resolved`)
+  }
+  const active = await llm.resolveModelInfo(provider, model, exec.signal)
+  if (active.inputModalities === undefined || !active.inputModalities.includes('image')) {
+    throw new Error(
+      `cannot return "${requestedPath}" as an image: model "${model}" does not declare image input; ` +
+        'switch to an image-capable model to see captures',
+    )
+  }
+}
+
+/** Render a capture for the model. A committed image rides the adjacent block. */
+export function formatCapture(captured, resolved, { target, attached } = {}) {
   const lines = [
     `Captured ${captured.target || target}${captured.title ? ` (${captured.title})` : ''} to ${resolved.absolute}`,
     `${captured.width}x${captured.height} px, ${captured.mimeType}` +
@@ -91,12 +138,21 @@ export function formatCapture(captured, resolved, { target } = {}) {
         : '') +
       `${resolved.exists ? `, ${resolved.bytes} bytes` : ''}`,
   ]
-  if (resolved.exists) {
+  if (attached) {
+    lines.push('The image is attached to this result.')
+  } else if (resolved.exists) {
     lines.push(`Read the image with read_image: ${resolved.absolute}`)
   } else {
     lines.push('Warning: the reported file is not readable from this host; the editor may run elsewhere.')
   }
   return lines.join('\n')
+}
+
+/** The model-facing content: the summary text, plus the image when one was committed. */
+export function captureContent(text, image) {
+  const blocks = [{ type: 'text', text }]
+  if (image) blocks.push({ type: 'image', attachment: image })
+  return blocks
 }
 
 export { CAPTURE_TIMEOUT_MS, MAX_LONG_EDGE }

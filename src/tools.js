@@ -28,7 +28,7 @@ import {
 } from './client-pool.js'
 import { buildApplyRequest, readAsset, reloadAssets } from './asset-api.js'
 import { findCodeUsages, findReferences, projectRelative } from './asset-graph.js'
-import { buildCaptureRequest, captureViewport, formatCapture, readablePath } from './capture.js'
+import { buildCaptureRequest, captureContent, captureViewport, commitImage, assertImageCapableRoute, formatCapture, readablePath } from './capture.js'
 import { consoleLogMessage, formatConsoleLog } from './console.js'
 import {
   UNITY_EXECUTE_CANCELLED,
@@ -85,6 +85,19 @@ export function parameterSpecs(definition) {
 
 function publish(text, exec) {
   if (exec && text) exec.publish?.(text)
+}
+
+/**
+ * The Host context, set once by `apply()`. Tool bodies run outside `apply`, so
+ * a tool that needs a Host service at call time (the capture tool asks
+ * `attachments` to carry its image) reads it from here — the same closure
+ * `read_image` builds by capturing its own `ctx`.
+ */
+let host = null
+
+/** Remember the Host context. Exported for `src/index.js` only. */
+export function attachHost(ctx) {
+  host = ctx
 }
 
 /** Surface a LocusError as a plain Error so DSH renders it as a tool error. */
@@ -1079,13 +1092,15 @@ const unityAssetGraph = {
 const unityCapture = {
   name: 'unity_capture',
   description:
-    'Capture a PNG of the connected Unity Editor and return where it was written. Use it to look at the real visual ' +
-    'state of the Game view, the Scene view, or a specific Editor window.\n\n' +
+    'Capture a PNG of the connected Unity Editor and see it. Use it to inspect the real visual state of the Game view, ' +
+    'the Scene view, or a specific Editor window.\n\n' +
     'The capture area is resolved by Unity; never pass screen coordinates. `game` captures the visible Game viewport ' +
     'without its toolbar, `scene` the last active Scene viewport, and `editor_window` a whole Editor window — name it ' +
     'with `window_title` (a window title, C# type name, or full type name); without it the focused window is used.\n\n' +
-    'The answer names the PNG path. Read it with read_image to see the pixels; this tool never returns image data ' +
-    'itself. `max_long_edge` resizes after the capture (default 1280, 0 keeps the source size). ' +
+    'The captured image is attached to this result, so you see the pixels directly in one call — no second read. The ' +
+    'text summary names the PNG on disk in case you want the file itself. This requires an image-capable model; a ' +
+    'text-only route refuses the call instead of spending tokens on an image it cannot inspect. ' +
+    '`max_long_edge` resizes after the capture (default 1280, 0 keeps the source size). ' +
     CONNECTION_DESCRIPTION,
   parameters: {
     project_path: PROJECT_PATH,
@@ -1118,9 +1133,12 @@ const unityCapture = {
       properties: {
         text: { type: 'string' },
         path: { type: 'string' },
+        // The durable image the result carries; `render` turns it into the
+        // ImageBlock the same way `read_image` does.
+        image: { type: 'object', additionalProperties: true },
       },
     },
-    render: (_args, value) => [{ type: 'text', text: value.text }],
+    render: (_args, value) => captureContent(value.text, value.image),
   },
   async execute(args, exec) {
     const projectRoot = resolveProjectRoot(args.project_path, exec)
@@ -1142,7 +1160,25 @@ const unityCapture = {
       assertRequestedStatus(args.request_editor_status, state.status)
       const captured = await captureViewport(target, request, { signal: exec.signal })
       const resolved = readablePath(projectRoot, captured)
-      return { text: formatCapture(captured, resolved, { target: args.target }), path: resolved.absolute }
+
+      // Attach the pixels to this same result. The capability check runs
+      // BEFORE the attachment is committed, so a text-only route fails fast
+      // instead of storing an image it will never be allowed to read.
+      const attachments = host?.get?.('attachments')
+      if (!attachments) {
+        return {
+          text:
+            `${formatCapture(captured, resolved, { target: args.target })}\n` +
+            'No attachment store is mounted, so the image could not be attached.',
+          path: resolved.absolute,
+        }
+      }
+      if (!resolved.exists) {
+        return { text: formatCapture(captured, resolved, { target: args.target }), path: resolved.absolute }
+      }
+      await assertImageCapableRoute(host, exec, resolved.absolute)
+      const image = await commitImage(attachments, resolved)
+      return { text: formatCapture(captured, resolved, { target: args.target, attached: true }), path: resolved.absolute, image }
     } catch (error) {
       return failure(asToolError(error).message)
     }

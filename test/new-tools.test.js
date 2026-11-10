@@ -168,7 +168,7 @@ test('list formatting reports truncation and the matched count', () => {
 
 // ── unity_capture ───────────────────────────────────────────────────────────
 
-test('unity_capture returns the PNG path and points at read_image', async () => {
+test('unity_capture returns the PNG path and the text summary', async () => {
   await withEditor(async () => {
     const result = await tools.unity_capture.execute(
       { request_editor_status: 'editing', target: 'game' },
@@ -178,6 +178,28 @@ test('unity_capture returns the PNG path and points at read_image', async () => 
     assert.match(result.text, /1280x720 px, image\/png/)
     assert.match(result.text, /downscaled from 2560x1440/)
   })
+})
+
+test('capture renders the image block itself, so no second read is needed', () => {
+  const image = {
+    attachmentId: 'att-1',
+    mediaType: 'image/png',
+    bytes: 100,
+    width: 4,
+    height: 2,
+  }
+  const definition = tools.unity_capture
+  const withImage = definition.output.render({}, { text: 'summary', image })
+  assert.equal(withImage.length, 2)
+  assert.deepEqual(withImage[0], { type: 'text', text: 'summary' })
+  assert.equal(withImage[1].type, 'image')
+  assert.equal(withImage[1].attachment.attachmentId, 'att-1')
+
+  // Without a committed image (no attachment store, text-only route) the
+  // result stays text-only rather than claiming an attachment it lacks.
+  const withoutImage = definition.output.render({}, { text: 'summary' })
+  assert.equal(withoutImage.length, 1)
+  assert.equal(withoutImage[0].type, 'text')
 })
 
 test('capture request uses the camelCase payload the broker parses', () => {
@@ -480,7 +502,8 @@ test('every declared output property is allowed by its own schema', () => {
     // read → snapshot, apply → undo
     unity_asset: { text: '', revision: '', snapshot: {}, undo: {} },
     unity_asset_graph: { text: '', guid: '' },
-    unity_capture: { text: '', path: '' },
+    // image is present only when the attachment store accepted the capture
+    unity_capture: { text: '', path: '', image: {} },
     // batch → undo
     unity_scene: { text: '', undo: { kind: 'scene-batch', writes: [] } },
   }

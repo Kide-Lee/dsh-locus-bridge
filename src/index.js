@@ -11,7 +11,7 @@
 // Tool bodies live in ./tools.js, the wire client in ./locus-client.js; only
 // this module touches the host context.
 
-import { toolDefinitions, parameterSpecs, shutdownPool } from './tools.js'
+import { toolDefinitions, parameterSpecs, shutdownPool, attachHost } from './tools.js'
 
 export const name = 'dsh-locus-bridge'
 /** Services this plugin consumes (the tool registry). */
@@ -32,9 +32,13 @@ export function registerLocusTools(defineTool) {
 
 /**
  * Attach the Locus tools to a DSH context.
- * @param ctx - context exposing `ctx.tools.register` and `ctx.effect`.
+ * @param ctx - context exposing `ctx.tools.register`, `ctx.get` and `ctx.effect`.
  */
 export function apply(ctx) {
+  // A few tool bodies need Host services at call time (the capture tool asks
+  // `attachments` to carry the image itself). They read them off this handle,
+  // exactly as `read_image` closes over its own `ctx`.
+  attachHost(ctx)
   for (const definition of pending ?? toolDefinitions) ctx.tools.register(definition)
   ctx.effect(() => () => shutdownPool().catch(() => {}))
 }
