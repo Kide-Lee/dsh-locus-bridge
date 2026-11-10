@@ -29,15 +29,7 @@ dsh-locus-bridge 是一个 **DeepSeek harness 插件**。它能让 DSH 直接扮
 dsh plugin --profile <profile> add /path/to/dsh-locus-bridge
 ```
 
-本包未声明 `dsh.bundle`，因此上面这条命令只把它装成普通依赖，**还不会启用**。再在 profile 的 `cordis.patch.yml` 末尾追加：
-
-```yaml
-- insert:
-    - id: dsh-locus-bridge
-      name: dsh-locus-bridge
-```
-
-重启 DSH 后，模型会看到 7 个以 `unity_` 开头的工具：
+重启 DSH 后，模型会看到 7 个以 `unity_` 开头的工具（本包声明了 `dsh.bundle`，安装即为一个 profile 层，**不需要再手改 `cordis.patch.yml`**）：
 
 | 工具 | 作用 | 底层指令 |
 |---|---|---|

@@ -1,0 +1,9 @@
+# Bundle patch for dsh-locus-bridge.
+#
+# Declared by `dsh.bundle.patch` in package.json, so installing this package as a
+# profile bundle makes the tools appear without the user editing their own
+# cordis.patch.yml. `name` must be the package name exactly: a bare relative name
+# would resolve against the profile directory instead of this package.
+- insert:
+    - id: dsh-locus-bridge
+      name: dsh-locus-bridge
