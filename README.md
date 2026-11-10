@@ -8,7 +8,7 @@
 
 dsh-locus-bridge 是一个 **DeepSeek harness 插件**。它能让 DSH 直接扮演 Locus 客户端，通过 Locus 原生 broker 操作 Unity 编辑器。
 
-本项目的`native/`目录包含两个 Rust crate：`locus_unix_native`（本项目构建的 Linux/macOS 版原生 broker）与 `locus-native-protocol`（上游的协议 crate）。它们编译出 `liblocus_unity_native.so`，供 Unity 里的 C# 插件调用；**Unity 插件包本身不在本仓库内**，需从 Locus 上游安装。
+本项目的`native/`目录包含两个 Rust crate：`locus_unix_native`（本项目构建的 Linux/macOS 版原生 broker）与 `locus-native-protocol`（上游的协议 crate）。它们能编译出 `liblocus_unity_native.so`，供 Unity 里的 C# 插件调用。
 
 关于 Locus 的更多信息，参见：
 
@@ -29,7 +29,7 @@ dsh-locus-bridge 是一个 **DeepSeek harness 插件**。它能让 DSH 直接扮
 dsh plugin --profile <profile> add /path/to/dsh-locus-bridge
 ```
 
-重启 DSH 后，模型会看到 7 个以 `unity_` 开头的工具（本包声明了 `dsh.bundle`，安装即为一个 profile 层，**不需要再手改 `cordis.patch.yml`**）：
+重启 DSH 后，模型会看到 7 个以 `unity_` 开头的工具：
 
 | 工具 | 作用 | 底层指令 |
 |---|---|---|
