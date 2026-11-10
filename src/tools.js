@@ -27,6 +27,8 @@ import {
   withClient,
 } from './client-pool.js'
 import { buildApplyRequest, readAsset, reloadAssets } from './asset-api.js'
+import { findCodeUsages, findReferences, projectRelative } from './asset-graph.js'
+import { buildCaptureRequest, captureViewport, formatCapture, readablePath } from './capture.js'
 import { consoleLogMessage, formatConsoleLog } from './console.js'
 import {
   UNITY_EXECUTE_CANCELLED,
@@ -43,7 +45,25 @@ import { clampExecuteTimeout, EXECUTE_IDLE_LIMIT_MS } from './protocol.js'
 import { beginUndoCheckpoint, endUndoCheckpoint, recordWrite } from './undo.js'
 import { recompile, readReloadState, assertRecompileableStatus } from './recompile.js'
 import { formatSceneTree, parseTree, readRequest, searchRequest, searchSceneObjects } from './scene.js'
+import {
+  BATCH_LIMIT,
+  batchBody,
+  batchUndoBody,
+  batchUndoToken,
+  componentSearchBody,
+  validateBatch,
+  validateComponentSearch,
+} from './scene-batch.js'
 import { sceneSetExecution, validateSetArgs } from './scene-set.js'
+import {
+  UNITY_TEST_CANCELLED,
+  formatTestList,
+  formatTestRun,
+  listTests,
+  RESULT_DETAILS,
+  runTests,
+  TEST_MODES,
+} from './test-runner.js'
 
 const PROJECT_PATH = {
   type: 'string',
@@ -572,6 +592,10 @@ const unityAsset = {
       properties: {
         text: { type: 'string' },
         revision: { type: 'string' },
+        // `read` hands back the snapshot `apply` requires, and `apply` hands
+        // back the token `action: "undo"` requires; both must stay declared.
+        snapshot: { type: 'object', additionalProperties: true },
+        undo: { type: 'object', additionalProperties: true },
       },
     },
     render: (_args, value) => [{ type: 'text', text: value.text }],
@@ -805,33 +829,362 @@ function shortJson(value) {
   return text.length > 120 ? `${text.slice(0, 117)}…` : text
 }
 
+// ─── unity_test ─────────────────────────────────────────────────────────────
+
+const TEST_ACTIONS = ['list', 'run']
+
+const TEST_FILTER_PARAMETERS = {
+  mode: {
+    type: 'string',
+    enum: TEST_MODES,
+    description: 'Unity Test mode. `edit|play` covers both modes in one request; omit it for the framework default.',
+  },
+  assemblies: {
+    type: 'array',
+    items: { type: 'string' },
+    description: 'Test assembly names without the .dll extension.',
+  },
+  tests: {
+    type: 'array',
+    items: { type: 'string' },
+    description: 'Exact full test names.',
+  },
+  groups: {
+    type: 'array',
+    items: { type: 'string' },
+    description:
+      'Regular expressions matching full test names, fixtures, or namespaces. Prefix with ! to exclude; anchor ' +
+      'with ^...$ for one exact fixture or test.',
+  },
+  categories: {
+    type: 'array',
+    items: { type: 'string' },
+    description: 'NUnit category names. Prefix with ! to exclude, for example !SceneCombatE2E.',
+  },
+  max_results: {
+    type: 'integer',
+    description: 'Maximum test cases `list` returns (1..5000, default 500). The answer reports the full matched count.',
+  },
+}
+
+const unityTest = {
+  name: 'unity_test',
+  description:
+    "Discover and run the project's official Unity Test Framework tests through the Editor, and wait for structured " +
+    'results. NUnit lifecycle, UnityTest coroutines, parameterized cases, skips and domain reload recovery are handled ' +
+    'by Unity itself.\n\n' +
+    '`list` discovers test cases; `run` executes them and returns passed/failed/skipped counts plus the failed ' +
+    "results' messages and stack traces. After changing or hot-reloading test code, call unity_recompile first.\n\n" +
+    'Filter fields combine with AND, values inside one field with OR; omit what you do not need. Runs start from Edit ' +
+    'Mode and Unity drives any Play Mode transition itself. A timeout or cancellation stops the run through Unity, so ' +
+    'a lost caller never leaves a run holding the editor.\n\n' +
+    `Requires com.unity.test-framework 1.4.0 or newer in the project. ${CONNECTION_DESCRIPTION}`,
+  parameters: {
+    project_path: PROJECT_PATH,
+    action: {
+      type: 'string',
+      enum: TEST_ACTIONS,
+      description: '`list` discovers test cases; `run` executes them and waits for the results.',
+      required: true,
+    },
+    ...TEST_FILTER_PARAMETERS,
+    result_detail: {
+      type: 'string',
+      enum: RESULT_DETAILS,
+      description:
+        'Detail reported by `run`: `summary` counts only, `failures` adds failure messages and stack traces ' +
+        '(default), `all` includes every leaf result.',
+      default: 'failures',
+    },
+    timeout: {
+      type: 'integer',
+      description: 'Budget in milliseconds for a whole `run`, clamped to 1000..3600000 (default 600000).',
+      default: 600000,
+    },
+  },
+  output: {
+    schema: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        text: { type: 'string' },
+        status: { type: 'string' },
+        total: { type: 'integer' },
+        passed: { type: 'integer' },
+        failed: { type: 'integer' },
+        skipped: { type: 'integer' },
+      },
+    },
+    render: (_args, value) => [{ type: 'text', text: value.text }],
+  },
+  async execute(args, exec) {
+    const target = targetFor(args, exec)
+    const action = String(args.action ?? '')
+    const filter = {
+      mode: args.mode,
+      assemblies: args.assemblies,
+      tests: args.tests,
+      groups: args.groups,
+      categories: args.categories,
+    }
+    try {
+      const client = await getClient(target)
+      if (action === 'list') {
+        const list = await listTests(client, { ...filter, maxResults: args.max_results })
+        return { text: formatTestList(list), status: 'listed', total: list.matched, passed: 0, failed: 0, skipped: 0 }
+      }
+      if (action === 'run') {
+        const timeoutMs = clampExecuteTimeout(args.timeout)
+        let lastPublish = 0
+        const snapshot = await runTests(
+          client,
+          { ...filter, maxResults: args.max_results, resultDetail: args.result_detail },
+          {
+            signal: exec.signal,
+            timeoutMs,
+            onUpdate: (update) => {
+              const now = Date.now()
+              if (now - lastPublish < 2_000) return
+              lastPublish = now
+              const progress = `Unity Test ${update.status}: ${update.passed} passed, ${update.failed} failed of ` +
+                `${update.total}` + (update.currentTest ? ` — ${update.currentTest}` : '')
+              publish(progress, exec)
+            },
+          },
+        )
+        return {
+          text: formatTestRun(snapshot, { resultDetail: args.result_detail ?? 'failures' }),
+          status: snapshot.status,
+          total: snapshot.total,
+          passed: snapshot.passed,
+          failed: snapshot.failed,
+          skipped: snapshot.skipped,
+        }
+      }
+      throw new Error(`action must be one of ${TEST_ACTIONS.join(', ')}.`)
+    } catch (error) {
+      // A cancelled run carries the last snapshot: report the results it did
+      // reach instead of discarding them behind the cancellation message.
+      if (error?.message === UNITY_TEST_CANCELLED || exec.signal?.aborted) {
+        const snapshot = error.snapshot
+        const text = snapshot
+          ? `Unity Test run cancelled.\n${formatTestRun(snapshot)}`
+          : 'Unity Test run cancelled.'
+        return { text, status: 'cancelled', total: snapshot?.total ?? 0, passed: snapshot?.passed ?? 0, failed: snapshot?.failed ?? 0, skipped: snapshot?.skipped ?? 0 }
+      }
+      throw asToolError(error)
+    }
+  },
+}
+
+// ─── unity_asset_graph ──────────────────────────────────────────────────────
+
+const GRAPH_ACTIONS = ['references', 'dependencies', 'usages']
+
+const unityAssetGraph = {
+  name: 'unity_asset_graph',
+  description:
+    'Follow the reference graph between the assets of the connected Unity project, and find where a C# script is used.\n\n' +
+    '`references`: whether the scene or prefab in `file_path` points at `path` — it reads the GUID from the target ' +
+    "asset's .meta and searches for it. `dependencies`: the GUIDs `path` itself stores, i.e. what it points at.\n\n" +
+    '`usages`: where a .cs script (`path`) is attached and, with `member`, the serialized fields of those components ' +
+    'that carry that name. Check this together with code references before renaming, moving or deleting a type or a ' +
+    'serialized field: zero code references alone does not prove nothing serializes it.\n\n' +
+    'The bridge reads one .unity or .prefab through Unity\'s own serialization at a time, so `file_path` names the ' +
+    'scene or prefab to search inside; there is no project-wide scan. Results therefore cover serialized data in that ' +
+    'one file — not binary assets, custom serialization, presets, or references built from strings at runtime. ' +
+    CONNECTION_DESCRIPTION,
+  parameters: {
+    project_path: PROJECT_PATH,
+    action: {
+      type: 'string',
+      enum: GRAPH_ACTIONS,
+      description: '`references`, `dependencies`, or `usages`.',
+      required: true,
+    },
+    path: {
+      type: 'string',
+      description:
+        'Project-relative or absolute path of the asset being referenced, or the .cs script for `usages` ' +
+        '(Assets/Prefabs/Player.prefab, Assets/Materials/Red.mat, Assets/Scripts/PlayerController.cs).',
+    },
+    file_path: {
+      type: 'string',
+      description:
+        'The .unity or .prefab to search inside (Assets/Scenes/Main.unity). Required for `references` and `usages`, ' +
+        'which have no project-wide scan; for `dependencies` it defaults to `path`.',
+    },
+    member: {
+      type: 'string',
+      description:
+        'For `usages`: a method or serialized-field name declared in that script (for example TakeDamage or maxHealth). ' +
+        'Omit to list the attach points instead.',
+    },
+    limit: {
+      type: 'integer',
+      description: 'Maximum entries to return (1..500, default 100).',
+    },
+  },
+  output: {
+    schema: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        text: { type: 'string' },
+        guid: { type: 'string' },
+      },
+    },
+    render: (_args, value) => [{ type: 'text', text: value.text }],
+  },
+  async execute(args, exec) {
+    const projectRoot = resolveProjectRoot(args.project_path, exec)
+    const target = describeTarget({ projectRoot })
+    const action = String(args.action ?? '')
+    if (!String(args.path ?? '').trim()) throw new Error('path is required (the asset to inspect).')
+    try {
+      if (action === 'usages') {
+        const result = await findCodeUsages(target, projectRoot, {
+          filePath: args.path,
+          member: args.member,
+          limit: args.limit,
+          scenePath: args.file_path,
+        })
+        const heading = result.member
+          ? `Serialized uses of "${result.member}" from ${result.script} inside ${result.searched} (guid ${result.guid}):`
+          : `Attach points of ${result.script} inside ${result.searched} (guid ${result.guid}):`
+        return { text: `${heading}\n${result.results}`, guid: result.guid }
+      }
+      if (action === 'references' || action === 'dependencies') {
+        const result = await findReferences(target, projectRoot, {
+          assetPath: args.path,
+          direction: action,
+          filePath: args.file_path,
+          limit: args.limit,
+        })
+        const heading =
+          action === 'references'
+            ? `Uses of ${projectRelative(projectRoot, args.path)} (guid ${result.guid}) inside ${result.searched}:`
+            : `Assets ${result.searched} depends on:`
+        return { text: `${heading}\n${result.results}`, guid: result.guid ?? '' }
+      }
+      throw new Error(`action must be one of ${GRAPH_ACTIONS.join(', ')}.`)
+    } catch (error) {
+      throw asToolError(error)
+    }
+  },
+}
+
+// ─── unity_capture ──────────────────────────────────────────────────────────
+
+const unityCapture = {
+  name: 'unity_capture',
+  description:
+    'Capture a PNG of the connected Unity Editor and return where it was written. Use it to look at the real visual ' +
+    'state of the Game view, the Scene view, or a specific Editor window.\n\n' +
+    'The capture area is resolved by Unity; never pass screen coordinates. `game` captures the visible Game viewport ' +
+    'without its toolbar, `scene` the last active Scene viewport, and `editor_window` a whole Editor window — name it ' +
+    'with `window_title` (a window title, C# type name, or full type name); without it the focused window is used.\n\n' +
+    'The answer names the PNG path. Read it with read_image to see the pixels; this tool never returns image data ' +
+    'itself. `max_long_edge` resizes after the capture (default 1280, 0 keeps the source size). ' +
+    CONNECTION_DESCRIPTION,
+  parameters: {
+    project_path: PROJECT_PATH,
+    request_editor_status: {
+      type: 'string',
+      enum: ['editing', 'playing', 'playing_paused'],
+      description: 'Required Unity Editor status before capturing. Must match the live status.',
+      required: true,
+    },
+    target: {
+      type: 'string',
+      enum: ['game', 'scene', 'editor_window'],
+      description: 'Unity viewport or Editor window to capture.',
+      required: true,
+    },
+    window_title: {
+      type: 'string',
+      description: 'Optional title or type-name match for `target: "editor_window"`.',
+    },
+    max_long_edge: {
+      type: 'integer',
+      description: 'Maximum output width or height in pixels after capture (0..8192, default 1280; 0 keeps the source size).',
+      default: 1280,
+    },
+  },
+  output: {
+    schema: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        text: { type: 'string' },
+        path: { type: 'string' },
+      },
+    },
+    render: (_args, value) => [{ type: 'text', text: value.text }],
+  },
+  async execute(args, exec) {
+    const projectRoot = resolveProjectRoot(args.project_path, exec)
+    const target = describeTarget({ projectRoot })
+    let request
+    try {
+      request = buildCaptureRequest({
+        target: args.target,
+        window_title: args.window_title,
+        max_long_edge: args.max_long_edge,
+      })
+    } catch (error) {
+      return failure(error.message)
+    }
+    try {
+      const client = await getClient(target)
+      const state = await readEditorStatus(client)
+      if (!state.connected) return failure(`Unity Editor not connected${state.error ? `: ${state.error}` : ''}.`)
+      assertRequestedStatus(args.request_editor_status, state.status)
+      const captured = await captureViewport(target, request, { signal: exec.signal })
+      const resolved = readablePath(projectRoot, captured)
+      return { text: formatCapture(captured, resolved, { target: args.target }), path: resolved.absolute }
+    } catch (error) {
+      return failure(asToolError(error).message)
+    }
+  },
+}
+
 // ─── unity_scene ────────────────────────────────────────────────────────────
 
-const SCENE_ACTIONS = ['search', 'get', 'set']
+const SCENE_ACTIONS = ['search', 'get', 'set', 'find', 'batch', 'undo']
 
 const unityScene = {
   name: 'unity_scene',
   description:
     'Inspect and edit objects in open Unity scenes.\n\n' +
     '`search`: find GameObjects by name/path fragment across open scenes (ranked `scene_path` + `object_path`).\n\n' +
+    '`find`: list every object carrying a component type (`component_type`, for example Rigidbody or ' +
+    'UnityEngine.Light), which `search` cannot do because it only matches names and paths.\n\n' +
     '`get`: read one object\'s serialized property tree (`scene_path` + `object_path`, optional max_depth / ' +
     'max_array_items) — component types and field names come from this.\n\n' +
     '`set`: atomically set one component field: resolves the object, Undo-records it, writes the ' +
     'SerializedProperty (scalars, Color "#rrggbbaa", Vector2/3 "x,y[,z]"), marks the scene dirty and saves it. ' +
     'Array fields support array_insert / array_remove / array_move / array_resize. Type names must exist in the ' +
-    'loaded assemblies — call unity_recompile first after adding or renaming C# types. ' +
+    'loaded assemblies — call unity_recompile first after adding or renaming C# types.\n\n' +
+    '`batch`: apply many field writes as one transaction — a single undo group, the previous value of every field ' +
+    `captured, and each touched scene saved once at the end. Up to ${BATCH_LIMIT} writes. A write that fails is ` +
+    'reported and skipped instead of aborting the rest; the answer carries an `undo` token.\n\n' +
+    '`undo`: pass that token back to restore every field the batch changed (only the fields it actually changed). ' +
     CONNECTION_DESCRIPTION,
   parameters: {
     project_path: PROJECT_PATH,
     action: {
       type: 'string',
       enum: SCENE_ACTIONS,
-      description: 'One of: search, get, set.',
+      description: 'One of: search, get, set, find, batch, undo.',
       required: true,
     },
     query: { type: 'string', description: 'Search text: object name or path fragment (`search`).' },
-    limit: { type: 'integer', description: 'Maximum search results (1..160, default 40).' },
-    scene_path: { type: 'string', description: 'Scene asset path, for example Assets/Scenes/Main.unity.' },
+    limit: { type: 'integer', description: 'Maximum search results (1..160, default 40) or `find` results (1..1000, default 200).' },
+    scene_path: {
+      type: 'string',
+      description: 'Scene asset path, for example Assets/Scenes/Main.unity. For `find`, limits the walk to one scene.',
+    },
     object_path: {
       type: 'string',
       description: 'Hierarchy path inside the scene, for example "Canvas/Button" or "Panel/Button[1]" for same-named siblings.',
@@ -840,7 +1193,13 @@ const unityScene = {
     max_array_items: { type: 'integer', description: 'Array items listed per array for `get` (1..1024, default 64).' },
     component_type: {
       type: 'string',
-      description: 'Component to edit for `set`: a type name such as Transform, RectTransform, or your own type.',
+      description:
+        'Component to edit for `set` (a type name such as Transform, RectTransform, or your own type), or the component ' +
+        'type `find` lists objects for.',
+    },
+    include_inactive: {
+      type: 'boolean',
+      description: 'For `find`: also list components on inactive GameObjects (default false).',
     },
     component_index: { type: 'integer', description: 'Alternatively the component index on the GameObject for `set`.' },
     property_path: {
@@ -868,6 +1227,34 @@ const unityScene = {
       },
       description: 'Edit operation for `set` (default: op "set" with `value`).',
     },
+    edits: {
+      type: 'array',
+      items: {
+        type: 'object',
+        additionalProperties: true,
+        properties: {
+          scene_path: { type: 'string', description: 'Scene asset path of this write.' },
+          object_path: { type: 'string', description: 'Hierarchy path of the object in that scene.' },
+          component_type: { type: 'string', description: 'Component type name (or full name) to write.' },
+          component_index: { type: 'integer', description: 'Alternatively the component index on the object.' },
+          property_path: { type: 'string', description: 'Serialized property to write, for example m_LocalPosition.' },
+          value: {
+            type: 'json',
+            description: 'New value: JSON scalar, or a comma-joined string for compound values.',
+          },
+        },
+      },
+      description: 'Writes for `batch`. Each is one field on one component of one object.',
+    },
+    save: {
+      type: 'boolean',
+      description: 'For `batch`: save every touched scene once at the end (default true).',
+    },
+    undo: {
+      type: 'object',
+      additionalProperties: true,
+      description: 'The `undo` token a `batch` returned (required for `action: "undo"`).',
+    },
   },
   output: {
     schema: {
@@ -875,6 +1262,9 @@ const unityScene = {
       additionalProperties: false,
       properties: {
         text: { type: 'string' },
+        // `batch` returns the token `action: "undo"` consumes, like the one
+        // `unity_asset apply` returns for asset files.
+        undo: { type: 'object', additionalProperties: true },
       },
     },
     render: (_args, value) => [{ type: 'text', text: value.text }],
@@ -937,11 +1327,134 @@ const unityScene = {
           await session.release()
         }
       }
+      if (action === 'find') {
+        const request = validateComponentSearch({
+          component_type: args.component_type,
+          include_inactive: args.include_inactive,
+          limit: args.limit === undefined ? undefined : clampFindLimit(args.limit),
+          scene_path: args.scene_path,
+        })
+        const output = await runSceneSnippet(target, exec, componentSearchBody(request), 120_000)
+        return { text: formatComponentSearch(parseSnippetJson(output), request) }
+      }
+      if (action === 'batch') {
+        const request = validateBatch({ edits: args.edits, save: args.save })
+        const status = args.request_editor_status ?? 'editing'
+        const client = await getClient(target)
+        const state = await readEditorStatus(client)
+        if (!state.connected) throw new Error(`Unity Editor not connected${state.error ? `: ${state.error}` : ''}.`)
+        assertRequestedStatus(status, state.status)
+        const owner = activeEditOwner(target.pipe) ?? `dsh-${process.pid}-${randomUUID()}`
+        const session = await openEditSession(target, owner)
+        try {
+          const output = await withBarriers(
+            exec,
+            owner,
+            target,
+            () => runSceneSnippet(target, exec, batchBody(request), 180_000),
+            'unity_scene',
+          )
+          const result = parseSnippetJson(output)
+          return { text: formatBatchResult(result), undo: batchUndoToken(result) }
+        } finally {
+          await session.release()
+        }
+      }
+      if (action === 'undo') {
+        const token = args.undo && typeof args.undo === 'object' ? args.undo : null
+        if (!token || !Array.isArray(token.writes) || token.writes.length === 0) {
+          throw new Error('action "undo" requires the `undo` token a `batch` returned.')
+        }
+        const owner = activeEditOwner(target.pipe) ?? `dsh-${process.pid}-${randomUUID()}`
+        const session = await openEditSession(target, owner)
+        try {
+          const output = await withBarriers(
+            exec,
+            owner,
+            target,
+            () => runSceneSnippet(target, exec, batchUndoBody({ writes: token.writes }), 180_000),
+            'unity_scene',
+          )
+          const result = parseSnippetJson(output)
+          const lines = [`Restored ${result.restored ?? 0} field(s) across ${token.writes.length} recorded write(s).`]
+          if ((result.errors ?? []).length) {
+            lines.push(`${result.errors.length} could not be restored:`)
+            for (const line of result.errors) lines.push(`- ${line}`)
+          }
+          return { text: lines.join('\n') }
+        } finally {
+          await session.release()
+        }
+      }
       throw new Error(`action must be one of ${SCENE_ACTIONS.join(', ')}.`)
     } catch (error) {
       throw asToolError(error)
     }
   },
+}
+
+function clampFindLimit(limit) {
+  if (!Number.isInteger(limit)) throw new Error('limit must be an integer.')
+  if (limit < 1 || limit > 1000) throw new Error('limit must be in 1..1000 for `find`.')
+  return limit
+}
+
+/**
+ * Run one generated snippet and return its printed output. Reloads during the
+ * call are retried once on a fresh connection, like the `set` path.
+ */
+async function runSceneSnippet(target, exec, code, timeoutMs) {
+  const client = await getClient(target)
+  const executionId = randomUUID()
+  const run = (live) => executeSnippet(live, { code, executionId, timeoutMs, signal: exec.signal })
+  const { output } = await run(client).catch(async (error) => {
+    if (!(error instanceof LocusError) || error.code !== undefined) throw error
+    return run(await getClient(target))
+  })
+  return output ?? ''
+}
+
+/** The snippet prints one JSON line; the last parsable line wins. */
+function parseSnippetJson(output) {
+  const lines = String(output ?? '').trim().split('\n').filter(Boolean)
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    try {
+      return JSON.parse(lines[index])
+    } catch {
+      // keep looking for the JSON line
+    }
+  }
+  throw new Error(`The scene snippet did not print JSON; raw output:\n${String(output ?? '').trim()}`)
+}
+
+function formatComponentSearch(result, request) {
+  const objects = Array.isArray(result.objects) ? result.objects : []
+  if (objects.length === 0) {
+    return `No object carries ${request.componentType}${request.scenePath ? ` in ${request.scenePath}` : ''}.`
+  }
+  const lines = [
+    `${objects.length} object(s) carry ${request.componentType}` +
+      `${request.scenePath ? ` in ${request.scenePath}` : ''}${result.truncated ? ' (truncated at limit)' : ''}:`,
+  ]
+  for (const object of objects) {
+    lines.push(
+      `- ${object.scenePath} :: ${object.objectPath}` +
+        `${object.active === false ? ' (inactive)' : ''} [component ${object.componentIndex}]`,
+    )
+  }
+  return lines.join('\n')
+}
+
+function formatBatchResult(result) {
+  const applied = Number(result.applied ?? 0)
+  const failed = Number(result.failed ?? 0)
+  const lines = [`Applied ${applied} field write(s)${failed ? `, ${failed} failed` : ''} as one transaction.`]
+  if ((result.savedScenes ?? []).length) lines.push(`Saved: ${result.savedScenes.join(', ')}`)
+  for (const entry of result.errors ?? []) {
+    lines.push(`- failed ${entry.objectPath} ${entry.propertyPath}: ${entry.error}`)
+  }
+  if (applied > 0) lines.push(`Undo token (action "undo"): ${JSON.stringify(batchUndoToken(result))}`)
+  return lines.join('\n')
 }
 
 function formatSearchResults(query, results) {
@@ -978,7 +1491,10 @@ export const toolDefinitions = [
   unityPlayMode,
   unityConsoleLog,
   unityRecompile,
+  unityTest,
   unityAsset,
+  unityAssetGraph,
+  unityCapture,
   unityScene,
 ]
 

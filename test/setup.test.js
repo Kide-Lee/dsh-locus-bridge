@@ -14,6 +14,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import {
@@ -35,7 +36,7 @@ import {
  * fixture could not be built.
  */
 function usePayloadFixture(t, build) {
-  const dir = mkdtempSync(join(process.env.TMPDIR ?? '/tmp', 'locus-payload-'))
+  const dir = mkdtempSync(join(tmpdir(), 'locus-payload-'))
   build(dir)
   const previous = process.env.DSH_LOCUS_PAYLOAD_DIR
   process.env.DSH_LOCUS_PAYLOAD_DIR = dir
@@ -49,7 +50,9 @@ function usePayloadFixture(t, build) {
 
 /** A project shell plus an isolated copy of the payload under test. */
 function project(overrides = {}) {
-  const root = mkdtempSync(join(process.env.TMPDIR ?? '/tmp', 'locus-setup-test-'))
+  // `TMPDIR` is a POSIX convention; `os.tmpdir()` resolves the host's real
+  // scratch directory on every platform.
+  const root = mkdtempSync(join(tmpdir(), 'locus-setup-test-'))
   mkdirSync(join(root, 'Assets'), { recursive: true })
   mkdirSync(join(root, 'ProjectSettings'), { recursive: true })
   mkdirSync(join(root, 'Packages'), { recursive: true })
@@ -104,7 +107,7 @@ test('the payload broker is reported for the host platform', () => {
 })
 
 test('reading a project never throws, even when Packages/ is unreadable', () => {
-  const root = mkdtempSync(join(process.env.TMPDIR ?? '/tmp', 'locus-setup-nopkg-'))
+  const root = mkdtempSync(join(tmpdir(), 'locus-setup-nopkg-'))
   mkdirSync(join(root, 'Assets'))
   mkdirSync(join(root, 'ProjectSettings'))
   try {
@@ -117,7 +120,7 @@ test('reading a project never throws, even when Packages/ is unreadable', () => 
 
 test('a file: dependency that resolves counts as an install', () => {
   const root = project()
-  const external = fakePackage(mkdtempSync(join(process.env.TMPDIR ?? '/tmp', 'locus-setup-ext-')))
+  const external = fakePackage(mkdtempSync(join(tmpdir(), 'locus-setup-ext-')))
   writeFileSync(
     join(root, 'Packages', 'manifest.json'),
     JSON.stringify({ dependencies: { 'com.farlocus.locus': 'file:../../ext' } }),

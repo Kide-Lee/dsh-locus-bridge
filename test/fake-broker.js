@@ -115,9 +115,96 @@ export async function startFakeBroker({ onMessage, tcp = false, unix = false } =
         return reply(socket, request, { ok: true, message: 'ok' })
       case 'asset_api':
         return reply(socket, request, { ok: true, message: JSON.stringify(fakeAssetApi(JSON.parse(message || '{}'))) })
+      case 'search_yaml':
+        return reply(socket, request, {
+          ok: true,
+          message: fakeYamlSearch(JSON.parse(message || '{}')),
+        })
+      case 'capture_viewport':
+        return reply(socket, request, {
+          ok: true,
+          message: JSON.stringify({
+            target: JSON.parse(message || '{}').target,
+            title: 'Game',
+            path: 'Temp/LocusCapture/fake.png',
+            width: 1280,
+            height: 720,
+            originalWidth: 2560,
+            originalHeight: 1440,
+            sourceWidth: 2560,
+            sourceHeight: 1440,
+            outputWidth: 1280,
+            outputHeight: 720,
+            maxLongEdge: 1280,
+            pixelsPerPoint: 1,
+            captureArea: 'viewport',
+            mimeType: 'image/png',
+          }),
+        })
+      case 'unity_test_list':
+        return reply(socket, request, {
+          ok: true,
+          message: JSON.stringify({
+            mode: JSON.parse(message || '{}').mode ?? 'edit|play',
+            matched: 2,
+            truncated: false,
+            tests: [
+              { name: 'Damage', full_name: 'Game.Tests.CombatTests.Damage', assembly: 'Game.Tests', mode: 'Edit', path: ['Game', 'Combat'], categories: [] },
+              { name: 'Heal', full_name: 'Game.Tests.CombatTests.Heal', assembly: 'Game.Tests', mode: 'Edit', path: ['Game', 'Combat'], categories: [] },
+            ],
+          }),
+        })
+      case 'unity_test_start':
+        return reply(socket, request, {
+          ok: true,
+          message: JSON.stringify(testSnapshot({ status: 'running', runId: JSON.parse(message || '{}').run_id })),
+        })
+      case 'unity_test_status':
+        return reply(socket, request, {
+          ok: true,
+          message: JSON.stringify(testSnapshot({ status: 'passed', runId: JSON.parse(message || '{}').run_id })),
+        })
+      case 'unity_test_cancel':
+        return reply(socket, request, {
+          ok: true,
+          message: JSON.stringify(testSnapshot({ status: 'cancelled', runId: JSON.parse(message || '{}').run_id })),
+        })
       default:
         return reply(socket, request, { ok: false, error: `unknown command ${type}` })
     }
+  }
+
+  /** A completed Unity Test snapshot in the shape the Unity service emits. */
+  function testSnapshot({ status, runId }) {
+    return {
+      run_id: runId ?? 'run-1',
+      status,
+      mode: 'Edit',
+      current_test: status === 'running' ? 'Game.Tests.CombatTests.Damage' : '',
+      total: 2,
+      passed: status === 'running' ? 0 : 2,
+      failed: 0,
+      skipped: 0,
+      inconclusive: 0,
+      duration_ms: 42,
+      error: '',
+      failures: [],
+      results: [
+        { full_name: 'Game.Tests.CombatTests.Damage', result_state: 'Passed', duration_ms: 10, message: '', stack_trace: '' },
+        { full_name: 'Game.Tests.CombatTests.Heal', result_state: 'Passed', duration_ms: 10, message: '', stack_trace: '' },
+      ],
+    }
+  }
+
+  /** Render a `search_yaml` answer the way the Unity side does: a text report. */
+  function fakeYamlSearch(body) {
+    const lines = [`file: ${body.file_path ?? '?'}`]
+    if (body.query) lines.push(`match value "${body.query}":`)
+    else if (body.match_fields) lines.push(`match field "${body.match_fields}":`)
+    else lines.push('listing:')
+    lines.push('  - Game/Player (PlayerController) m_Script -> 0123456789abcdef0123456789abcdef')
+    lines.push('  - Game/Player (PlayerController) maxHealth = 100')
+    return lines.join('\n')
   }
 
   /** Minimal asset api: read returns a snapshot, any apply reports success. */

@@ -47,8 +47,10 @@ test('absolute socket paths pass through normalization unchanged', () => {
   assert.equal(normalizePipeName(`  ${path}  `), path)
 })
 
-test('socket path derivation mirrors names_unix.rs', () => {
+test('socket path derivation mirrors names_unix.rs', { skip: isWindowsHost() && 'POSIX path derivation is host-relative' }, () => {
   // `<runtime dir>/locus/locus_unity_native_<project key>.sock`
+  // `unitySocketPath` uses `path.join`, so on Windows the same inputs produce
+  // backslashes; this derivation only describes a Unix host.
   assert.equal(
     unitySocketPath('/home/me/Game', UNIX_ENV),
     `/run/user/1000/locus/locus_unity_native_${projectKey('/home/me/Game')}.sock`,
@@ -94,7 +96,7 @@ test('resolvePipeName precedence: explicit > marker line > project > empty', () 
   }
 })
 
-test('the test namespace suffixes both endpoint shapes', () => {
+test('the test namespace suffixes both endpoint shapes', { skip: isWindowsHost() && 'POSIX socket naming is host-relative' }, () => {
   // The namespace travels in the same environment object as the runtime root, so
   // a test broker can live next to a production one on either transport.
   const namespaced = { ...UNIX_ENV, LOCUS_UNITY_TEST_PIPE_NAMESPACE: 'test-ns' }
@@ -114,7 +116,10 @@ test('every tool definition fits the DSH schema subset', () => {
       'unity_play_mode',
       'unity_console_log',
       'unity_recompile',
+      'unity_test',
       'unity_asset',
+      'unity_asset_graph',
+      'unity_capture',
       'unity_scene',
     ],
   )

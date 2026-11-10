@@ -6,9 +6,17 @@
 // with `defineTool` and validates a sample argument set per tool.
 
 import { createRequire } from 'node:module'
+import { pathToFileURL } from 'node:url'
 import { toolDefinitions, parameterSpecs } from '../src/tools.js'
 
 const require = createRequire(import.meta.url)
+
+/** `DSH_TOOLS_PATH` may be a bare specifier or an absolute file path. */
+function toImportSpecifier(candidate) {
+  return candidate.startsWith('/') || /^[A-Za-z]:[\\/]/.test(candidate) || candidate.includes('\\')
+    ? pathToFileURL(candidate).href
+    : candidate
+}
 
 async function loadDshTools() {
   const candidates = [
@@ -18,7 +26,7 @@ async function loadDshTools() {
   ].filter(Boolean)
   for (const specifier of candidates) {
     try {
-      return await import(specifier.startsWith('/') ? `file://${specifier}` : specifier)
+      return await import(toImportSpecifier(specifier))
     } catch {
       // try the next candidate
     }
@@ -94,6 +102,18 @@ function sampleArgs(name) {
         property_path: 'm_LocalPosition',
         operation: { op: 'set', value: '0,1,0' },
       }
+    case 'unity_test':
+      return { action: 'run', mode: 'edit', groups: ['^Game\\.Tests'], timeout: 600000, result_detail: 'failures' }
+    case 'unity_asset_graph':
+      return {
+        action: 'usages',
+        path: 'Assets/Scripts/PlayerController.cs',
+        file_path: 'Assets/Scenes/Main.unity',
+        member: 'maxHealth',
+        limit: 100,
+      }
+    case 'unity_capture':
+      return { request_editor_status: 'editing', target: 'game', max_long_edge: 1280 }
     default:
       return {}
   }

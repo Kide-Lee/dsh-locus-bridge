@@ -116,8 +116,32 @@ Windows 用的就是上游 crate 本身，未作修改，导出符号与上游 `
 | `unity_play_mode` | 切换到 Play/Edit 模式并等待生效 | `status` → `set_editor_status` → 轮询 `status` |
 | `unity_console_log` | 读取 Unity Console（按级别合并去重） | `unity_get_console_log` |
 | `unity_recompile` | 编译 + 域重载 + 跨断线等待收敛；`sync: none/targeted/full` 控制资产导入 | `request_recompile` → 断线 → 重连 → 轮询 `get_compile_result` |
+| `unity_test` | 发现并运行 Unity Test Framework 测试，等待结构化结果（`list` / `run`） | `unity_test_list` / `unity_test_start` → 250ms `unity_test_status` →（取消）`unity_test_cancel` |
 | `unity_asset` | 资产序列化读取；带 revision 守卫的原子编辑（`set` 与数组操作）；undo；reload | `asset_api`（read / apply_batch / disk_reload） |
-| `unity_scene` | 场景对象检索、属性树读取、原子 set（Undo、保存场景） | `search_scene_objects` / `property_tree_read` / 生成的 `execute_code` |
+| `unity_asset_graph` | 资产引用图与脚本用法：`references` / `dependencies` / `usages` | `search_yaml`（配 `.meta` 里的 GUID） |
+| `unity_capture` | 截取 Game / Scene / 编辑器窗口的 PNG，返回文件路径供 `read_image` 读取 | `capture_viewport` |
+| `unity_scene` | 场景对象检索（`search` 按名称、`find` 按组件类型）、属性树读取、原子 `set`、单事务 `batch` 与 `undo` | `search_scene_objects` / `property_tree_read` / 生成的 `execute_code` |
+
+## 三个新能力的边界
+
+这三个工具都照搬上游的做法，但都受「插件只做 broker 客户端」这一条约束，能力边界值得写清楚。
+
+**`unity_test`** 的服务端是随 payload 附带的 `Editor/Testing/LocusUnityTestService.cs`——它已经注册了
+`unity_test_list` / `unity_test_start` / `unity_test_status` / `unity_test_cancel` 四个扩展命令，
+所以 Unity 侧一行都没改，插件只负责驱动它们。轮询节奏（250 ms）与「取消后必须观察到终态」的收尾
+都对齐上游 `unity_bridge/mod.rs::unity_test_run_controlled`。超时也会走取消，避免丢失调用方的 run
+一直占着编辑器。asmdef 带 `LOCUS_HAS_UNITY_TEST_FRAMEWORK` 条件编译，项目没装
+`com.unity.test-framework >= 1.4.0` 时这些命令不存在，调用会得到 Unity 侧的报错。
+
+**`unity_asset_graph`** 上游用 Rust 侧自建的 `asset_db` 索引回答，插件没有这层，因此改用 broker 自带的
+`search_yaml`：把目标资产的 `.meta` 里的 GUID 当作要匹配的值/组件，在指定的 `.unity` / `.prefab` 里搜。
+代价是**没有全项目扫描**——broker 一次只读一个场景或预制体，所以 `references` 和 `usages` 必须由
+调用方给出 `file_path`。搜索结果覆盖的是 Unity 序列化数据，二进制资产、自定义序列化、Preset 以及
+运行时拼接的字符串引用都不在其中。
+
+**`unity_capture`** 只负责抓图并返回路径，不返回图像数据。DSH 自带的 `read_image` 已经把「磁盘上的
+文件 → 模型可见的附件」这条路走完了，在插件里再实现一遍是重复；因此拿到 `path` 后调用
+`read_image` 即可。这也意味着截图对模型可见的前提是当前模型声明了图片输入。
 
 ## 与 Locus 桌面端的差异
 
@@ -133,7 +157,7 @@ Windows 用的就是上游 crate 本身，未作修改，导出符号与上游 `
 ## 开发
 
 ```bash
-npm test               # 71 个测试，不需要 Unity
+npm test               # 115 个测试，不需要 Unity
 npm run typecheck      # 静态检查 import / export
 npm run validate       # 用 DSH 的 JSON Schema 子集校验工具定义
 npm run build:native   # Linux/macOS 的 broker（Rust）

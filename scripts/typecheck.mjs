@@ -79,6 +79,10 @@ for (const file of files) {
   const relative = file.slice(root.length + 1)
   const lines = source.split('\n')
   let inBlockComment = false
+  // Template literals carry C# snippet sources (scene-set / scene-batch), so
+  // their statement lines must not be read as JavaScript calls. Track the
+  // backtick spans line by line: an odd count of backticks toggles the state.
+  let inTemplate = false
   lines.forEach((line, index) => {
     const trimmed = line.trim()
     if (inBlockComment) {
@@ -89,6 +93,12 @@ for (const file of files) {
       inBlockComment = !trimmed.includes('*/')
       return
     }
+    const backticks = (line.match(/(?<!\\)`/g) ?? []).length
+    const startedInTemplate = inTemplate
+    if (backticks % 2 === 1) inTemplate = !inTemplate
+    // A line that begins or ends a template holds JavaScript around the
+    // backtick; only the interior is certainly snippet text.
+    if (startedInTemplate || inTemplate) return
     if (trimmed.startsWith('//') || trimmed.startsWith('*') || trimmed.startsWith('#')) return
     // Method / function / class-member definitions are not calls.
     if (/^(?:static\s+|async\s+|get\s+|set\s+)?[A-Za-z_$][\w$]*\s*\([^)]*\)\s*\{\s*$/.test(trimmed)) return
