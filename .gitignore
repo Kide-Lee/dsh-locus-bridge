@@ -1,3 +1,8 @@
+# Locus broker runtime objects created inside the workspace: the Unix socket
+# cannot live in /tmp under the sandbox (a fresh tmpfs per command), so it is
+# bound here; it is a socket, never a tracked artifact.
+.locus/
+
 # DSH / Node tooling
 node_modules/
 .tmp/
