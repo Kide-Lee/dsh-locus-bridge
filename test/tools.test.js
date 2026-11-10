@@ -4,6 +4,9 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
 import { LocusClient } from '../src/locus-client.js'
 import { __resetPoolForTest, __setClientForTest, shutdownPool } from '../src/client-pool.js'
@@ -12,7 +15,14 @@ import { resolvePipeName } from '../src/pipe-name.js'
 import { startFakeBroker } from './fake-broker.js'
 
 const tools = Object.fromEntries(toolDefinitions.map((definition) => [definition.name, definition]))
-const PROJECT = 'F:/Projects/Game'
+
+// A real directory tree: project resolution now validates `Assets/` +
+// `ProjectSettings/` the way `unity_bridge::is_unity_project` does, so a made-up
+// `F:/Projects/Game` is correctly rejected before any socket work.
+const PROJECT = mkdtempSync(join(tmpdir(), 'locus-tools-test-'))
+mkdirSync(join(PROJECT, 'Assets'), { recursive: true })
+mkdirSync(join(PROJECT, 'ProjectSettings'), { recursive: true })
+process.on('exit', () => rmSync(PROJECT, { recursive: true, force: true }))
 
 function execContext(overrides = {}) {
   return {

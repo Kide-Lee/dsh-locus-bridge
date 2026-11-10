@@ -57,7 +57,16 @@ dsh plugin --profile <profile> add /path/to/dsh-locus-bridge
 - name: dsh-locus-bridge
 ```
 
-安装后模型会看到上面 7 个以 `unity_` 开头的工具。`project_path` 省略时使用 Session 当前工作目录（跟随 `working_directory`）。
+安装后模型会看到上面 7 个以 `unity_` 开头的工具。
+
+`project_path` 的解析对齐 Locus 桌面端（`unity_bridge::is_unity_project` + `cli_driver::resolve_project_path`）：
+
+1. 显式 `project_path`（绝对路径，或相对 Session 工作目录）——**并校验**目录同时含 `Assets/` 与 `ProjectSettings/`；
+2. 省略时，若 Session 工作目录本身就是 Unity 工程，就用它；
+3. 否则在 Session 工作目录的**一层直接子目录**里找唯一一个 Unity 工程（例如仓库根的 `unity-test/`）；
+4. 找到多个 → 报错列出候选；一个都没有 → 报错提示传 `project_path`。
+
+桌面端没有第 3 步（它只有「显式 `--project`」或「GUI 当前聚焦的 workspace」）。这里放宽一步，是因为 DSH 的 Session 通常起在仓库根而不是 Unity 工程内。路径只做 `resolve()` 折叠 `.`/`..`，**不做 `realpath`**：Unity 用它打开时的路径派生 broker key，跟随符号链接反而可能与编辑器不一致。
 
 > 关于 schema：DSH 的 `defineTool()` 用**参数 DSL** 编译 `parameters`（对象节点必须显式 `additionalProperties`、自由 JSON 值用 author-only 的 `type: 'json'`、`required` 只能写在隐式参数属性上），而本插件直接以符合该子集的 JSON Schema 对象书写（隐式参数根、`required: true` 标注、`json` 自由值），`ctx.tools.register` 接受这种定义（与 MCP 桥接一致），`scripts/dump-tools.mjs` 按同一子集校验。若要让 `defineTool` 再编译一遍，用 `registerLocusTools(defineTool)`；`scripts/validate-dsh-tools.mjs` 已用真实 DSH 验证全部 7 个工具。
 

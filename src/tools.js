@@ -47,7 +47,9 @@ import { sceneSetExecution, validateSetArgs } from './scene-set.js'
 const PROJECT_PATH = {
   type: 'string',
   description:
-    'Unity project root (the folder containing Assets/). Relative paths resolve from the Session working directory; omit to use the Session working directory.',
+    'Unity project root (the folder containing Assets/ and ProjectSettings/). Relative paths resolve from the ' +
+    'Session working directory. Omit it when the working directory is the Unity project, or when exactly one ' +
+    'Unity project sits directly inside it; otherwise pass the path explicitly.',
 }
 
 const CONNECTION_DESCRIPTION =

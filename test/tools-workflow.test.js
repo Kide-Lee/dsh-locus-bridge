@@ -1,5 +1,8 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
 import { LocusClient } from '../src/locus-client.js'
 import { __resetPoolForTest, __setClientForTest, shutdownPool } from '../src/client-pool.js'
@@ -8,7 +11,13 @@ import { toolDefinitions } from '../src/tools.js'
 import { startFakeBroker } from './fake-broker.js'
 
 const tools = Object.fromEntries(toolDefinitions.map((definition) => [definition.name, definition]))
-const PROJECT = 'F:/Projects/Game'
+
+// Project resolution validates `Assets/` + `ProjectSettings/`, so the fixture is
+// a real tree rather than a string that happens to look like a path.
+const PROJECT = mkdtempSync(join(tmpdir(), 'locus-workflow-test-'))
+mkdirSync(join(PROJECT, 'Assets'), { recursive: true })
+mkdirSync(join(PROJECT, 'ProjectSettings'), { recursive: true })
+process.on('exit', () => rmSync(PROJECT, { recursive: true, force: true }))
 
 function ctx(overrides = {}) {
   return {
