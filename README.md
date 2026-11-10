@@ -1,5 +1,11 @@
 # dsh-locus-bridge
 
+[![License: GPL-3.0-or-later](https://img.shields.io/badge/license-GPL--3.0--or--later-blue?style=flat-square)](LICENSE)
+[![Node](https://img.shields.io/badge/node-%3E%3D22.12-339933?style=flat-square&logo=node.js&logoColor=white)](package.json)
+[![Unity](https://img.shields.io/badge/unity-2022.3-000000?style=flat-square&logo=unity&logoColor=white)](#前提条件unity-端无需改动)
+[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-4b5563?style=flat-square)](#前提条件unity-端无需改动)
+[![Upstream: Locus](https://img.shields.io/badge/upstream-r1n7aro%2FLocus-2d6cdf?style=flat-square&logo=github)](https://github.com/r1n7aro/Locus)
+
 一个 **DSH 插件**：让 DSH 直接扮演 **Locus 客户端**，通过 Locus 原生 broker 操作 Unity 编辑器 —— 不需要启动 Locus 桌面程序，Unity 端也不需要改一行代码。传输层随平台选择：Windows 用命名管道，Linux/macOS 用 Unix 域套接字（配合本仓库 `native/locus_unix_native/` 的 broker 移植）。
 
 > **本项目是 [Locus](https://github.com/r1n7aro/Locus) 的第三方客户端实现，并非 Locus 官方项目。**
