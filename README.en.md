@@ -62,6 +62,24 @@ After restarting DSH, the model sees 7 tools whose names start with `unity_`.
    `LOCUS_UNITY_NATIVE_BRIDGE=1`. On Linux the first line of that marker is read as an absolute socket path,
    because inside a sandbox the socket cannot live in `/tmp`.
 
+**Two prerequisites that are easy to blame elsewhere, so confirm them first:**
+
+- **Another `Newtonsoft.Json` in the project breaks the whole build.** The bundled `Locus.Json.dll` is an
+  ILRepack merge; even though the Newtonsoft types are internalized, a second `Newtonsoft.Json.dll` in the
+  project (some GitHub-installed packages ship one) produces a wall of `error CS0433` type-ambiguity errors and
+  `Assembly-CSharp` never loads — that takes down every game script, not just this plugin. Remove one of the
+  two and retry; a `unity_status` that never gets capabilities is usually this.
+- **`unity_test` needs `com.unity.test-framework >= 1.4.0`.** The bundled
+  `Editor/Testing/Locus.UnityTesting.Editor.asmdef` uses `versionDefines` with the
+  `LOCUS_HAS_UNITY_TEST_FRAMEWORK` constraint, so on an older version the whole assembly is excluded and the
+  four `unity_test_*` commands are never registered — calls fail with `unknown message type: unity_test_list`.
+  The tool says so when it fails; the test framework itself still works, this plugin just cannot drive it.
+
+**`unity_asset` only supports text serialization.** It goes through Unity's `SerializedObject` text-YAML
+channel, so the project needs `Editor Settings → Asset Serialization` set to `Force Text` (the Unity 2022
+default). On a binary-serialized project `read` / `apply` answer
+`unsupported_capability: asset is not Unity text YAML`; use `unity_scene` or `unity_execute` there.
+
 A failed `unity_status` **automatically** reports what the project is missing, so a diagnosis costs no extra
 call. Only when it finds **no Unity package** does it also print the install command:
 
@@ -120,8 +138,43 @@ unpacked directory to keep it outside the plugin directory.
 | `unity_play_mode` | Switch to Play/Edit mode and wait for it to take effect | `status` → `set_editor_status` → poll `status` |
 | `unity_console_log` | Read the Unity Console (merged and deduplicated by level) | `unity_get_console_log` |
 | `unity_recompile` | Compile + domain reload + wait across the disconnect for convergence; `sync: none/targeted/full` controls asset import | `request_recompile` → disconnect → reconnect → poll `get_compile_result` |
+| `unity_test` | Discover and run Unity Test Framework tests, waiting for structured results (`list` / `run`) | `unity_test_list` / `unity_test_start` → 250ms `unity_test_status` → (cancel) `unity_test_cancel` |
 | `unity_asset` | Read serialized assets; revision-guarded atomic edits (`set` and array operations); undo; reload | `asset_api` (read / apply_batch / disk_reload) |
-| `unity_scene` | Scene object search, property tree read, atomic set (Undo, saves the scene) | `search_scene_objects` / `property_tree_read` / generated `execute_code` |
+| `unity_asset_graph` | Asset reference graph and script usages: `references` / `dependencies` / `usages` | generated `execute_code` (GUID comparison against serialized fields) |
+| `unity_capture` | Capture the Game / Scene view or an Editor window, with the image attached to the result (`ImageBlock`) — visible in one call | `capture_viewport` + `attachments.saveImage` |
+| `unity_scene` | Scene object search (by name, and `find` by component type), property tree read, atomic `set`, single-transaction `batch` and `undo` | `search_scene_objects` / `property_tree_read` / generated `execute_code` |
+
+## Boundaries of the three newer capabilities
+
+All three copy upstream's approach, but they are constrained by "this plugin is only a broker client", so the
+limits are worth stating.
+
+**`unity_test`** is served by `Editor/Testing/LocusUnityTestService.cs` shipped in the payload: it already
+registers `unity_test_list` / `unity_test_start` / `unity_test_status` / `unity_test_cancel`, so nothing on the
+Unity side changed and the plugin only drives them. The 250 ms cadence and the "cancellation must be observed
+reaching a terminal state" rule mirror upstream's `unity_bridge/mod.rs::unity_test_run_controlled`. A timeout
+also cancels, so a lost caller never leaves a run holding the editor. The asmdef is conditionally compiled on
+`LOCUS_HAS_UNITY_TEST_FRAMEWORK`; without `com.unity.test-framework >= 1.4.0` those commands do not exist and
+the call surfaces Unity's own error.
+
+**`unity_asset_graph`** upstream answers from its Rust `asset_db` index, which this plugin does not have. The
+broker's `search_yaml` **cannot** stand in for it: it matches GameObject names and hierarchy paths only and
+**never searches field values**, so passing a GUID as `query` always yields `Total matches: 0` (a scene with
+400 `Localizer` instances still returns 0). These actions therefore run a generated `execute_code` snippet over
+the scenes: the GUID from the asset's `.meta` is compared against the `m_Script` / reference slots Unity
+actually serialized.
+
+The cost is **no project-wide scan** — the snippet only walks the currently open scenes, so `references` and
+`usages` need `file_path` from the caller, and a `.prefab` must be open in the editor to be scanned. Results
+cover Unity's serialized data; binary assets, custom serialization, presets and references assembled from
+strings at runtime are not included.
+
+**`unity_capture`** takes the same route as `read_image`: it captures a PNG, hands it to the Host's
+`attachments.saveImage`, and attaches an `ImageBlock` to the tool result, so **one call returns both the text
+summary and the image itself** with no second read. The image-capability check (`llm.resolveModelInfo`'s
+`inputModalities`) runs before the attachment is committed, so a text-only model is refused rather than
+storing an image it can never see. Without an attachment service the call degrades to a path-only text
+result.
 
 ## Differences from the Locus desktop client
 

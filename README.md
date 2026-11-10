@@ -59,6 +59,24 @@ dsh plugin --profile <profile> add github:Kide-Lee/dsh-locus-bridge
 3. `<项目>/Library/Locus/NativeBridge.enabled` 存在，或者编辑器以 `LOCUS_UNITY_NATIVE_BRIDGE=1`
    启动。Linux 上会读取该 marker 的第一行作为绝对 socket 路径，因为在沙箱里 socket 不能放在 `/tmp`。
 
+**两个容易劝退的前提，先确认再排查别处：**
+
+- **工程里有别的 `Newtonsoft.Json` 会整体编译失败。** 随包的 `Locus.Json.dll` 是 ILRepack 合并出的
+  程序集，虽然 Newtonsoft 类型被 internalize，但如果工程中另有一个 `Newtonsoft.Json.dll`（例如某些
+  从 GitHub 装的包会自带），就会出现成片的 `error CS0433`（类型二义性），`Assembly-CSharp` 直接不
+  加载——受影响的是整个工程，不只是本插件。表现为编辑器里所有游戏脚本都不可用。此时先移除其中一个
+  再重试；`unity_status` 的 capabilities 里拿不到结果通常就是这个原因。
+- **`unity_test` 需要 `com.unity.test-framework >= 1.4.0`。** 随包的
+  `Editor/Testing/Locus.UnityTesting.Editor.asmdef` 带 `versionDefines` 与
+  `LOCUS_HAS_UNITY_TEST_FRAMEWORK` 条件编译，版本低于 1.4.0 时整个程序集被排除，`unity_test_*`
+  四个命令根本没注册，调用会得到 `unknown message type: unity_test_list`。工具会在报错时提示这个
+  版本要求；测试框架本身仍然可用，只是本插件驱动不了它。
+
+**`unity_asset` 只支持文本序列化。** 它走 Unity 的 `SerializedObject` 文本 YAML 通道，工程需要把
+`Editor Settings → Asset Serialization` 设为 `Force Text`（Unity 2022 默认已是）。纯二进制序列化
+的工程里 `read` / `apply` 会返回 `unsupported_capability: asset is not Unity text YAML`，此时改用
+`unity_scene` 或 `unity_execute`。
+
 `unity_status` 在连不上时会**自动**报告项目缺什么，不需要额外调用。只有当它判定
 **缺 Unity 插件**时，才会在输出里给出安装命令：
 
@@ -118,7 +136,7 @@ Windows 用的就是上游 crate 本身，未作修改，导出符号与上游 `
 | `unity_recompile` | 编译 + 域重载 + 跨断线等待收敛；`sync: none/targeted/full` 控制资产导入 | `request_recompile` → 断线 → 重连 → 轮询 `get_compile_result` |
 | `unity_test` | 发现并运行 Unity Test Framework 测试，等待结构化结果（`list` / `run`） | `unity_test_list` / `unity_test_start` → 250ms `unity_test_status` →（取消）`unity_test_cancel` |
 | `unity_asset` | 资产序列化读取；带 revision 守卫的原子编辑（`set` 与数组操作）；undo；reload | `asset_api`（read / apply_batch / disk_reload） |
-| `unity_asset_graph` | 资产引用图与脚本用法：`references` / `dependencies` / `usages` | `search_yaml`（配 `.meta` 里的 GUID） |
+| `unity_asset_graph` | 资产引用图与脚本用法：`references` / `dependencies` / `usages` | 生成的 `execute_code`（按 `.meta` 的 GUID 比对序列化字段） |
 | `unity_capture` | 截取 Game / Scene / 编辑器窗口，图像直接随结果返回（`ImageBlock`），一次调用即可看见 | `capture_viewport` + `attachments.saveImage` |
 | `unity_scene` | 场景对象检索（`search` 按名称、`find` 按组件类型）、属性树读取、原子 `set`、单事务 `batch` 与 `undo` | `search_scene_objects` / `property_tree_read` / 生成的 `execute_code` |
 
@@ -133,11 +151,15 @@ Windows 用的就是上游 crate 本身，未作修改，导出符号与上游 `
 一直占着编辑器。asmdef 带 `LOCUS_HAS_UNITY_TEST_FRAMEWORK` 条件编译，项目没装
 `com.unity.test-framework >= 1.4.0` 时这些命令不存在，调用会得到 Unity 侧的报错。
 
-**`unity_asset_graph`** 上游用 Rust 侧自建的 `asset_db` 索引回答，插件没有这层，因此改用 broker 自带的
-`search_yaml`：把目标资产的 `.meta` 里的 GUID 当作要匹配的值/组件，在指定的 `.unity` / `.prefab` 里搜。
-代价是**没有全项目扫描**——broker 一次只读一个场景或预制体，所以 `references` 和 `usages` 必须由
-调用方给出 `file_path`。搜索结果覆盖的是 Unity 序列化数据，二进制资产、自定义序列化、Preset 以及
-运行时拼接的字符串引用都不在其中。
+**`unity_asset_graph`** 上游用 Rust 侧自建的 `asset_db` 索引回答，插件没有这层。broker 的 `search_yaml`
+**不能**替代它：那条命令只匹配 GameObject 的名字和层级路径，**从不搜索字段值**，把 GUID 当 `query`
+传过去永远是 `Total matches: 0`（场景里确有 400 个 `Localizer` 实例时同样返回 0）。因此这三个动作改为
+生成 `execute_code` 片段遍历场景：读目标资产 `.meta` 里的 GUID，与 Unity 实际序列化的 `m_Script` /
+引用槽位比对。
+
+代价是**没有全项目扫描**——片段只走当前打开的场景，所以 `references` 和 `usages` 必须由调用方给出
+`file_path`；`.prefab` 要先在编辑器里打开才能被扫描到。搜索结果覆盖的是 Unity 序列化数据，二进制
+资产、自定义序列化、Preset 以及运行时拼接的字符串引用都不在其中。
 
 **`unity_capture`** 走的是 `read_image` 同一条路：抓图后把 PNG 交给 Host 的 `attachments.saveImage`，
 再在工具结果里挂一个 `ImageBlock`，因此**一次调用就同时拿到文字摘要和图像本身**，不需要再读一次。
@@ -166,6 +188,12 @@ npm run test:live      # 对着真实编辑器端到端跑，见 scripts/live-sm
 ```
 
 `unity-test/` 是本地一次性验证工程，已被 git 忽略。
+
+### 改了代码却没生效？
+
+`src/tools.js` 是**主线程模块**：改完需要重载插件或重开会话才生效。而 `src/pipe-io.js`、
+`src/pipe-worker.js` 每次调用都 `new Worker()` 全新加载，改动**立即生效**。这个差异很容易被误认为
+「改了不起作用」——排查传输层时先确认改的是不是 worker 侧文件。
 
 ## 许可证
 

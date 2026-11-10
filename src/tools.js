@@ -216,8 +216,10 @@ const unityExecute = {
     'Compile and execute a C# method body on the Unity Editor main thread. UnityEngine, UnityEditor, project/package ' +
     'types, and the Locus snippet API are available.\n\n' +
     'Return results with print(obj) or printJson(obj) (LocusJson is available); a single trailing expression is also ' +
-    'printed. Top-level await is supported with ExecuteAsync(..., ExecuteCodeContext ctx, CancellationToken ' +
-    'cancellationToken); use ctx.WaitFrame()/WaitFrames/WaitSeconds to yield between frames. Nested functions are not ' +
+    'printed. Your code is the body of an async method, so use top-level `await` directly — `await Task.Delay(50)`, ' +
+    '`await ctx.WaitSeconds(0.1)`. Do not call `ExecuteAsync(...)` yourself: the bridge already wraps this body in it, ' +
+    'and a nested `ExecuteAsync(async (ctx, ct) => …)` call fails with CS7036. Use ctx.WaitFrame()/WaitFrames/' +
+    'WaitSeconds to yield between frames. Nested functions are not ' +
     'at the top level: call them with ().\n\n' +
     `Timing: code between awaits holds Unity's main thread and freezes the Editor until it returns or awaits. Locus ` +
     `stops a snippet after ${EXECUTE_IDLE_LIMIT_MS / 1000}s with no print/printJson/ctx.Progress output, including ` +
