@@ -1,6 +1,10 @@
 # dsh-locus-bridge
 
-一个 **DSH 插件**：让 DSH 直接扮演 **Locus 客户端**，通过 Locus 原生 broker 操作 Unity 编辑器 —— 不需要启动 Locus 桌面程序，Unity 端也不需要改一行代码。传输层随平台选择：Windows 用命名管道，Linux/macOS 用 Unix 域套接字（配合 `Locus/locus_unix_native` 的 broker 移植）。
+一个 **DSH 插件**：让 DSH 直接扮演 **Locus 客户端**，通过 Locus 原生 broker 操作 Unity 编辑器 —— 不需要启动 Locus 桌面程序，Unity 端也不需要改一行代码。传输层随平台选择：Windows 用命名管道，Linux/macOS 用 Unix 域套接字（配合本仓库 `native/locus_unix_native/` 的 broker 移植）。
+
+> **本项目是 [Locus](https://github.com/r1n7aro/Locus) 的第三方客户端实现，并非 Locus 官方项目。**
+> Locus 本身（Unity 插件、`locus-native-broker`、桌面端）由 [@r1n7aro](https://github.com/r1n7aro) 开发，文档见 [unity.farlocus.com](https://unity.farlocus.com/)。
+> 本仓库包含基于其 `locus-native-broker` 派生的 POSIX 移植（`native/locus_unix_native/`），按 GPL-3.0-or-later 发布。
 
 ```
 Windows:  Unity Editor ──(\\.\pipe\locus_unity_native_<key>)──────── worker(fs 阻塞 I/O) ── LocusClient ── DSH 工具
@@ -9,7 +13,22 @@ Linux:    Unity Editor ──(<runtime>/locus/locus_unity_native_<key>.sock)─�
 
 两条传输共用同一套换行 JSON 协议、`reply_to` 路由与错误码，插件其余部分（重连、`edit session`、撤销守卫）完全一致。
 
-> 研究依据与完整协议说明见 [`docs/locus-client-bridge.md`](docs/locus-client-bridge.md)（对应 `Locus/` checkout，src-tauri `0.9.3`）。
+> 研究依据与完整协议说明见 [`docs/locus-client-bridge.md`](docs/locus-client-bridge.md)，对应 [Locus `4ee37ed0`](https://github.com/r1n7aro/Locus/tree/4ee37ed0)（[v0.9.3](https://github.com/r1n7aro/Locus/releases)，src-tauri `0.9.3`）。
+
+## 上游 Locus
+
+| | |
+|---|---|
+| 仓库 | [github.com/r1n7aro/Locus](https://github.com/r1n7aro/Locus) |
+| 文档 | [unity.farlocus.com/en](https://unity.farlocus.com/en)（[中文](https://unity.farlocus.com/)） |
+| 版本 | [Releases](https://github.com/r1n7aro/Locus/releases) · 本项目对齐 [`4ee37ed0`](https://github.com/r1n7aro/Locus/tree/4ee37ed0) / v0.9.3 |
+| 许可证 | [GPL-3.0-or-later](https://github.com/r1n7aro/Locus/blob/main/LICENSE) |
+
+本仓库**包含**从上游派生的代码（Linux/macOS 的 broker 移植与协议 crate），因此整体按 **GPL-3.0-or-later** 发布；具体哪些文件来自上游、改了哪里，见 [`NOTICE`](NOTICE)。仓库里的 `Locus/` 目录是本地 upstream checkout（独立 git 仓库，已被 `.gitignore` 忽略），仅供对照，构建本仓库不需要它。
+
+### 许可证
+
+本项目采用 [GPL-3.0-or-later](LICENSE)。`native/locus-native-protocol/` 为上游原样拷贝，`native/locus_unix_native/` 为上游 `locus-native-broker` 的 POSIX 移植（已修改），两者均继承上游的 GPL-3.0-or-later。详见 [`NOTICE`](NOTICE)。
 
 ## 工具
 
@@ -38,7 +57,7 @@ Linux:    Unity Editor ──(<runtime>/locus/locus_unity_native_<key>.sock)─�
 1. 项目已安装 Locus Unity 包（`com.farlocus.locus`）。
 2. `locus_unity/Editor/Native/x86_64/locus_unity_native.dll` 存在（仓库中由 `bun run unity:bundle-native` 构建）。
 3. 原生桥已启用：`<Project>/Library/Locus/NativeBridge.enabled` 存在（内容第一行可指定管道名），或编辑器进程环境变量 `LOCUS_UNITY_NATIVE_BRIDGE=1`。
-4. **broker 与平台匹配**：Windows 用 `locus_unity_native.dll`（Win32 命名管道）；Linux/macOS 用 `liblocus_unity_native.so`（Unix 域套接字，即 `Locus/locus_unix_native` 的移植，随包放在 `locus_unity/Editor/Native/linux-x86_64/`）。
+4. **broker 与平台匹配**：Windows 用 `locus_unity_native.dll`（Win32 命名管道）；Linux/macOS 用 `liblocus_unity_native.so`（Unix 域套接字，即 `native/locus_unix_native/` 的产物，随包放在 `locus_unity/Editor/Native/linux-x86_64/`）。
 5. 可选：`Library/Locus/BackgroundHook.enabled` —— Unity 窗口失焦时仍持续 tick；否则主线程心跳停滞 >30s 后 broker 会拒绝请求（`native_main_thread_unresponsive`）。
 
 管道名默认为 `\\.\pipe\locus_unity_native_<sha256(规范化项目路径)[0:32]>`，与 Locus 桌面端逐字节一致（`src/pipe-name.js`），也可显式指定。
@@ -114,10 +133,27 @@ src/
   play-mode.js     Play/Edit 模式切换与收敛轮询
   console.js       Console 参数校验与渲染
   format.js        status 展示
-  args.js          项目根解析（Session cwd → project_path）、代码规范化
+  args.js          项目根解析（project_path → cwd → 三层搜索 → 祖先旁）、代码规范化
   undo.js          写操作的 undo checkpoint 记录
 scripts/  dump-tools / typecheck / validate-dsh-tools / live-smoke
-test/     pipe-name / protocol / client / tools / tools-workflow + fake-broker
+test/     pipe-name / args / protocol / client / socket-transport / tools / tools-workflow + fake-broker
+
+native/
+  locus_unix_native/      Linux/macOS broker 移植（Unix 域套接字；上游 locus-native-broker 派生，GPL-3.0+）
+  locus-native-protocol/  上游协议 crate（原样拷贝，GPL-3.0+）
+```
+
+## 构建 Linux/macOS broker
+
+`native/` 是 Rust crate，独立构建（非 Cargo workspace 成员，各自带 `Cargo.lock`）：
+
+```bash
+# 需要 Rust（cargo 1.7x+）
+npm run build:native     # 等价于 cargo build --release --manifest-path native/locus_unix_native/Cargo.toml
+npm run test:native      # 跑该 crate 的协议测试（含真实 Unix socket 端到端）
+
+# 产物：native/locus_unix_native/target/release/liblocus_unity_native.so
+# 放进 Locus Unity 包的 Editor/Native/linux-x86_64/ 即可被 Unity 载入
 ```
 
 ## 已知限制

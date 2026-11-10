@@ -1,0 +1,33 @@
+[package]
+name = "locus_unix_native"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+description = "Linux/macOS port of the Locus in-process Unity Editor broker (Unix domain socket)"
+authors = ["FarLocus", "DSH port"]
+publish = false
+
+# Loaded into the Unity Editor process via P/Invoke. On Linux the runtime
+# resolves `DllImport("locus_unity_native")` to `liblocus_unity_native.so`, so
+# the library keeps the Windows symbol prefix and exports exactly the names in
+# `locus_unity_native/exports.txt`.
+[lib]
+name = "locus_unity_native"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+locus-native-protocol = { path = "../locus-native-protocol" }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "net", "io-util", "sync", "time", "macros"] }
+libc = "0.2"
+
+# The Windows build keeps its own crate (`locus_unity_native`); this crate is
+# only built for Unix hosts.
+[target.'cfg(unix)'.dependencies]
+libloading = "0.8"
+
+[profile.release]
+opt-level = 2
+
+[workspace]

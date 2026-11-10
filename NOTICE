@@ -1,0 +1,55 @@
+# Notices and attribution
+
+`dsh-locus-bridge` is licensed under the **GNU General Public License,
+version 3 or later** (see [LICENSE](LICENSE)).
+
+## Upstream work
+
+This project implements a client for, and a port of parts of,
+[Locus](https://github.com/r1n7aro/Locus) — an open-source Unity development
+agent by [@r1n7aro](https://github.com/r1n7aro), also released under
+GPL-3.0-or-later. It is aligned with Locus commit
+[`4ee37ed0`](https://github.com/r1n7aro/Locus/tree/4ee37ed0) (v0.9.3).
+
+Nothing here is an official Locus release, and the Locus authors are not
+affiliated with this project.
+
+## Files derived from Locus
+
+### `native/locus_unix_native/` — Linux/macOS broker port
+
+Derived from `crates/locus-native-broker` and `locus_unity_native/` in the
+upstream repository. **Modified** for POSIX hosts:
+
+- the Win32 named-pipe transport is replaced by a Unix domain socket server
+  (`src/server.rs`, `src/names_unix.rs`);
+- the named shared-memory state plane becomes a file-backed `mmap`
+  (`src/state_plane.rs`);
+- Mono symbol resolution uses `dlopen`/`dlsym` instead of
+  `GetModuleHandle`/`GetProcAddress` (`src/mono_names.rs`);
+- WebView2, GPU render transport and the in-process background hook have no
+  Unix counterpart and return the platform's "unavailable" values (`src/lib.rs`).
+
+The C ABI exported by the library is unchanged, so the unmodified upstream
+managed plugin binds it on Linux as it does on Windows.
+
+### `native/locus-native-protocol/` — wire protocol crate
+
+Copied **unmodified** from `crates/locus-native-protocol` upstream. It defines
+the newline-delimited JSON envelope, the state-plane byte layout, kernel object
+naming, capability identifiers and broker error codes that both sides must agree
+on. It is vendored here only so the port builds without an upstream checkout;
+the path dependency in `native/locus_unix_native/Cargo.toml` was rewritten to
+point at it.
+
+If you intend to modify these files, prefer sending changes upstream so the two
+implementations do not drift.
+
+## Original work in this repository
+
+Everything else — the DSH plugin (`src/`), its tests, scripts and documentation —
+is original to this project and carries the same GPL-3.0-or-later license.
+
+`src/pipe-name.js` is a deliberate line-by-line reimplementation of the naming
+scheme in `crates/locus-native-protocol/src/names.rs`; it must stay
+byte-compatible with it so both sides derive the same endpoint.

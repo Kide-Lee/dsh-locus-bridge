@@ -51,5 +51,9 @@ Locus/
 .DS_Store
 Thumbs.db
 
+# Rust build output for the vendored Unix broker port (the sources are tracked,
+# the artifacts are not: `npm run build:native` rebuilds them).
+native/**/target/
+
 # Local Rust toolchain (installed into the workspace)
 .tooling/

@@ -1,7 +1,8 @@
 {
   "name": "dsh-locus-bridge",
   "version": "0.1.0",
-  "description": "DSH plugin that acts as a Locus client for the in-Unity native broker (named pipe).",
+  "description": "DSH plugin that acts as a Locus client for the in-Unity native broker (Win32 named pipe or Unix domain socket).",
+  "license": "GPL-3.0-or-later",
   "private": true,
   "type": "module",
   "main": "src/index.js",
@@ -18,6 +19,8 @@
     "dump-tools": "node scripts/dump-tools.mjs",
     "validate": "node scripts/dump-tools.mjs && node scripts/typecheck.mjs && node scripts/validate-dsh-tools.mjs",
     "typecheck": "node scripts/typecheck.mjs",
-    "check": "node --test --test-concurrency=1 \"test/*.test.js\" && node scripts/dump-tools.mjs && node scripts/typecheck.mjs"
+    "check": "node --test --test-concurrency=1 \"test/*.test.js\" && node scripts/dump-tools.mjs && node scripts/typecheck.mjs",
+    "build:native": "cargo build --release --manifest-path native/locus_unix_native/Cargo.toml",
+    "test:native": "cargo test --release --manifest-path native/locus_unix_native/Cargo.toml"
   }
 }
