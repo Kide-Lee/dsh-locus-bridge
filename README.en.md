@@ -50,7 +50,7 @@ You can also install straight from GitHub:
 dsh plugin --profile <profile> add github:Kide-Lee/dsh-locus-bridge
 ```
 
-After restarting DSH, the model sees 7 tools whose names start with `unity_`.
+After restarting DSH, the model sees 10 tools whose names start with `unity_`.
 
 ### Editor prerequisites
 
@@ -144,37 +144,31 @@ unpacked directory to keep it outside the plugin directory.
 | `unity_capture` | Capture the Game / Scene view or an Editor window, with the image attached to the result (`ImageBlock`) — visible in one call | `capture_viewport` + `attachments.saveImage` |
 | `unity_scene` | Scene object search (by name, and `find` by component type), property tree read, atomic `set`, single-transaction `batch` and `undo` | `search_scene_objects` / `property_tree_read` / generated `execute_code` |
 
-## Boundaries of the three newer capabilities
-
 All three copy upstream's approach, but they are constrained by "this plugin is only a broker client", so the
 limits are worth stating.
 
-**`unity_test`** is served by `Editor/Testing/LocusUnityTestService.cs` shipped in the payload: it already
-registers `unity_test_list` / `unity_test_start` / `unity_test_status` / `unity_test_cancel`, so nothing on the
-Unity side changed and the plugin only drives them. The 250 ms cadence and the "cancellation must be observed
-reaching a terminal state" rule mirror upstream's `unity_bridge/mod.rs::unity_test_run_controlled`. A timeout
-also cancels, so a lost caller never leaves a run holding the editor. The asmdef is conditionally compiled on
-`LOCUS_HAS_UNITY_TEST_FRAMEWORK`; without `com.unity.test-framework >= 1.4.0` those commands do not exist and
-the call surfaces Unity's own error.
-
-**`unity_asset_graph`** upstream answers from its Rust `asset_db` index, which this plugin does not have. The
-broker's `search_yaml` **cannot** stand in for it: it matches GameObject names and hierarchy paths only and
-**never searches field values**, so passing a GUID as `query` always yields `Total matches: 0` (a scene with
-400 `Localizer` instances still returns 0). These actions therefore run a generated `execute_code` snippet over
-the scenes: the GUID from the asset's `.meta` is compared against the `m_Script` / reference slots Unity
-actually serialized.
-
-The cost is **no project-wide scan** — the snippet only walks the currently open scenes, so `references` and
-`usages` need `file_path` from the caller, and a `.prefab` must be open in the editor to be scanned. Results
-cover Unity's serialized data; binary assets, custom serialization, presets and references assembled from
-strings at runtime are not included.
-
-**`unity_capture`** takes the same route as `read_image`: it captures a PNG, hands it to the Host's
-`attachments.saveImage`, and attaches an `ImageBlock` to the tool result, so **one call returns both the text
-summary and the image itself** with no second read. The image-capability check (`llm.resolveModelInfo`'s
-`inputModalities`) runs before the attachment is committed, so a text-only model is refused rather than
-storing an image it can never see. Without an attachment service the call degrades to a path-only text
-result.
+- **`unity_test`**: served by `Editor/Testing/LocusUnityTestService.cs` shipped in the payload: it already
+  registers `unity_test_list` / `unity_test_start` / `unity_test_status` / `unity_test_cancel`, so nothing on the
+  Unity side changed and the plugin only drives them. The 250 ms cadence and the "cancellation must be observed
+  reaching a terminal state" rule mirror upstream's `unity_bridge/mod.rs::unity_test_run_controlled`. A timeout
+  also cancels, so a lost caller never leaves a run holding the editor. The asmdef is conditionally compiled on
+  `LOCUS_HAS_UNITY_TEST_FRAMEWORK`; without `com.unity.test-framework >= 1.4.0` those commands do not exist and
+  the call surfaces Unity's own error.
+- **`unity_asset_graph`**: upstream answers from its Rust `asset_db` index, which this plugin does not have. The
+  broker's `search_yaml` **cannot** stand in for it: it matches GameObject names and hierarchy paths only and
+  **never searches field values**, so passing a GUID as `query` always yields `Total matches: 0` (a scene with
+  400 `Localizer` instances still returns 0). These actions therefore run a generated `execute_code` snippet over
+  the scenes: the GUID from the asset's `.meta` is compared against the `m_Script` / reference slots Unity
+  actually serialized. The cost is **no project-wide scan** — the snippet only walks the currently open scenes,
+  so `references` and `usages` need `file_path` from the caller, and a `.prefab` must be open in the editor to be
+  scanned. Results cover Unity's serialized data; binary assets, custom serialization, presets and references
+  assembled from strings at runtime are not included.
+- **`unity_capture`**: takes the same route as `read_image`: it captures a PNG, hands it to the Host's
+  `attachments.saveImage`, and attaches an `ImageBlock` to the tool result, so **one call returns both the text
+  summary and the image itself** with no second read. The image-capability check (`llm.resolveModelInfo`'s
+  `inputModalities`) runs before the attachment is committed, so a text-only model is refused rather than
+  storing an image it can never see. Without an attachment service the call degrades to a path-only text
+  result.
 
 ## Differences from the Locus desktop client
 

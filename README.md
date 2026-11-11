@@ -46,31 +46,25 @@ dsh plugin --profile <profile> add github:Kide-Lee/dsh-locus-bridge
 | `unity_capture` | 截取 Game / Scene / 编辑器窗口，图像直接随结果返回（`ImageBlock`），一次调用即可看见 | `capture_viewport` + `attachments.saveImage` |
 | `unity_scene` | 场景对象检索（`search` 按名称、`find` 按组件类型）、属性树读取、原子 `set`、单事务 `batch` 与 `undo` | `search_scene_objects` / `property_tree_read` / 生成的 `execute_code` |
 
-## 三个新能力的边界
-
 这三个工具都照搬上游的做法，但都受「插件只做 broker 客户端」这一条约束，能力边界值得写清楚。
 
-**`unity_test`** 的服务端是随 payload 附带的 `Editor/Testing/LocusUnityTestService.cs`——它已经注册了
-`unity_test_list` / `unity_test_start` / `unity_test_status` / `unity_test_cancel` 四个扩展命令，
-所以 Unity 侧一行都没改，插件只负责驱动它们。轮询节奏（250 ms）与「取消后必须观察到终态」的收尾
-都对齐上游 `unity_bridge/mod.rs::unity_test_run_controlled`。超时也会走取消，避免丢失调用方的 run
-一直占着编辑器。asmdef 带 `LOCUS_HAS_UNITY_TEST_FRAMEWORK` 条件编译，项目没装
-`com.unity.test-framework >= 1.4.0` 时这些命令不存在，调用会得到 Unity 侧的报错。
-
-**`unity_asset_graph`** 上游用 Rust 侧自建的 `asset_db` 索引回答，插件没有这层。broker 的 `search_yaml`
-**不能**替代它：那条命令只匹配 GameObject 的名字和层级路径，**从不搜索字段值**，把 GUID 当 `query`
-传过去永远是 `Total matches: 0`（场景里确有 400 个 `Localizer` 实例时同样返回 0）。因此这三个动作改为
-生成 `execute_code` 片段遍历场景：读目标资产 `.meta` 里的 GUID，与 Unity 实际序列化的 `m_Script` /
-引用槽位比对。
-
-代价是**没有全项目扫描**——片段只走当前打开的场景，所以 `references` 和 `usages` 必须由调用方给出
-`file_path`；`.prefab` 要先在编辑器里打开才能被扫描到。搜索结果覆盖的是 Unity 序列化数据，二进制
-资产、自定义序列化、Preset 以及运行时拼接的字符串引用都不在其中。
-
-**`unity_capture`** 走的是 `read_image` 同一条路：抓图后把 PNG 交给 Host 的 `attachments.saveImage`，
-再在工具结果里挂一个 `ImageBlock`，因此**一次调用就同时拿到文字摘要和图像本身**，不需要再读一次。
-提交附件之前先做图片能力检查（`llm.resolveModelInfo` 的 `inputModalities`）——纯文本模型会直接拒绝，
-而不是先存一张它永远看不到的图。若部署没挂附件服务，就退回只返回路径的文字结果。
+- **`unity_test`**：服务端是随 payload 附带的 `Editor/Testing/LocusUnityTestService.cs`——它已经注册了
+  `unity_test_list` / `unity_test_start` / `unity_test_status` / `unity_test_cancel` 四个扩展命令，
+  所以 Unity 侧一行都没改，插件只负责驱动它们。轮询节奏（250 ms）与「取消后必须观察到终态」的收尾
+  都对齐上游 `unity_bridge/mod.rs::unity_test_run_controlled`。超时也会走取消，避免丢失调用方的 run
+  一直占着编辑器。asmdef 带 `LOCUS_HAS_UNITY_TEST_FRAMEWORK` 条件编译，项目没装
+  `com.unity.test-framework >= 1.4.0` 时这些命令不存在，调用会得到 Unity 侧的报错。
+- **`unity_asset_graph`**：上游用 Rust 侧自建的 `asset_db` 索引回答，插件没有这层。broker 的 `search_yaml`
+  **不能**替代它：那条命令只匹配 GameObject 的名字和层级路径，**从不搜索字段值**，把 GUID 当 `query`
+  传过去永远是 `Total matches: 0`（场景里确有 400 个 `Localizer` 实例时同样返回 0）。因此这三个动作改为
+  生成 `execute_code` 片段遍历场景：读目标资产 `.meta` 里的 GUID，与 Unity 实际序列化的 `m_Script` /
+  引用槽位比对。代价是**没有全项目扫描**——片段只走当前打开的场景，所以 `references` 和 `usages`
+  必须由调用方给出 `file_path`；`.prefab` 要先在编辑器里打开才能被扫描到。搜索结果覆盖的是 Unity
+  序列化数据，二进制资产、自定义序列化、Preset 以及运行时拼接的字符串引用都不在其中。
+- **`unity_capture`**：走 `read_image` 同一条路——抓图后把 PNG 交给 Host 的 `attachments.saveImage`，
+  再在工具结果里挂一个 `ImageBlock`，因此**一次调用就同时拿到文字摘要和图像本身**，不需要再读一次。
+  提交附件之前先做图片能力检查（`llm.resolveModelInfo` 的 `inputModalities`）——纯文本模型会直接拒绝，
+  而不是先存一张它永远看不到的图。若部署没挂附件服务，就退回只返回路径的文字结果。
 
 ## 与 Locus 桌面端的差异
 
