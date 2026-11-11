@@ -10,23 +10,10 @@
 
 dsh-locus-bridge 是一个 **DeepSeek harness 插件**。它能让 DSH 直接扮演 Locus 客户端，通过 Locus 原生 broker 操作 Unity 编辑器。
 
-本项目的`native/`目录包含两个 Rust crate：`locus_unix_native`（本项目构建的 Linux/macOS 版原生 broker）与 `locus-native-protocol`（上游的协议 crate）。它们能编译出 `liblocus_unity_native.so`，供 Unity 里的 C# 插件调用。
-
 关于 Locus 的更多信息，参见：
 
 - 上游项目： https://github.com/r1n7aro/Locus
 - 文档： https://unity.farlocus.com
-
-## 工作原理
-
-Locus 不是普通的「客户端 / 服务端」结构。**Unity 这一侧才是服务端**：`locus_unity_native` 这个
-Rust dll 被编辑器以进程内方式加载，对外提供一个命名管道（Windows）或 Unix domain socket
-（Linux/macOS），并且因为 dll 自身常驻，它能跨域重载存活。Locus 桌面端是这条 socket 的客户端，
-本插件也是——它实现同一套「一行一个 JSON」的协议，所以 Unity 端不需要改代码。
-
-请求形如 `{"id": "...", "type": "<command>", "message": "<string>"}`，响应带 `reply_to`，因此一条
-连接可以并发多路调用。像 `managed_reloading` 或 `native_request_timed_out` 这类错误码表示请求
-**没有被执行**、可以安全重试；客户端正是靠这个区分去跨域重载重连，而不是把调用判死。
 
 ## 安装
 
@@ -36,94 +23,13 @@ Rust dll 被编辑器以进程内方式加载，对外提供一个命名管道�
 请你帮我安装插件：https://github.com/Kide-Lee/dsh-locus-bridge。如果我的Unity项目没有Locus插件，也请你帮我安装好。
 ```
 
-亦或者也可以在克隆本项目后手动安装：
-
-```bash
-dsh plugin --profile <profile> add /path/to/dsh-locus-bridge
-```
-
-也可以直接从 GitHub 安装：
+也可以手动安装：
 
 ```bash
 dsh plugin --profile <profile> add github:Kide-Lee/dsh-locus-bridge
 ```
 
-重启 DSH 后，模型会看到 7 个以 `unity_` 开头的工具。
-
-### 编辑器前提
-
-1. 项目里装了 `locus_unity` 这个 Unity 包（`com.farlocus.locus`）。
-2. 对应平台的原生 broker 库就位——Windows 是 `locus_unity_native.dll`，Linux/macOS 是
-   `liblocus_unity_native.so`。随包附带的 payload 已包含这两个平台，装在 Windows 或 Linux
-   上都不需要自行构建。
-3. `<项目>/Library/Locus/NativeBridge.enabled` 存在，或者编辑器以 `LOCUS_UNITY_NATIVE_BRIDGE=1`
-   启动。Linux 上会读取该 marker 的第一行作为绝对 socket 路径，因为在沙箱里 socket 不能放在 `/tmp`。
-
-**两个容易劝退的前提，先确认再排查别处：**
-
-- **工程里有别的 `Newtonsoft.Json` 会整体编译失败。** 随包的 `Locus.Json.dll` 是 ILRepack 合并出的
-  程序集，虽然 Newtonsoft 类型被 internalize，但如果工程中另有一个 `Newtonsoft.Json.dll`（例如某些
-  从 GitHub 装的包会自带），就会出现成片的 `error CS0433`（类型二义性），`Assembly-CSharp` 直接不
-  加载——受影响的是整个工程，不只是本插件。表现为编辑器里所有游戏脚本都不可用。此时先移除其中一个
-  再重试；`unity_status` 的 capabilities 里拿不到结果通常就是这个原因。
-- **`unity_test` 需要 `com.unity.test-framework >= 1.4.0`。** 随包的
-  `Editor/Testing/Locus.UnityTesting.Editor.asmdef` 带 `versionDefines` 与
-  `LOCUS_HAS_UNITY_TEST_FRAMEWORK` 条件编译，版本低于 1.4.0 时整个程序集被排除，`unity_test_*`
-  四个命令根本没注册，调用会得到 `unknown message type: unity_test_list`。工具会在报错时提示这个
-  版本要求；测试框架本身仍然可用，只是本插件驱动不了它。
-
-**`unity_asset` 只支持文本序列化。** 它走 Unity 的 `SerializedObject` 文本 YAML 通道，工程需要把
-`Editor Settings → Asset Serialization` 设为 `Force Text`（Unity 2022 默认已是）。纯二进制序列化
-的工程里 `read` / `apply` 会返回 `unsupported_capability: asset is not Unity text YAML`，此时改用
-`unity_scene` 或 `unity_execute`。
-
-`unity_status` 在连不上时会**自动**报告项目缺什么，不需要额外调用。只有当它判定
-**缺 Unity 插件**时，才会在输出里给出安装命令：
-
-```bash
-node scripts/install-unity-package.mjs <工程路径> --install
-```
-
-它会把随包附带的 Locus 包复制进 `Packages/com.farlocus.locus`、写好
-`Library/Locus/NativeBridge.enabled`，并复核结果。要求编辑器已关闭。
-
-**编辑器开着时会被拒绝。** 判据是 `<工程>/Temp/UnityLockfile`：Unity 启动工程时创建它
-并持有独占锁，异常退出留下的陈旧文件不算（能拿到锁就说明没人持有）。命中时安装不会开始，
-退出码 2，并提示先关闭编辑器：
-
-```
-The Unity Editor has <工程> open. Close the editor and run this again: ...
-```
-
-之所以不接受「复制到一半再报错」：Windows 上删除旧包会以 `EPERM` 失败，而即便删除成功，
-编辑器仍持着已加载的程序集，之后重载会出现难以归因的行为。
-
-项目本身没问题、只是编辑器没开时，诊断**不输出任何内容**——「插件已就位」不是结论，
-没有结论就不占上下文。工具定义因此与官方客户端**完全一致**：安装这件事不常发生，
-不该长期占用上下文。
-
-### 安装来源
-
-`payload/locus_unity` 是已编译好的 Unity 包（233 个文件，约 15 MB，其中
-`Editor/Roslyn/Locus.Roslyn.dll` 占 9 MB）。它不是从上游 git 拉取的：上游
-`.gitignore` 忽略了 `Locus.Json.dll`、`Locus.Detour.dll`、`Locus.HotReload.Runtime.dll`、
-`Locus.Roslyn.dll` 和原生 broker，所以
-`"com.farlocus.locus": "https://github.com/...?path=locus_unity"` 装出来是**编译不过的残缺包**。
-自带一份完整包是唯一在所有平台上都成立的来源。
-
-包内随带**两个平台**的原生 broker，因此同一份 payload 在 Windows 与 Linux/macOS 上都能直接连上：
-
-| 平台 | 路径 | 来源 |
-|---|---|---|
-| Windows x86_64 | `Editor/Native/x86_64/locus_unity_native.dll` | 上游 `locus_unity_native` crate（`cargo build --release`） |
-| Linux x86_64 | `Editor/Native/linux-x86_64/liblocus_unity_native.so` | 本仓库 `native/locus_unix_native/`（`npm run build:native`） |
-
-Windows 用的就是上游 crate 本身，未作修改，导出符号与上游 `locus_unity_native/exports.txt`
-的 44 个名字逐一对齐（Unity 各版本靠这些名字绑定）。
-
-用 `npm run sync:payload` 从本地 Locus 检出重新生成（`--check` 只校验不写入）。这份 15 MB 的
-产物不进 npm tarball，通过 release asset 分发；用 `DSH_LOCUS_PAYLOAD_DIR` 指向解包后的目录即可，
-不必放在插件目录里。
+重启 DSH 后，模型会看到 10 个以 `unity_` 开头的工具。
 
 ## 工具
 
@@ -186,14 +92,6 @@ npm run validate       # 用 DSH 的 JSON Schema 子集校验工具定义
 npm run build:native   # Linux/macOS 的 broker（Rust）
 npm run test:live      # 对着真实编辑器端到端跑，见 scripts/live-smoke.mjs
 ```
-
-`unity-test/` 是本地一次性验证工程，已被 git 忽略。
-
-### 改了代码却没生效？
-
-`src/tools.js` 是**主线程模块**：改完需要重载插件或重开会话才生效。而 `src/pipe-io.js`、
-`src/pipe-worker.js` 每次调用都 `new Worker()` 全新加载，改动**立即生效**。这个差异很容易被误认为
-「改了不起作用」——排查传输层时先确认改的是不是 worker 侧文件。
 
 ## 许可证
 
