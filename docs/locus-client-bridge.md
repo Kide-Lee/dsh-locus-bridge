@@ -282,4 +282,124 @@ ctx.tools.register(defineTool({
 
 仍待实机确认（Windows + Unity）：Win32 管道读写、worker 阻塞读循环、失焦心跳、真实 `request_recompile` 跨重载时序，用 `node scripts/live-smoke.mjs --project <项目>`（可加 `--recompile`）。
 
-未实现：Locus compile server 路径（`enable_non_public_access`、`execute_loaded` 的 sidecar 编译）、hot-reload 系命令、`run_states` 逐帧采样、`capture_viewport`、`/view` 与知识系统。
+未实现：Locus compile server 路径（`enable_non_public_access`、`execute_loaded` 的 sidecar 编译）、hot-reload 系命令、`run_states` 逐帧采样、`/view` 与知识系统。
+（`capture_viewport` 已实现为 `unity_capture`；C# 语义分析已实现，见下节。）
+
+## C# 语义分析（独立于 broker）
+
+上游的 `code_*` 不走管道，因此这一层在插件里**不是** broker 客户端：`src/csharp/` 自己实现 Roslyn
+语言服务器的 LSP 客户端，与 `Locus/src-tauri/src/csharp_lsp/` 同构。
+
+| 模块 | 对应上游 |
+|---|---|
+| `lsp-protocol.js` | `client.rs` 的帧编解码 + `mod.rs::locate_symbol_position` |
+| `lsp-client.js` | `client.rs` 的 JSON-RPC 状态机、服务端请求应答、诊断 provider 注册 |
+| `lsp-pool.js` | `mod.rs` 的每 checkout 一进程、空闲回收、`retry_once_on_server_exit` |
+| `assets.js` / `archive.js` | `assets.rs` + `dotnet_runtime.rs`（并补上 Unix 的 `tar.gz`） |
+| `project-sync.js` | `unity_sync.rs` 的 `.sln`/`.csproj` 生成与临时包清理 |
+| `queries.js` | `tool/builtins/code.rs` 的五个查询与结果格式 |
+
+关键差异（均为实测结论）：
+
+1. **`XDG_RUNTIME_DIR` 必须可写。** 只读时 `dotnet restore` 与 `MetadataAsSource` 组合失败，症状是
+   首次查询 `-32800` 后进程静默 `exit 0`。客户端把 `XDG_RUNTIME_DIR` / `TMPDIR` / `DOTNET_CLI_HOME`
+   重定向到资产目录下的 `run/`。
+2. **必须有 `obj/project.assets.json`。** 缺失时编译器诊断 provider 永远返回空数组，而分析器仍在
+   返回风格建议——「无诊断」是假结论。工作区启动前按需 `dotnet restore`；`code_diagnostics` 在缺
+   还原产物时明确标注不可信。
+3. **`--extensionLogDirectory` 是必填参数**，缺失则服务器 `exit 1`，连 `initialize` 都不应答。
+4. **`workspace/symbol` 预热期返回空数组而非错误**（位置查询才是 `-32800`），因此在项目加载后的
+   短窗口内把空结果视为「索引未就绪」，窗口由首次成功查询消费。
+5. **诊断覆盖面窄于桌面端**：不含 tag / layer / build scene / Resources / legacy Input 轴校验，
+   这些依赖桌面端 asset database。
+6. **资产门控只看服务器与分析器。** `assetStatus()` 会把缺失的托管运行时也列进 `missing`，但系统
+   装了 .NET 10 就够用（`resolveDotnet` 会选它）。若按 `missing` 全量门控，开发者机器上会一直
+   误报「资产未安装」。
+7. **Unity 工程的还原产物在 `Temp/obj/` 下。** csproj 的 `<BaseIntermediateOutputPath>` 是
+   `Temp/obj/$(Configuration)/$(MSBuildProjectName)`，`project.assets.json` 因此不在 `obj/`。
+   写死默认路径会把每个 Unity 工程判成未还原。`dotnet restore` 也不接受多个 csproj（MSB1008），
+   必须走 `.sln` 或逐个还原。
+8. **Unity 的 csproj 用显式文件列表。** 最后一次同步后新建的 `.cs` 不在编译集内，Roslyn 对它
+   不产生诊断；工具会明确报告「不在编译集中」而不是「无诊断」。
+9. **生成链自身也经过编译验证。** `editorSyncSnippet()` / `batchEntryPointSource()` 产出的 C# 用
+   Roslyn 实编译过（两种宿主形态），并在真实 headless Unity 里执行成功；测试锁定生成器尝试顺序、
+   batch 入口只 `Debug.Log` 不 `print`、以及模板字符串里不得出现反引号（会破坏模块解析）。
+
+实测（linux-x64，Roslyn `5.4.0-2.26179.14`）：符号查询、定义、引用、hover、编译诊断（`CS0103`）全部
+通过；冷启动首次符号查询约 2 秒（含服务器启动），同一工作区后续查询在同一进程内完成。
+
+## 与上游 `csharp_lsp` 的逐项比对
+
+> 依据：`Locus/src-tauri/src/csharp_lsp/{mod,client,assets,unity_sync}.rs`（4104 行）、
+> `Locus/src-tauri/src/tool/builtins/code.rs`（726 行）、`code_unity.rs`（1430 行），
+> 以及 `Locus/tools/code_*.json`。本插件侧为 `src/csharp/`（约 3800 行）。
+
+### 工具参数：完全一致
+
+五个 `code_*` 的参数名、类型、必填性与上游逐项相同，唯一新增的是 `project_path`——
+上游从会话的 checkout 取项目根，本插件没有这层绑定，必须由调用方给出（省略时按
+`resolveProjectRoot` 的规则从工作目录推断）。
+
+### 已移植且行为等价
+
+| 能力 | 上游 | 本插件 | 说明 |
+|---|---|---|---|
+| LSP 帧编解码 | `client.rs` | `lsp-protocol.js` | `Content-Length` 分帧、增量重组 |
+| 服务端请求应答 | `client.rs` | `lsp-client.js` | `workspace/configuration`、`client/registerCapability`、`workDoneProgress`、`applyEdit` |
+| 诊断 provider 注册 | `client.rs` | `lsp-client.js` | 逐 provider 回传 `identifier` |
+| 符号定位 | `mod.rs::locate_symbol_position` | `lsp-protocol.js::locateSymbol` | 整词优先、注释行跳过、最近行回退、多义列举、UTF-16 列 |
+| 引用结果收集 | `mod.rs::collect_locations` | `queries.js::collectLocations` | 去重、排序、200 条上限、行文本附带 |
+| 每个 checkout 一进程 | `mod.rs` | `lsp-pool.js` | 懒启动、lease 语义简化为单进程entry |
+| 空闲回收 | `lsp_idle_timeout_secs`（默认 600s） | `IDLE_TIMEOUT_MS = 600_000` | 对齐 |
+| 项目加载超时 | `PROJECT_LOAD_TIMEOUT`（600s） | `PROJECT_LOAD_TIMEOUT_MS = 600_000` | 对齐 |
+| 查询就绪超时 | `QUERY_READY_TIMEOUT`（75s） | `QUERY_READY_TIMEOUT_MS = 75_000` | 对齐 |
+| 结果条数上限 | `MAX_RESULT_LOCATIONS = 200` | `MAX_RESULT_LOCATIONS = 200` | 对齐 |
+| 服务器崩溃重试 | `retry_once_on_server_exit` | `queryWithReadyRetry`（`-32800`/超时重试） | 语义等价 |
+| 资产下载 | `assets.rs` + `dotnet_runtime.rs` | `assets.js` + `archive.js` | 版本锁定相同 |
+| 工程文件生成 | `unity_sync.rs` | `project-sync.js` | 同一段 C# 生成链 |
+| 临时包清理 | `strip_temp_project_artifacts` | `stripProjectTempArtifacts` | 含 `.sln` 条目剥离 |
+| 字符串引用校验 | `code_unity.rs::scan_project_refs` | `project-refs.js` | 见下 |
+
+### 字符串引用校验：已移植
+
+上游 `code_diagnostics` 的 file scope 会在 Roslyn 诊断之后追加一段项目级校验，
+检查那些**能编译但运行时才失败**的字符串引用：
+
+| 类别 | 检查依据 | 触发点 |
+|---|---|---|
+| tag | `ProjectSettings/TagManager.asset` | `CompareTag` / `FindWithTag` / `.tag ==` |
+| layer | 同上（具名层） | `LayerMask.NameToLayer` |
+| scene | `ProjectSettings/EditorBuildSettings.asset` | `LoadScene` / `GetSceneByName`（名字与索引） |
+| Resources | `Assets/**/Resources` 与 `Packages/**/Resources` 目录树 | `Resources.Load/LoadAll/LoadAsync` |
+| Input axis | `ProjectSettings/InputManager.asset` + `activeInputHandler` | `Input.GetAxis/GetButton...` |
+
+这层只读文本，不依赖 asset_db，因此可以照搬。实现时修掉了上游的两个漏判：
+
+1. **单行块注释**：上游只处理跨行 `/* */`，`/* CompareTag("Missing") */` 会被当成活代码。
+   本插件按出现位置循环剥离。
+2. **纯数字场景索引**：`LoadScene(9)` 不含引号，若按「本行有引号才扫描」预筛会整行跳过。
+   本插件对 `LoadScene(<数字>)` 单独放行。
+
+### 未移植（附原因）
+
+| 上游能力 | 原因 |
+|---|---|
+| `[SerializeReference]` 类型检查 | `check_managed_reference_types` 需要桌面端 `asset_db` 解析「哪些序列化对象指向该类型」，管道里没有等价数据。跳过而不是近似实现。 |
+| `warm_up_in_background` 自动预热 | **已补**：`code_analysis action:"warm"`，等价于上游在编辑器打开时预加载。差的是「自动」——本插件没有「会话绑定 checkout」这个事件可挂钩。 |
+| `restart(workspace)` | **已补**：`code_analysis action:"restart"`（`restartWorkspace`），在 Unity 重新生成 `.csproj` 后使用。 |
+| 进程池容量上限 | 上游明确不设上限（"Other checkouts do not impose a capacity limit"），只靠空闲回收。本插件设 8 个上限，因为 DSH 是单进程宿主，需要防止单一调用方占满 .NET 堆。 |
+| `status_for_checkout` / `pool_metrics` 等 UI 面 API | 桌面端的设置面板与状态栏用，插件无对应界面。 |
+| `is_enabled` / `set_enabled` 开关 | 等价物是 `DSH_LOCUS_CSHARP` 环境变量（注册期决定）。 |
+
+### 输出格式差异
+
+| 处 | 上游 | 本插件 |
+|---|---|---|
+| 诊断列表 | 按文件分组，标题 `N diagnostics in <label>: X errors, Y warnings` | 平铺 `path:line:col  severity code: message` |
+| 诊断为空 | 会报告低于阈值的条数 | **已对齐**：`(N below the severity threshold.)` |
+| 完成提示 | `No definition found for 'X'. It may be defined in a compiled assembly.` | 额外说明「可能来自尚未加载的程序集，或工程同步后新增的文件」 |
+| 引用为空 | `No references to 'X' found (declaration excluded).` | 额外指向 `unity_code_usages`（序列化引用不在 Roslyn 视野内） |
+| 反编译源路径 | `[decompiled] Name.cs` | **已对齐** |
+
+格式差异保留是有意的：本插件的读者是 DSH 的模型，平铺列表更省 token，且附加提示能避免
+把「Roslyn 看不到序列化引用」误读成「没有任何引用」。

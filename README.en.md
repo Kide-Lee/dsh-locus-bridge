@@ -50,7 +50,8 @@ You can also install straight from GitHub:
 dsh plugin --profile <profile> add github:Kide-Lee/dsh-locus-bridge
 ```
 
-After restarting DSH, the model sees 10 tools whose names start with `unity_`.
+After restarting DSH, the model sees 10 tools whose names start with `unity_`, plus 6 `code_*` C# analysis tools (disable the latter with
+`DSH_LOCUS_CSHARP=0`).
 
 ### Editor prerequisites
 
@@ -144,6 +145,24 @@ unpacked directory to keep it outside the plugin directory.
 | `unity_capture` | Capture the Game / Scene view or an Editor window, with the image attached to the result (`ImageBlock`) — visible in one call | `capture_viewport` + `attachments.saveImage` |
 | `unity_scene` | Scene object search (by name, and `find` by component type), property tree read, atomic `set`, single-transaction `batch` and `undo` | `search_scene_objects` / `property_tree_read` / generated `execute_code` |
 
+### C# semantic analysis (optional, independent of the Unity connection)
+
+These six tools never touch the broker: they start a local Roslyn language server (`dotnet` child
+process) and speak LSP over stdio, so they work with Unity closed as long as the `.sln`/`.csproj`
+exist.
+
+| Tool | Purpose |
+|---|---|
+| `code_symbol_search` | Find C# symbols by name or camel hump |
+| `code_goto_definition` | Jump to a definition across files, asmdefs and packages |
+| `code_find_references` | Semantic references (overloads, generics, partials, using aliases; comments and strings excluded) |
+| `code_hover` | Signature, type and XML documentation |
+| `code_diagnostics` | Roslyn compiler errors plus Roslyn and Unity analyzers, without a Unity compile |
+| `code_analysis` | Inspect, install, warm, restart or reset the backend (`status` / `install` / `warm` / `restart` / `reset`) |
+
+The first use needs `code_analysis action:"install"`, which fetches about 90 MB (a ~60 MB Roslyn
+server; the ~30 MB runtime is skipped when the machine already has .NET 10).
+
 All three copy upstream's approach, but they are constrained by "this plugin is only a broker client", so the
 limits are worth stating.
 
@@ -170,6 +189,51 @@ limits are worth stating.
   storing an image it can never see. Without an attachment service the call degrades to a path-only text
   result.
 
+### C# analysis: why it is a separate plane
+
+- **It is not a broker capability.** Upstream `code_*` is backed by `src-tauri/src/csharp_lsp/`: one
+  Roslyn language server per checkout, loading the Unity-generated `.sln`/`.csproj`. It has nothing to
+  do with the Unity pipe, so the broker has no command for it and needs none — the LSP client lives in
+  Node under `src/csharp/`.
+- **Two things have to be guaranteed, or the answers are silently wrong.** Both were found by testing:
+  1. **A writable runtime directory.** The server creates named mutexes and temp caches under
+     `XDG_RUNTIME_DIR` (`/run/user/<uid>` on Linux). When that path is read-only, as in a sandbox or
+     container, `dotnet restore` and `MetadataAsSource` composition fail: the first query returns
+     `-32800 task canceled` and the process then exits 0 without a word. The client redirects it into
+     the asset root.
+  2. **A completed `dotnet restore`.** Without `obj/project.assets.json` the compiler diagnostic
+     provider returns an empty array *forever* — no error, no timeout — while the analyzer providers
+     keep reporting style suggestions. The user sees "no problems" for a file that does not compile.
+     A workspace therefore restores on demand, and `code_diagnostics` says the result is untrustworthy
+     when restore artifacts are missing instead of reporting "no diagnostics".
+  3. **A system .NET satisfies the runtime.** `assetStatus()` counts the absent managed copy as
+     missing, but `resolveDotnet` prefers a system .NET 10. Asset gating therefore demands only the
+     two downloaded artifacts; otherwise every developer machine reports "assets not installed".
+  4. **Restore artifacts are not under `obj/`.** Unity-generated csproj set
+     `<BaseIntermediateOutputPath>` to `Temp/obj/$(Configuration)/$(MSBuildProjectName)`, so
+     `project.assets.json` lands in `Temp/obj/Debug/<Project>/`. Hard-coding
+     `obj/project.assets.json` marks every Unity checkout unrestored and silently disables compiler
+     diagnostics. `dotnet restore` also accepts one project or solution per call; passing several
+     csproj files fails with MSB1008.
+  5. **Unity's csproj list files explicitly, not by glob.** A `.cs` written after the last project
+     sync is outside the compilation and yields no diagnostics at all. The tool now reports "not in
+     any project's compile set" instead of "no diagnostics", so an error in a new file is never
+     mistaken for clean code.
+- **`--extensionLogDirectory` is mandatory.** Without it the server exits 1 before answering `initialize`.
+- **Who generates the project files.** With a connected editor the plugin's `sync_project_files` is
+  used, falling back to an `execute_code` generator chain (the same C# as upstream); with no editor, a
+  one-shot `-batchmode` run of the same entry point, after which the temporary package and the entries
+  it left in the `.sln` are removed.
+- **`workspace/symbol` answers empty instead of failing while warming up.** Position queries return
+  `-32800`; the symbol query returns an empty array, so a short window after a project load treats
+  "empty" as "index still filling". The window is consumed by the first successful query, so a symbol
+  that genuinely does not exist afterwards costs nothing.
+- **Diagnostics coverage versus the desktop client.** The file scope's *string-reference* checks
+  (tags, layers, build scenes, Resources paths, legacy Input axes) are ported: they read
+  `ProjectSettings` text only and need no asset database. Still missing is the
+  `[SerializeReference]` broken-type check, which does need the desktop `asset_db`. See
+  [docs/locus-client-bridge.md](docs/locus-client-bridge.md) for the item-by-item comparison.
+
 ## Differences from the Locus desktop client
 
 - **The session working directory does not have to be the Unity project.** The plugin searches up to three
@@ -186,11 +250,12 @@ limits are worth stating.
 ## Development
 
 ```bash
-npm test               # 71 tests, Unity not required
+npm test               # 229 tests, no Unity or network needed
 npm run typecheck      # static check of import / export
 npm run validate       # validate tool definitions against the DSH JSON Schema subset
 npm run build:native   # the Linux/macOS broker (Rust)
 npm run test:live      # end-to-end against a real editor, see scripts/live-smoke.mjs
+npm run test:csharp    # C# analysis end-to-end against a real Roslyn server
 ```
 
 `unity-test/` is a local disposable verification project, ignored by git.

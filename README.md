@@ -29,7 +29,8 @@ dsh-locus-bridge 是一个 **DeepSeek harness 插件**。它能让 DSH 直接扮
 dsh plugin --profile <profile> add github:Kide-Lee/dsh-locus-bridge
 ```
 
-重启 DSH 后，模型会看到 10 个以 `unity_` 开头的工具。
+重启 DSH 后，模型会看到 10 个以 `unity_` 开头的工具，外加 6 个 `code_*` C# 分析工具（可用
+`DSH_LOCUS_CSHARP=0` 关闭后者）。
 
 ## 工具
 
@@ -45,6 +46,23 @@ dsh plugin --profile <profile> add github:Kide-Lee/dsh-locus-bridge
 | `unity_asset_graph` | 资产引用图与脚本用法：`references` / `dependencies` / `usages` | 生成的 `execute_code`（按 `.meta` 的 GUID 比对序列化字段） |
 | `unity_capture` | 截取 Game / Scene / 编辑器窗口，图像直接随结果返回（`ImageBlock`），一次调用即可看见 | `capture_viewport` + `attachments.saveImage` |
 | `unity_scene` | 场景对象检索（`search` 按名称、`find` 按组件类型）、属性树读取、原子 `set`、单事务 `batch` 与 `undo` | `search_scene_objects` / `property_tree_read` / 生成的 `execute_code` |
+
+### C# 语义分析（可选，独立于 Unity 连接）
+
+这六个工具**完全不走 broker**：它们在本地起一个 Roslyn 语言服务器（`dotnet` 子进程），
+通过 LSP/stdio 对话，因此 Unity 关着也能用（只要 `.sln`/`.csproj` 已存在）。
+
+| 工具 | 作用 |
+|---|---|
+| `code_symbol_search` | 按名字/驼峰模糊查 C# 符号（类比 Roslyn 的 workspace symbol） |
+| `code_goto_definition` | 跳转到定义，跨文件、跨 asmdef、跨包 |
+| `code_find_references` | 语义级引用查找（重载、泛型、partial、using 别名都解析；排除注释与字符串） |
+| `code_hover` | 签名、类型与 XML 文档 |
+| `code_diagnostics` | Roslyn 编译错误 + Roslyn/Unity 分析器诊断，不触发 Unity 编译 |
+| `code_analysis` | 查看/安装/预热/重启/重置分析后端（`status` / `install` / `warm` / `restart` / `reset`） |
+
+首次使用需 `code_analysis action:"install"`，下载约 90 MB（Roslyn 服务器约 60 MB；本机已有
+.NET 10 运行时则跳过约 30 MB 的运行时）。用 `DSH_LOCUS_CSHARP=0` 可整组关闭。
 
 这三个工具都照搬上游的做法，但都受「插件只做 broker 客户端」这一条约束，能力边界值得写清楚。
 
@@ -66,6 +84,42 @@ dsh plugin --profile <profile> add github:Kide-Lee/dsh-locus-bridge
   提交附件之前先做图片能力检查（`llm.resolveModelInfo` 的 `inputModalities`）——纯文本模型会直接拒绝，
   而不是先存一张它永远看不到的图。若部署没挂附件服务，就退回只返回路径的文字结果。
 
+### C# 分析：为什么单开一层
+
+- **不是 broker 能力。** 上游 `code_*` 由 `src-tauri/src/csharp_lsp/` 支撑：每个 checkout 一个
+  Roslyn 语言服务器进程，加载 Unity 生成的 `.sln`/`.csproj`。它和 Unity 管道毫无关系，所以
+  broker 没有对应命令，也不需要——这里直接在 Node 里实现 LSP 客户端（`src/csharp/`）。
+- **必须自己保证两件事，否则会静默给出错误答案。** 这两条都是实测踩出来的：
+  1. **可写的运行时目录。** 服务器在 `XDG_RUNTIME_DIR`（Linux 上 `/run/user/<uid>`）建命名互斥与
+     临时缓存；沙箱/容器里该路径只读时，`dotnet restore` 与 `MetadataAsSource` 组合失败，表现为
+     第一次查询返回 `-32800 task canceled` 然后进程静默 `exit 0`。客户端把它重定向到资产目录。
+  2. **必须有过 `dotnet restore`。** 没有 `obj/project.assets.json` 时编译器诊断 provider
+     **永远返回空数组**——不报错、不超时，只有分析器还在给风格建议。用户会看到「代码没问题」，
+     而文件根本编译不过。因此工作区启动前会按需 restore，且 `code_diagnostics` 在缺少还原产物时
+     明确说明结论不可信，而不是报告「无诊断」。
+  3. **系统 .NET 能满足运行时需求。** `assetStatus()` 把「托管运行时副本不存在」记为缺失，但
+     机器上已有 .NET 10 时 `resolveDotnet` 会直接用系统的。资产门控因此只要求服务器与分析器
+     两个下载件——否则开发者机器上每次都会误报「资产未安装」。
+  4. **还原产物不在 `obj/`。** Unity 生成的 csproj 把
+     `<BaseIntermediateOutputPath>` 设为 `Temp/obj/$(Configuration)/$(MSBuildProjectName)`，
+     所以 `project.assets.json` 落在 `Temp/obj/Debug/<Project>/`。写死 `obj/project.assets.json`
+     会让每个 Unity 工程都被判定为「未还原」，进而静默关闭编译器诊断。另外 `dotnet restore`
+     一次只接受一个项目或解决方案，逐个传多个 csproj 会以 MSB1008 失败。
+  5. **Unity 的 csproj 是显式文件列表，不是 glob。** 最后一次工程同步之后新建的 `.cs` 不在编译集
+     里，Roslyn 对它不产生任何诊断。工具现在会识别这种情况并明确说明「文件不在编译集中」，
+     而不是报告「无诊断」——否则新建文件里的错误会被误判为干净。
+- **`--extensionLogDirectory` 是必填参数。** 缺失时服务器直接 `exit 1`，连 `initialize` 都不答。
+- **工程文件由谁生成。** 有连接的编辑器时调插件新增的 `sync_project_files`，失败则回落到一段
+  `execute_code` 生成链（与上游同一段 C#）；没有编辑器时用一次性 `-batchmode` 跑同一个入口，
+  跑完删除临时包并清理它留在 `.sln` 里的条目。
+- **`workspace/symbol` 在预热期返回空而不是报错。** 位置查询会给 `-32800`，符号查询给空数组，
+  所以它在项目刚加载后的一个短窗口内把「空」当作「索引还在填」，窗口由首次成功的查询消费；
+  之后不存在的符号立即返回，不付等待成本。
+- **诊断覆盖范围与桌面端对比。** file scope 的**字符串引用校验**（tag / layer / build scene /
+  Resources 路径 / legacy Input 轴）已照搬——那部分只读 `ProjectSettings` 文本，不依赖
+  asset database。仍缺的是 `[SerializeReference]` 失效类型检查，它确实需要桌面端 `asset_db`。
+  完整逐项比对见 [docs/locus-client-bridge.md](docs/locus-client-bridge.md)。
+
 ## 与 Locus 桌面端的差异
 
 - **会话工作目录不必是 Unity 项目。** 插件会向下最多三层、广度优先地寻找 Unity 工程，找不到
@@ -80,11 +134,12 @@ dsh plugin --profile <profile> add github:Kide-Lee/dsh-locus-bridge
 ## 开发
 
 ```bash
-npm test               # 115 个测试，不需要 Unity
+npm test               # 229 个测试，不需要 Unity、不需要网络
 npm run typecheck      # 静态检查 import / export
 npm run validate       # 用 DSH 的 JSON Schema 子集校验工具定义
 npm run build:native   # Linux/macOS 的 broker（Rust）
 npm run test:live      # 对着真实编辑器端到端跑，见 scripts/live-smoke.mjs
+npm run test:csharp    # C# 分析：真实 Roslyn 服务器端到端，见 scripts/live-csharp.mjs
 ```
 
 ## 许可证
