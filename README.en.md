@@ -147,7 +147,7 @@ unpacked directory to keep it outside the plugin directory.
 
 ### C# semantic analysis (optional, independent of the Unity connection)
 
-These six tools never touch the broker: they start a local Roslyn language server (`dotnet` child
+These six tools do not touch the broker: they start a local Roslyn language server (`dotnet` child
 process) and speak LSP over stdio, so they work with Unity closed as long as the `.sln`/`.csproj`
 exist.
 
@@ -188,51 +188,6 @@ limits are worth stating.
   `inputModalities`) runs before the attachment is committed, so a text-only model is refused rather than
   storing an image it can never see. Without an attachment service the call degrades to a path-only text
   result.
-
-### C# analysis: why it is a separate plane
-
-- **It is not a broker capability.** Upstream `code_*` is backed by `src-tauri/src/csharp_lsp/`: one
-  Roslyn language server per checkout, loading the Unity-generated `.sln`/`.csproj`. It has nothing to
-  do with the Unity pipe, so the broker has no command for it and needs none — the LSP client lives in
-  Node under `src/csharp/`.
-- **Two things have to be guaranteed, or the answers are silently wrong.** Both were found by testing:
-  1. **A writable runtime directory.** The server creates named mutexes and temp caches under
-     `XDG_RUNTIME_DIR` (`/run/user/<uid>` on Linux). When that path is read-only, as in a sandbox or
-     container, `dotnet restore` and `MetadataAsSource` composition fail: the first query returns
-     `-32800 task canceled` and the process then exits 0 without a word. The client redirects it into
-     the asset root.
-  2. **A completed `dotnet restore`.** Without `obj/project.assets.json` the compiler diagnostic
-     provider returns an empty array *forever* — no error, no timeout — while the analyzer providers
-     keep reporting style suggestions. The user sees "no problems" for a file that does not compile.
-     A workspace therefore restores on demand, and `code_diagnostics` says the result is untrustworthy
-     when restore artifacts are missing instead of reporting "no diagnostics".
-  3. **A system .NET satisfies the runtime.** `assetStatus()` counts the absent managed copy as
-     missing, but `resolveDotnet` prefers a system .NET 10. Asset gating therefore demands only the
-     two downloaded artifacts; otherwise every developer machine reports "assets not installed".
-  4. **Restore artifacts are not under `obj/`.** Unity-generated csproj set
-     `<BaseIntermediateOutputPath>` to `Temp/obj/$(Configuration)/$(MSBuildProjectName)`, so
-     `project.assets.json` lands in `Temp/obj/Debug/<Project>/`. Hard-coding
-     `obj/project.assets.json` marks every Unity checkout unrestored and silently disables compiler
-     diagnostics. `dotnet restore` also accepts one project or solution per call; passing several
-     csproj files fails with MSB1008.
-  5. **Unity's csproj list files explicitly, not by glob.** A `.cs` written after the last project
-     sync is outside the compilation and yields no diagnostics at all. The tool now reports "not in
-     any project's compile set" instead of "no diagnostics", so an error in a new file is never
-     mistaken for clean code.
-- **`--extensionLogDirectory` is mandatory.** Without it the server exits 1 before answering `initialize`.
-- **Who generates the project files.** With a connected editor the plugin's `sync_project_files` is
-  used, falling back to an `execute_code` generator chain (the same C# as upstream); with no editor, a
-  one-shot `-batchmode` run of the same entry point, after which the temporary package and the entries
-  it left in the `.sln` are removed.
-- **`workspace/symbol` answers empty instead of failing while warming up.** Position queries return
-  `-32800`; the symbol query returns an empty array, so a short window after a project load treats
-  "empty" as "index still filling". The window is consumed by the first successful query, so a symbol
-  that genuinely does not exist afterwards costs nothing.
-- **Diagnostics coverage versus the desktop client.** The file scope's *string-reference* checks
-  (tags, layers, build scenes, Resources paths, legacy Input axes) are ported: they read
-  `ProjectSettings` text only and need no asset database. Still missing is the
-  `[SerializeReference]` broken-type check, which does need the desktop `asset_db`. See
-  [docs/locus-client-bridge.md](docs/locus-client-bridge.md) for the item-by-item comparison.
 
 ## Differences from the Locus desktop client
 
