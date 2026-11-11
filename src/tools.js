@@ -105,9 +105,9 @@ export function attachHost(ctx) {
  * The broker's `unity_asset` gate is an EXTENSION WHITELIST, not a format probe
  * (`LocusBridge.AssetApi.cs::ValidateAssetApiPath`): nine extensions, and
  * anything else is rejected with "unsupported_capability: asset serialization
- * format .ext". Verified live on a Force Text project where
- * `Assets/NoFriction.physicsMaterial2D` is plain YAML and still refused. The
- * message names the wrong cause, so restate it with the real rule.
+ * format .ext". Verified live on a Force Text project where a plain-YAML
+ * `.physicsMaterial2D` is still refused. The message names the wrong cause, so
+ * restate it with the real rule.
  */
 const ASSET_EXTENSIONS = [
   '.asset',
@@ -608,11 +608,11 @@ const unityAsset = {
     '`apply`: pass the same `path` and the `snapshot` from the read, plus `edits` = array of ' +
     '`{operation:{op:"set"|"array_insert"|"array_remove"|"array_move"|"array_resize", object_id, property_path, ' +
     'value, index, to_index, size}}`, plus optional `expected_revision`. Values are plain JSON (string/number/bool/' +
-    'array); object references are `"fileID:<id> <guid>"` or `{fileID, guid}`. A changed file is a ' +
+    'array); compound structs (Vector3, Color, Quaternion, Rect, Bounds) are JSON objects that must carry exactly ' +
+    'the serialized members; object references are `"fileID:<id> <guid>"` or `{fileID, guid}`. A changed file is a ' +
     '`revision_conflict` and nothing is written. The batch is atomic, saved to disk and re-imported; call ' +
     'unity_asset action "undo" with the returned `undo` token to restore the previous revision while the file is ' +
-    'unchanged. Compound fields (Vector3/Color/quaternions) are not supported here — use unity_scene set or ' +
-    'unity_execute.\n\n' +
+    'unchanged.\n\n' +
     '`undo`: restores the file revisions recorded by the previous `apply` (only while they still match).\n\n' +
     '`reload`: re-imports files written outside the editor (content updates, merges) and reloads clean open scenes; ' +
     'assets with unsaved in-memory edits are reported as stale, never overwritten. ' +

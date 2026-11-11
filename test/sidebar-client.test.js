@@ -1,0 +1,389 @@
+import { test } from 'node:test'
+import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
+
+import {
+  EXTENSIONS,
+  MODEL_EXTENSIONS,
+  TAB_ID,
+  TAB_KIND,
+  apiUrl,
+  arrayCommand,
+  basenameOf,
+  colorToHex,
+  createLocusAssetPlugin,
+  editorFor,
+  encodeWrite,
+  flattenTree,
+  hasChildren,
+  hexToColor,
+  isLeaf,
+  nodeChildren,
+  nodeKey,
+  parseFileAddress,
+  patternsFor,
+  replaceNode,
+  rowKey,
+  suffixOf,
+  targetKey,
+  valueSummary,
+} from '../src/client/plugin.js'
+
+// ── addresses ───────────────────────────────────────────────────────────────
+
+test('parseFileAddress reads the Session scope of a file address', () => {
+  assert.deepEqual(parseFileAddress('dsh-resource://file/session/s1/Assets/Prefabs/Player.prefab'), {
+    sessionId: 's1',
+    path: 'Assets/Prefabs/Player.prefab',
+  })
+  assert.deepEqual(parseFileAddress('dsh-resource://file/session/s1/Assets/a%20b%23c.prefab?line=3'), {
+    sessionId: 's1',
+    path: 'Assets/a b#c.prefab',
+  })
+  assert.equal(parseFileAddress('dsh-resource://file/absolute/etc/passwd'), undefined)
+  assert.equal(parseFileAddress('dsh-resource://file/session/s1'), undefined)
+  assert.equal(parseFileAddress('https://example.test/x.prefab'), undefined)
+  assert.equal(parseFileAddress(''), undefined)
+})
+
+test('basenameOf and suffixOf mirror the Server-side helpers', () => {
+  assert.equal(basenameOf('Assets/A/B.PREFAB'), 'B.PREFAB')
+  assert.equal(suffixOf('Assets/A/B.PREFAB'), 'prefab')
+  assert.equal(suffixOf('Assets/A/noext'), '')
+})
+
+test('EXTENSIONS matches the Host preview list', () => {
+  const host = readFileSync(new URL('../src/sidebar/paths.js', import.meta.url), 'utf8')
+  const block = /export const PREVIEW_EXTENSIONS = Object\.freeze\(\[([\s\S]*?)\]\)/.exec(host)
+  assert.ok(block, 'PREVIEW_EXTENSIONS not found')
+  const hostList = [...block[1].matchAll(/'([^']+)'/g)].map((match) => match[1])
+  assert.deepEqual([...EXTENSIONS], hostList, 'the browser and the Host must claim the same suffixes')
+})
+
+// ── tree walking ────────────────────────────────────────────────────────────
+
+function node(overrides = {}) {
+  return {
+    displayName: 'X',
+    propertyPath: '',
+    bindingTarget: { kind: 'asset', path: 'Assets/A.prefab', globalObjectId: 'gid', targetFileId: 1 },
+    valueType: 'String',
+    children: [],
+    ...overrides,
+  }
+}
+
+test('nodeKey is stable per target+path and changes with either', () => {
+  const a = node({ propertyPath: 'm_Name' })
+  const b = node({ propertyPath: 'm_Name' })
+  const c = node({ propertyPath: 'm_Tag' })
+  assert.equal(nodeKey(a), nodeKey(b))
+  assert.notEqual(nodeKey(a), nodeKey(c))
+  // A global object id IS the identity; without one the local ids decide.
+  const localA = node({ propertyPath: 'm_Name', bindingTarget: { kind: 'component', path: 'Assets/A.prefab', targetFileId: 1, componentType: 'Transform' } })
+  const localB = node({ propertyPath: 'm_Name', bindingTarget: { kind: 'component', path: 'Assets/A.prefab', targetFileId: 2, componentType: 'Transform' } })
+  assert.notEqual(nodeKey(localA), nodeKey(localB))
+  assert.equal(nodeKey(localA), nodeKey(node({ propertyPath: 'm_Name', bindingTarget: { ...localA.bindingTarget } })))
+  // Every field of one component shares its target key.
+  assert.equal(targetKey(a), targetKey(c))
+})
+
+test('rowKey adds the ancestor chain so sibling identities stay distinct', () => {
+  const shared = node({ propertyPath: '' })
+  assert.equal(rowKey(null, shared), nodeKey(shared))
+  assert.equal(rowKey('parent', shared), `${'parent'}>${nodeKey(shared)}`)
+})
+
+test('flattenTree shows only expanded branches, in document order', () => {
+  const leaf = node({ displayName: 'Leaf', propertyPath: 'm_Leaf' })
+  const group = node({ displayName: 'Group', propertyPath: '', children: [leaf, leaf] })
+  const root = node({ displayName: 'Root', children: [group, leaf] })
+  const collapsed = flattenTree(root, new Set(), new Map())
+  assert.deepEqual(collapsed.map((row) => row.node.displayName), ['Root'])
+  const expanded = flattenTree(root, new Set([rowKey(null, root), rowKey(rowKey(null, root), group)]), new Map())
+  assert.deepEqual(expanded.map((row) => row.node.displayName), ['Root', 'Group', 'Leaf', 'Leaf', 'Leaf'])
+  assert.deepEqual(expanded.map((row) => row.depth), [0, 1, 2, 2, 1])
+})
+
+test('flattenTree prefers a lazily fetched subtree over the embedded children', () => {
+  const lazyChild = node({ displayName: 'Lazy', propertyPath: 'm_Lazy' })
+  const group = node({ displayName: 'Group' })
+  const root = node({ displayName: 'Root', children: [group] })
+  const rootKey = rowKey(null, root)
+  const groupKey = rowKey(rootKey, group)
+  const cache = new Map([[groupKey, [lazyChild]]])
+  const rows = flattenTree(root, new Set([rootKey, groupKey]), cache)
+  assert.deepEqual(rows.map((row) => row.node.displayName), ['Root', 'Group', 'Lazy'])
+  assert.deepEqual(nodeChildren(group, new Map()), [])
+  assert.deepEqual(nodeChildren(group, cache, groupKey).map((child) => child.displayName), ['Lazy'])
+})
+
+test('flattenTree stops at its depth limit', () => {
+  const deep = node({ displayName: 'a', children: [node({ displayName: 'b', children: [node({ displayName: 'c' })] })] })
+  const keys = new Set()
+  const walk = (current, parentKey) => {
+    const key = rowKey(parentKey, current)
+    keys.add(key)
+    for (const child of current.children ?? []) walk(child, key)
+  }
+  walk(deep, null)
+  assert.equal(flattenTree(deep, keys, new Map(), 1).length, 2)
+})
+
+test('replaceNode patches one node immutably and leaves the rest alone', () => {
+  const a = node({ displayName: 'A', propertyPath: 'm_A', value: 'one' })
+  const b = node({ displayName: 'B', propertyPath: 'm_B', value: 'two' })
+  const root = node({ displayName: 'Root', children: [a, b] })
+  const next = replaceNode(root, rowKey(rowKey(null, root), b), { value: 'three', displayValue: 'three' })
+  assert.notEqual(next, root)
+  assert.equal(next.children[0], a, 'the untouched sibling keeps its identity')
+  assert.equal(next.children[1].value, 'three')
+  assert.equal(root.children[1].value, 'two', 'the original tree is not mutated')
+  assert.equal(replaceNode(root, 'missing', { value: 1 }), root, 'a miss returns the same root')
+})
+
+// ── editor descriptors ──────────────────────────────────────────────────────
+
+test('isLeaf reflects hasChildren, not the array flag', () => {
+  assert.ok(isLeaf(node({ propertyPath: 'm_X' })))
+  assert.ok(!isLeaf(node({ propertyPath: '', hasChildren: true })))
+})
+
+test('editorFor maps Unity value types onto the field kinds the panel draws', () => {
+  const kind = (valueType, extra = {}) => editorFor(node({ valueType, propertyPath: 'm_X', ...extra }))?.kind ?? null
+  assert.equal(kind('Boolean'), 'boolean')
+  assert.equal(kind('Integer'), 'integer')
+  assert.equal(kind('LayerMask'), 'integer')
+  assert.equal(kind('Float'), 'number')
+  assert.equal(kind('Double'), 'number')
+  assert.equal(kind('String'), 'string')
+  assert.equal(kind('Enum'), 'enum')
+  assert.equal(kind('Color'), 'color')
+  assert.equal(kind('Vector2'), 'vector')
+  assert.equal(kind('Vector3Int'), 'vector')
+  assert.equal(kind('Quaternion'), 'vector')
+  assert.equal(kind('Rect'), 'vector')
+  assert.equal(kind('ObjectReference'), 'reference')
+  assert.equal(kind('Generic'), null)
+  assert.equal(editorFor(node({ propertyPath: 'm_X', valueType: 'Float', editable: false })), null)
+  assert.equal(editorFor(node({ propertyPath: 'm_X', valueType: 'Float', hasChildren: true, children: [node()] })), null)
+})
+
+test('editorFor reports the vector keys and enum options', () => {
+  const vector = editorFor(node({ valueType: 'Vector4', propertyPath: 'm_X' }))
+  assert.deepEqual(vector.keys, ['x', 'y', 'z', 'w'])
+  const rect = editorFor(node({ valueType: 'Rect', propertyPath: 'm_X' }))
+  assert.deepEqual(rect.keys, ['x', 'y', 'width', 'height'])
+  const flags = editorFor(node({ valueType: 'Enum', propertyPath: 'm_X', isFlagsEnum: true, enumValueFlag: 5, enumOptions: [{ label: 'A', numericValue: 1 }] }))
+  assert.equal(flags.flags, true)
+  assert.equal(flags.flagValue, 5)
+})
+
+// ── write encoding ──────────────────────────────────────────────────────────
+
+test('encodeWrite produces the valueJson vocabulary SetSerializedPropertyValue parses', () => {
+  const write = (valueType, value, extra = {}) => encodeWrite(node({ valueType, propertyPath: 'm_X', ...extra }), value)
+  assert.equal(write('Boolean', true), true)
+  assert.equal(write('Integer', 3.7), 4, 'integers round')
+  assert.equal(write('Float', 1.5), 1.5)
+  assert.equal(write('String', 'hi'), 'hi')
+  assert.deepEqual(write('Enum', 2), { index: 2 })
+  assert.deepEqual(write('Enum', 3, { isFlagsEnum: true }), { action: 'setflags', flagValue: 3 })
+  assert.deepEqual(write('Vector3', { x: 1, y: 2, z: 3 }), { x: 1, y: 2, z: 3 })
+  assert.deepEqual(write('Vector3', { x: 1 }), { x: 1, y: 0, z: 0 }, 'missing components default to 0')
+  assert.deepEqual(write('Color', { r: 2, g: -1, b: 0.5 }), { r: 1, g: 0, b: 0.5, a: 1 }, 'channels clamp')
+  assert.deepEqual(write('ObjectReference', { globalObjectId: 'g' }), { globalObjectId: 'g' })
+  assert.equal(write('ObjectReference', null), null)
+  assert.throws(() => write('Float', 'abc'), /finite number/)
+  assert.throws(() => encodeWrite(node({ valueType: 'Generic', propertyPath: 'm_X' }), 1), /not editable/)
+})
+
+test('arrayCommand carries only the fields the command needs', () => {
+  assert.deepEqual(arrayCommand('insert', { index: 2 }), { action: 'insert', index: 2 })
+  assert.deepEqual(arrayCommand('delete', { index: 0 }), { action: 'delete', index: 0 })
+  assert.deepEqual(arrayCommand('move', { index: 0, toIndex: 2 }), { action: 'move', index: 0, toIndex: 2 })
+  assert.deepEqual(arrayCommand('resize', { size: 0 }), { action: 'resize', size: 0 })
+  assert.deepEqual(arrayCommand('clear'), { action: 'clear' })
+})
+
+// ── color round trip ────────────────────────────────────────────────────────
+
+test('colorToHex writes sRGB and hexToColor inverts it back to linear', () => {
+  assert.equal(colorToHex({ r: 1, g: 1, b: 1 }), '#ffffff')
+  assert.equal(colorToHex({ r: 0, g: 0, b: 0 }), '#000000')
+  const linear = { r: 0.5, g: 0.25, b: 0.1 }
+  const round = hexToColor(colorToHex(linear))
+  for (const key of ['r', 'g', 'b']) {
+    assert.ok(Math.abs(round[key] - linear[key]) < 0.01, `${key} round trips: ${round[key]} vs ${linear[key]}`)
+  }
+  assert.equal(hexToColor('nope'), null)
+})
+
+// ── summaries ───────────────────────────────────────────────────────────────
+
+test('valueSummary prefers displayValue and falls back per shape', () => {
+  assert.equal(valueSummary(node({ displayValue: 'Center' })), 'Center')
+  assert.equal(valueSummary(node({ value: true })), 'true')
+  assert.equal(valueSummary(node({ value: [1, 2, 3] })), '3 item(s)')
+  assert.equal(valueSummary(node({ value: { x: 1 } })), '{"x":1}')
+  assert.equal(valueSummary(null), '')
+})
+
+// ── urls ────────────────────────────────────────────────────────────────────
+
+test('apiUrl resolves under the page directory and encodes parameters', () => {
+  const url = apiUrl('asset', { sessionId: 's 1', path: 'Assets/a b.prefab', depth: undefined })
+  assert.ok(url.pathname.endsWith('/locus/api/asset'), url.pathname)
+  assert.equal(url.searchParams.get('sessionId'), 's 1')
+  assert.equal(url.searchParams.get('path'), 'Assets/a b.prefab')
+  assert.equal(url.searchParams.has('depth'), false)
+})
+
+// ── plugin shape ────────────────────────────────────────────────────────────
+
+test('the plugin registers one tab type and one body under that key', () => {
+  const registrations = []
+  const effects = []
+  const disposers = []
+  const types = []
+  const fakeReact = {
+    createElement: (type, props, ...children) => ({ type, props, children }),
+    useCallback: (fn) => fn,
+    useEffect: () => {},
+    useMemo: (fn) => fn(),
+    useRef: (value) => ({ current: value }),
+    useState: (value) => [typeof value === 'function' ? value() : value, () => {}],
+  }
+  const ctx = {
+    effect(fn, label) {
+      effects.push({ label })
+      const dispose = fn()
+      if (typeof dispose === 'function') disposers.push(dispose)
+    },
+    on: () => {},
+    sidebarRightTabs: {
+      register(definition) {
+        types.push(definition)
+        return () => {}
+      },
+    },
+    slots: {
+      inject(name, fn) {
+        registrations.push({ injected: name, result: fn() })
+        return () => {}
+      },
+      register(definition, component) {
+        registrations.push({ definition, component })
+        return () => {}
+      },
+    },
+  }
+  globalThis.document = {
+    documentElement: { dataset: {} },
+    head: { querySelector: () => null, appendChild: () => {} },
+    createElement: () => ({ setAttribute() {}, textContent: '' }),
+  }
+  try {
+    const plugin = createLocusAssetPlugin(() => fakeReact)
+    assert.deepEqual(plugin.inject, ['slots', 'sidebarRightTabs'])
+    plugin.apply(ctx)
+    assert.equal(types.length, 1)
+    const type = types[0]
+    assert.equal(type.id, TAB_ID)
+    assert.equal(type.kind, TAB_KIND)
+    assert.equal(type.priority, 'extension')
+    assert.equal(type.keepMounted, true)
+    // Scheme-qualified and longer than a generic `dsh-resource://file/**`, so
+    // this tab outranks another plugin that claims every file (see patternsFor).
+    assert.deepEqual(type.patterns, EXTENSIONS.map((extension) => `dsh-resource://file/**/*.${extension}`))
+    for (const pattern of type.patterns) {
+      assert.ok(pattern.length > 'dsh-resource://file/**'.length, `${pattern} must outrank the generic claim`)
+    }
+    assert.equal(type.title('dsh-resource://file/session/s/Assets/Prefabs/Player.prefab'), 'Player.prefab')
+    const body = registrations.find((entry) => entry.definition?.key === TAB_ID)
+    assert.ok(body, 'the body registers under the type id')
+    assert.equal(typeof body.component, 'function')
+    assert.equal(typeof body.definition.inject('s1').sessionId, 'string')
+  } finally {
+    delete globalThis.document
+  }
+})
+test('rowKey, flattenTree and expand-by-position agree on one key space', () => {
+  const leaf = node({ displayName: 'Leaf', propertyPath: 'm_Leaf', valueType: 'Float' })
+  const group = node({ displayName: 'Group', propertyPath: '', hasChildren: true, children: [leaf] })
+  const root = node({ displayName: 'Root', children: [group] })
+  const auto = new Set()
+  const walk = (current, parentKey, level) => {
+    if (!current || level > 1) return
+    const key = rowKey(parentKey, current)
+    if (level < 2 && Array.isArray(current.children) && current.children.length > 0) auto.add(key)
+    for (const child of current.children ?? []) walk(child, key, level + 1)
+  }
+  walk(root, null, 0)
+  const rows = flattenTree(root, auto, new Map())
+  // Two levels of expansion: the root and the object it holds, not the leaves.
+  assert.deepEqual(rows.map((row) => row.node.displayName), ['Root', 'Group', 'Leaf'])
+  assert.equal(auto.size, 2)
+  for (const row of rows.slice(0, 2)) assert.ok(auto.has(row.key), `${row.node.displayName} is expanded by its row key`)
+})
+
+test('patternsFor uses whole, scheme-qualified file addresses longer than a generic claim', () => {
+  const patterns = patternsFor()
+  assert.equal(patterns.length, EXTENSIONS.length)
+  assert.deepEqual(patterns.slice(0, 2), ['dsh-resource://file/**/*.prefab', 'dsh-resource://file/**/*.asset'])
+  const generic = 'dsh-resource://file/**'
+  for (const pattern of patterns) {
+    // Sidebar ranking breaks a same-band tie on pattern length, so a generic
+    // claim from another plugin must lose to every pattern here.
+    assert.ok(pattern.length > generic.length, `${pattern} is not longer than ${generic}`)
+    assert.ok(pattern.startsWith('dsh-resource://file/**/*.'), `${pattern} must only match a file address`)
+  }
+})
+
+test('the client and Host agree on which suffixes are models', async () => {
+  const { MODEL_EXTENSIONS: hostModels } = await import('../src/sidebar/paths.js')
+  assert.deepEqual([...MODEL_EXTENSIONS].sort(), [...hostModels.map((extension) => extension.slice(1))].sort())
+})
+
+test('a prefab/model address outranks a generic file-editor claim', () => {
+  // The Sidebar ranks same-band claimants by pattern length, and a generic
+  // `dsh-resource://file/**` (another plugin's file editor) has 22 characters.
+  // This is the failure that made prefabs open in the wrong tab; it is asserted
+  // here with a tiny glob so the test needs no dependency on minimatch.
+  const generic = 'dsh-resource://file/**'
+  const { minimatch } = makeGlob()
+  const rank = (address) => {
+    const ours = patternsFor()
+      .filter((pattern) => minimatch(address, pattern))
+      .map((pattern) => pattern.length)
+    if (ours.length > 0) return Math.max(...ours)
+    return minimatch(address, generic) ? generic.length : -1
+  }
+  const prefab = 'dsh-resource://file/session/s1/Assets/Prefabs/Player.prefab'
+  const model = 'dsh-resource://file/session/s1/Assets/Models/hero.fbx'
+  for (const address of [prefab, model]) {
+    const length = rank(address)
+    assert.ok(length > generic.length, `${address} is claimed by the generic editor (${length} <= ${generic.length})`)
+  }
+  // And a suffix this tab does not claim must not win.
+  assert.equal(rank('dsh-resource://file/session/s1/Assets/notes.txt'), generic.length)
+  assert.equal(rank('dsh-resource://file/session/s1/Assets/shot.png'), generic.length)
+})
+
+/**
+ * The subset of glob the Sidebar's matcher needs for `dsh-resource://file/**\/*.ext`:
+ * `**` spans segments, `*` stays inside one, `?` is one character.
+ */
+function makeGlob() {
+  const toRegExp = (pattern) =>
+    new RegExp(
+      `^${pattern
+        .replace(/[.+^${}()|[\]\\]/g, '\\$&')
+        .replace(/\*\*/g, '\u0000')
+        .replace(/\*/g, '[^/]*')
+        .replace(/\u0000/g, '.*')
+        .replace(/\?/g, '.')}$`,
+      'i',
+    )
+  return { minimatch: (address, pattern) => toRegExp(pattern).test(address) }
+}

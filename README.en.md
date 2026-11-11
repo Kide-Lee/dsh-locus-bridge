@@ -189,13 +189,68 @@ limits are worth stating.
   storing an image it can never see. Without an attachment service the call degrades to a path-only text
   result.
 
+## Right-Sidebar asset preview and editing
+
+In the Web GUI (`dsh web`) the right Sidebar can open and edit Unity assets the way the Inspector does. Click a
+`.prefab` / `.asset` / `.mat` / `.anim` / `.controller` file in the file tree (or hand its
+`dsh-resource://file/...` address to the Sidebar) and it opens in this plugin's `locus-asset` tab.
+
+It **is** Locus' own call path — nothing re-implements Unity's serialization in the browser:
+
+| Panel action | Broker command | Locus counterpart |
+|---|---|---|
+| read the property tree | `property_tree_read` | `UnitySerializedPropertyTree` / `LocusPropertyTree` |
+| edit one field | `property_tree_apply` (one write) | `unityPropertyApi.write` (also an in-memory edit that dirties the object) |
+| save to disk | `execute_code` following `SaveAssetApiScopeAllowed`'s branches | the desktop app leaves saving to the editor; the browser gets an explicit button |
+| thumbnail | `asset_thumbnail` | `AssetPreview.GetAssetPreview` |
+| orbitable 3D preview | `asset_preview_render` | `PreviewRenderUtility` |
+| reveal in the editor | `select_asset` | Project-window ping |
+
+Formats: `.prefab` (hierarchy + components + fields, with an orbitable preview), `.asset` / `.mat`
+(ScriptableObject and material fields), `.anim` (clip fields), `.controller` (a sub-asset summary table),
+textures and models (`AssetPreview` thumbnails). `.unity` scenes are **read-only**: reading one requires the
+scene to be loaded in the editor, and "opening it rewrites what the editor has open" is not a decision a file
+viewer should make. A write is refused with the reason.
+
+Behaviour worth knowing, all of it Unity's own semantics:
+
+- Edits are **in-memory**: the field takes effect and the object turns dirty, while the file on disk does not
+  change. **Save** writes it; **Revert** writes every field this tab changed back to the value it had when the
+  tab opened. Unity's own Ctrl+Z is not involved — that undo stack lives in the editor process, not in a
+  browser session.
+- Fields inherited from a prefab are not writable (Unity answers `unsupported_capability`, and the panel shows
+  why). A derived array such as `Renderer.m_Materials` may have its element insert silently ignored by Unity,
+  so after a structural write the panel **re-reads the node** and shows what the editor actually holds.
+- Every write goes through the same revision/undo semantics as the tools; while a domain reload runs the panel
+  says "Unity is busy" and offers a retry.
+- The browser can only name project-relative `Assets/…` paths. The Host resolves the project root and refuses
+  anything that escapes it.
+
+The routes live under `/locus/api/*`, register only on a Host that has a `webServer` (so CLI/TUI sessions are
+unaffected), and pass DSH's browser-trust fence (`ctx.connection.requestRejection`).
+
+Two address rules are worth stating, because both cost real debugging time:
+
+* A file address is **relative to the session's working directory**, and the Unity
+  project may live below it (a `Project/` folder inside the workspace). The Host
+  resolves the address against that directory and then re-expresses it as a
+  project-relative `Assets/…` path, so both spellings work; anything escaping the
+  project is still refused.
+* The Sidebar picks a tab type by `(priority band, pattern length, registration
+  order)`, and generic file editors — `dsh-better-sidebar` is the common one —
+  register `dsh-resource://file/**` (22 characters). This plugin therefore claims
+  whole, scheme-qualified patterns such as `dsh-resource://file/**/*.prefab`
+  (≥28 characters); with a short `*.prefab` every prefab would open in the text
+  editor instead.
+
 ## Differences from the Locus desktop client
 
 - **The session working directory does not have to be the Unity project.** The plugin searches up to three
   levels downward, breadth-first, and when that fails it searches beside each ancestor directory; an explicit
   `project_path` always takes precedence.
-- **No Locus UI, knowledge base or skill system.** This plugin takes only the "call into Unity from another
-  process" capability; the desktop app's panels and agent loop take no part.
+- **No Locus desktop UI, knowledge base or skill system.** This plugin takes the "call into Unity from another
+  process" capability plus one right-Sidebar asset panel; the desktop app's main window, knowledge and skills
+  take no part.
 - **The broker supports multiple clients.** When the broker has the `broker_multi_client_v1` capability, DSH and
   the Locus desktop app can be connected to the same editor at the same time, and responses go back to the
   connection that issued the request.
@@ -205,13 +260,20 @@ limits are worth stating.
 ## Development
 
 ```bash
-npm test               # 229 tests, no Unity or network needed
-npm run typecheck      # static check of import / export
-npm run validate       # validate tool definitions against the DSH JSON Schema subset
-npm run build:native   # the Linux/macOS broker (Rust)
-npm run test:live      # end-to-end against a real editor, see scripts/live-smoke.mjs
-npm run test:csharp    # C# analysis end-to-end against a real Roslyn server
+npm test                   # no Unity or network needed
+npm run typecheck          # static check of import / export
+npm run validate           # tool definitions + static checks + client bundle freshness
+npm run build:client       # generate lib/client.js from src/client/plugin.js (the Sidebar panel)
+npm run build:native       # the Linux/macOS broker (Rust)
+npm run test:live          # tools: end-to-end against a real editor, see scripts/live-smoke.mjs
+npm run test:live:sidebar  # sidebar routes: real HTTP + real Unity, see scripts/live-sidebar.mjs
+npm run test:live:render   # sidebar panel: every format through a render harness, see scripts/live-render.mjs
+npm run test:csharp        # C# analysis end-to-end against a real Roslyn server
 ```
+
+The Sidebar client lives in `src/client/plugin.js` (plain ESM, so tests import it directly);
+`npm run build:client` wraps it into the `__ModuleLoader__` factory a DSH client bundle needs and writes
+`lib/client.js`. Edit the source and regenerate — `npm run check:client` fails when the artifact is stale.
 
 `unity-test/` is a local disposable verification project, ignored by git.
 

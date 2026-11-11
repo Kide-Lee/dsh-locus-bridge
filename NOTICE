@@ -45,6 +45,23 @@ point at it.
 If you intend to modify these files, prefer sending changes upstream so the two
 implementations do not drift.
 
+### `src/sidebar/` and `src/client/` — Sidebar asset panel
+
+**Original work**, not a copy: the right-Sidebar panel and its HTTP routes were
+written for this project. They drive the same broker commands the Locus desktop
+client drives, and the two behaviours that are Locus' own design decisions are
+copied deliberately rather than reinvented:
+
+- a property edit is an in-memory `SerializedProperty` write that dirties the
+  object (`LocusBridge.PropertyTree.WritePropertyTree`), not a file rewrite;
+- saving follows `LocusBridge.AssetApi.SaveAssetApiScopeAllowed`'s branch order
+  (open Prefab Stage → scene → prefab → per-sub-asset flush) in the snippet
+  `src/sidebar/unity-asset.js` generates.
+
+No Locus source file is reproduced here, so nothing in this directory carries an
+upstream copyright notice. Keeping the *behaviour* aligned is the point: the
+panel must not disagree with the editor's own Inspector about what an edit means.
+
 ### `payload/locus_unity/` — compiled Unity package
 
 A verbatim, unmodified copy of upstream `locus_unity/` at the commit above,

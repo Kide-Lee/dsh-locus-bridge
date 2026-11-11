@@ -11,11 +11,18 @@ import { fileURLToPath } from 'node:url'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const files = []
-for (const dir of ['src', 'scripts', 'test']) {
-  for (const name of readdirSync(resolve(root, dir))) {
-    if (name.endsWith('.js') || name.endsWith('.mjs')) files.push(resolve(root, dir, name))
+
+/** Every `.js`/`.mjs` under `dir`, recursively (skip generated trees). */
+function collect(dir) {
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    if (entry.name === 'node_modules' || entry.name.startsWith('.')) continue
+    const path = resolve(dir, entry.name)
+    if (entry.isDirectory()) collect(path)
+    else if (entry.name.endsWith('.js') || entry.name.endsWith('.mjs')) files.push(path)
   }
 }
+
+for (const dir of ['src', 'scripts', 'test']) collect(resolve(root, dir))
 
 /** Named exports of one module (static, best effort). */
 function exportsOf(file) {
@@ -37,7 +44,7 @@ function exportsOf(file) {
 }
 
 const KEYWORDS = new Set(['if', 'for', 'while', 'switch', 'catch', 'function', 'return', 'typeof', 'await', 'new', 'throw', 'yield', 'delete', 'void', 'super'])
-const GLOBALS = new Set(['async', 'Object', 'Array', 'String', 'Number', 'Boolean', 'JSON', 'Math', 'Map', 'Set', 'WeakMap', 'Promise', 'Error', 'TypeError', 'RangeError', 'Buffer', 'AbortController', 'AbortSignal', 'setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'queueMicrotask', 'setImmediate', 'structuredClone', 'parseInt', 'parseFloat', 'isNaN', 'encodeURIComponent', 'decodeURIComponent', 'Symbol', 'RegExp', 'Date', 'Intl', 'URL', 'Int32Array', 'SharedArrayBuffer', 'Atomics', 'print', 'describe', 'it'])
+const GLOBALS = new Set(['async', 'Object', 'Array', 'String', 'Number', 'Boolean', 'JSON', 'Math', 'Map', 'Set', 'WeakMap', 'Promise', 'Error', 'TypeError', 'RangeError', 'Buffer', 'AbortController', 'AbortSignal', 'setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'queueMicrotask', 'setImmediate', 'structuredClone', 'parseInt', 'parseFloat', 'isNaN', 'encodeURIComponent', 'decodeURIComponent', 'Symbol', 'RegExp', 'Date', 'Intl', 'URL', 'Int32Array', 'SharedArrayBuffer', 'Atomics', 'print', 'describe', 'it', 'fetch', 'document', 'window', 'Image', 'localStorage', 'navigator', 'requestAnimationFrame', 'cancelAnimationFrame', 'console'])
 
 // Inside C# snippet sources, these are snippet globals (Locus ScriptGlobals).
 const SNIPPET_HELPERS = new Set(['print', 'printJson', 'clear'])
@@ -109,11 +116,14 @@ for (const file of files) {
     const name = name0
     if (KEYWORDS.has(name) || GLOBALS.has(name) || SNIPPET_HELPERS.has(name)) return
     const declared = new RegExp(`(?:function|const|let|var|class)\\s+${name}\\b`).test(source)
+    // Destructuring declarations (`const [value, setValue] = useState(…)`,
+    // `const { json } = answer`) bind names without a `const name` head.
+    const destructured = new RegExp(`(?:const|let|var)\\s*[\\[{][^=\\n]*\\b${name}\\b[^=\\n]*[\\]}]\\s*=`).test(source)
     const parameter = new RegExp(`[(,]\\s*${name}\\s*[,)=]`).test(source)
     const imported = new RegExp(`import\\s*\\{[^}]*\\b${name}\\b[^}]*\\}`).test(source) ||
       new RegExp(`\\{[^}]*\\b${name}\\b[^}]*\\}\\s*=\\s*[\\w$.]+`).test(source) ||
       new RegExp(`import\\s+${name}\\b`).test(source)
-    if (!declared && !parameter && !imported) {
+    if (!declared && !destructured && !parameter && !imported) {
       problems.push(`${relative}:${index + 1}: "${name}(" is not declared or imported`)
     }
   })

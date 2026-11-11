@@ -84,12 +84,58 @@ dsh plugin --profile <profile> add github:Kide-Lee/dsh-locus-bridge
   提交附件之前先做图片能力检查（`llm.resolveModelInfo` 的 `inputModalities`）——纯文本模型会直接拒绝，
   而不是先存一张它永远看不到的图。若部署没挂附件服务，就退回只返回路径的文字结果。
 
+## 右侧栏资产预览与编辑
+
+在 Web GUI（`dsh web`）里，右栏可以像 Unity Inspector 一样打开并编辑 Unity 资产。把
+`.prefab` / `.asset` / `.mat` / `.anim` / `.controller` 之类的文件从文件树点开（或让模型把它的
+`dsh-resource://file/...` 地址交给右栏），就会进入本插件的 `locus-asset` 标签页。
+
+实现上它**就是 Locus 自己的那套调用**，没有在浏览器里重写 Unity 的序列化：
+
+| 面板动作 | 底层指令 | 对应 Locus 侧 |
+|---|---|---|
+| 读取属性树 | `property_tree_read` | `UnitySerializedPropertyTree` / `LocusPropertyTree` |
+| 改一个字段 | `property_tree_apply`（一条 write） | `unityPropertyApi.write`（同样是内存改动 + 标脏） |
+| 保存到磁盘 | `execute_code` 里按 `SaveAssetApiScopeAllowed` 的分支保存 | 桌面端让编辑器自己保存，这里给浏览器一个显式按钮 |
+| 缩略图 | `asset_thumbnail` | `AssetPreview.GetAssetPreview` |
+| 可拖动 3D 预览 | `asset_preview_render` | `PreviewRenderUtility` 轨道渲染 |
+| 在编辑器里定位 | `select_asset` | 项目窗口 Ping |
+
+支持的格式：`.prefab`（层级 + 组件 + 属性，含可旋转预览）、`.asset` / `.mat`
+（ScriptableObject / 材质字段）、`.anim`（剪辑字段）、`.controller`（子资产摘要表）、
+贴图与模型（`AssetPreview` 缩略图）。`.unity` 场景**只读**：读它要求场景已在编辑器里加载，
+而"点开就改写"不是文件查看器该做的决定；写入会直接拒绝并给出原因。
+
+几条与 Unity 语义一致、也值得提前知道的行为：
+
+- 编辑是**内存改动**：字段立刻生效、对象变脏，磁盘上的文件不变；按 **Save** 才落盘，按
+  **Revert** 把本次打开后改过的字段逐个写回原值。Unity 自己的 Ctrl+Z 不参与（撤销栈在编辑器进程里，
+  不在浏览器会话里）。
+- 继承自 Prefab 的字段不可写（Unity 侧 `unsupported_capability`，面板会显示原因）；派生存储的
+  数组（如 `Renderer.m_Materials`）增删元素可能被 Unity 静默忽略——写入后面板会**重新读一次**
+  该节点，显示编辑器真正持有的值，而不是浏览器以为的值。
+- 结构与对象的改动都走同一条 revision/undo 语义；域重载期间面板显示 "Unity is busy" 并允许重试。
+- 浏览器只能命名工程内的 `Assets/…` 相对路径；Host 负责解析工程根并拒绝任何越界路径。
+
+这些路由挂在 `/locus/api/*`，只在存在 `webServer` 的 Host 上注册（CLI/TUI 不受影响），并经过
+DSH 的浏览器信任闸（`ctx.connection.requestRejection`）。
+
+右栏的地址解析值得单独说明：文件地址是**相对会话工作目录**的
+（`dsh-resource://file/session/<id>/<相对路径>`），而 Unity 工程可能在其下层
+（例如工作区里的 `Project/`）。Host 会先按会话工作目录还原绝对路径，再折算成
+工程内的 `Assets/…`，所以两种写法都成立；越界路径仍然被拒。
+
+另一个坑是**标签页抢占**：侧栏按 `(优先级, 模式长度, 注册顺序)` 选类型，而
+`dsh-better-sidebar` 之类的文件编辑器注册了通用的 `dsh-resource://file/**`（22 字符）。
+本插件因此使用 `dsh-resource://file/**/*.prefab` 这样的完整地址模式（≥28 字符），
+否则 `.prefab` 永远会被对方的文本编辑器抢走。
+
 ## 与 Locus 桌面端的差异
 
 - **会话工作目录不必是 Unity 项目。** 插件会向下最多三层、广度优先地寻找 Unity 工程，找不到
   再到每个祖先目录旁去找；显式传入 `project_path` 时始终以它为准。
-- **没有 Locus 的 UI、知识库和技能系统。** 本插件只取走「跨进程调用 Unity」这一项能力，桌面端
-  的面板和 agent 循环都不参与。
+- **没有 Locus 的桌面 UI、知识库和技能系统。** 本插件取走「跨进程调用 Unity」这一项能力，
+  外加一个右栏资产面板；桌面端的主界面、knowledge、skills 和 agent 循环都不参与。
 - **broker 支持多客户端。** 在 broker 具备 `broker_multi_client_v1` capability 时，DSH 与 Locus
   桌面端可以同时连着同一个编辑器，响应回到发起请求的那条连接。
 - **重编译会跨断线继续。** 域重载会在调用中途断开连接，客户端会重连并接着轮询 operation id，
@@ -98,13 +144,20 @@ dsh plugin --profile <profile> add github:Kide-Lee/dsh-locus-bridge
 ## 开发
 
 ```bash
-npm test               # 229 个测试，不需要 Unity、不需要网络
-npm run typecheck      # 静态检查 import / export
-npm run validate       # 用 DSH 的 JSON Schema 子集校验工具定义
-npm run build:native   # Linux/macOS 的 broker（Rust）
-npm run test:live      # 对着真实编辑器端到端跑，见 scripts/live-smoke.mjs
-npm run test:csharp    # C# 分析：真实 Roslyn 服务器端到端，见 scripts/live-csharp.mjs
+npm test                   # 不需要 Unity、不需要网络
+npm run typecheck          # 静态检查 import / export
+npm run validate           # 工具定义 + 静态检查 + 客户端 bundle 是否最新
+npm run build:client       # 由 src/client/plugin.js 生成 lib/client.js（右栏面板）
+npm run build:native       # Linux/macOS 的 broker（Rust）
+npm run test:live          # 工具面：对着真实编辑器端到端，见 scripts/live-smoke.mjs
+npm run test:live:sidebar  # 右栏路由：真 HTTP + 真 Unity，见 scripts/live-sidebar.mjs
+npm run test:live:render   # 右栏面板：在渲染壳里跑遍所有格式，见 scripts/live-render.mjs
+npm run test:csharp        # C# 分析：真实 Roslyn 服务器端到端，见 scripts/live-csharp.mjs
 ```
+
+右栏客户端在 `src/client/plugin.js`（普通 ESM，便于测试），`npm run build:client` 把它包成
+DSH 客户端 bundle 的 `__ModuleLoader__` 工厂写进 `lib/client.js`。改面板请改源文件再重新生成；
+`npm run check:client` 会校验产物是否过期。
 
 ## 许可证
 

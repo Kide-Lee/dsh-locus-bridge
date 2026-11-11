@@ -21,6 +21,7 @@
 import { toolDefinitions, parameterSpecs, shutdownPool, attachHost } from './tools.js'
 import { csharpToolDefinitions } from './csharp/tools.js'
 import { shutdownCsharpPool } from './csharp/lsp-pool.js'
+import { registerAssetRoutes } from './sidebar/routes.js'
 
 export const name = 'dsh-locus-bridge'
 /** Services this plugin consumes (the tool registry). */
@@ -71,4 +72,13 @@ export function apply(ctx) {
   if (csharpEnabled()) {
     ctx.effect(() => () => shutdownCsharpPool().catch(() => {}))
   }
+  // The right-Sidebar asset surface mounts only where a Web Host exists.
+  // `ctx.inject` waits for the services instead of requiring them, so the same
+  // entry point serves a CLI/TUI session (no `webServer`, no routes, no
+  // failure) and `dsh web` (routes mounted, tab type available). Without a
+  // `connection` there is no browser-trust fence, and serving Unity writes
+  // unfenced would let any page reach the editor — so both are required.
+  ctx.inject(['webServer', 'connection'], (webCtx) => {
+    registerAssetRoutes(webCtx)
+  })
 }

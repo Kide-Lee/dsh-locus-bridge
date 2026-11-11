@@ -76,7 +76,16 @@ function toWireOperation(op, objectId, propertyPath, operation) {
  * Encode a plain JSON value into the `value_json` text Unity's
  * `SetAssetApiValue` parses: integers/bools as raw literals, floats as raw
  * numbers, strings as JSON strings, object references as `{fileID, guid?}`,
- * and arrays as JSON arrays (recursively).
+ * arrays as JSON arrays (recursively), and compound structs (Vector3, Color,
+ * Quaternion, Rect, Bounds, …) as JSON objects.
+ *
+ * Compound objects ARE supported by the broker: `SetAssetApiValue`'s `default`
+ * branch deserializes the object and requires **exactly** the serialized members
+ * (`type_mismatch: set object requires exactly the serialized members` otherwise,
+ * `LocusBridge.AssetApi.cs:1119`). Refusing them here would make the Sidebar's
+ * editor more capable than this tool and disagree with the protocol, so the
+ * value is passed through and a wrong shape is reported by Unity with its own,
+ * more precise message.
  */
 export function encodeAssetValue(propertyPath, value) {
   if (Array.isArray(value)) return JSON.stringify(value.map((item) => JSON.parse(encodeAssetValue(propertyPath, item))))
@@ -105,10 +114,13 @@ export function encodeAssetValue(propertyPath, value) {
       }
       return JSON.stringify({ fileID: id, guid: value.guid.toLowerCase() })
     }
-    throw new Error(
-      `${propertyPath}: compound values (vectors, colors) are not supported by asset editing; ` +
-        'use unity_scene set or unity_execute for those fields.',
-    )
+    // A compound struct. Unity walks its serialized children and needs every
+    // one of them, so the shape is reported by the broker rather than guessed
+    // here; a cycle would make JSON.stringify throw, which is the right outcome.
+    for (const [key, member] of Object.entries(value)) {
+      if (member === undefined) throw new Error(`${propertyPath}.${key}: compound members must not be undefined.`)
+    }
+    return JSON.stringify(value)
   }
   throw new Error(`${propertyPath}: unsupported value type ${typeof value}.`)
 }

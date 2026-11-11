@@ -4,6 +4,11 @@
 # profile bundle makes the tools appear without the user editing their own
 # cordis.patch.yml. `name` must be the package name exactly: a bare relative name
 # would resolve against the profile directory instead of this package.
+#
+# One row is enough: the entry point registers the tools everywhere, and mounts
+# the right-Sidebar asset routes through `ctx.inject(['webServer','connection'])`
+# — so a CLI/TUI Host (which has neither service) simply gets no routes, while
+# `dsh web` gets both the tools and the tab type.
 - insert:
     - id: dsh-locus-bridge
       name: dsh-locus-bridge
