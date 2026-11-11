@@ -23,7 +23,9 @@ import { resolve } from 'node:path'
 import { LocusClient } from '../src/locus-client.js'
 import { describeTarget } from '../src/client-pool.js'
 import { readEditorStatus, executeSnippet } from '../src/execute.js'
-import { toolDefinitions } from '../src/tools.js'
+import { allToolDefinitions } from '../src/index.js'
+
+const toolDefinitions = allToolDefinitions()
 
 const args = parseArgs(process.argv.slice(2))
 if (!args.project && !args.pipe) {

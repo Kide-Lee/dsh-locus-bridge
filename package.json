@@ -60,7 +60,8 @@
     "test:native": "cargo test --release --manifest-path native/locus_unix_native/Cargo.toml",
     "sync:payload": "node scripts/sync-payload.mjs",
     "check:payload": "node scripts/sync-payload.mjs --check",
-    "install:unity-package": "node scripts/install-unity-package.mjs"
+    "install:unity-package": "node scripts/install-unity-package.mjs",
+    "test:csharp": "node scripts/live-csharp.mjs"
   },
   "dsh": {
     "bundle": {

@@ -6,7 +6,9 @@
 // Mirrors dsh-tools/lib shared-DTdn5dXO.js:CONSTRAINT_KEYWORDS.
 // Usage: node scripts/dump-tools.mjs [--json]
 
-import { toolDefinitions } from '../src/tools.js'
+import { allToolDefinitions } from '../src/index.js'
+
+const toolDefinitions = allToolDefinitions()
 
 const CONSTRAINT = new Set(['type', 'oneOf', 'properties', 'required', 'additionalProperties', 'items', 'enum', 'const'])
 const ANNOTATION = new Set(['description', 'title', 'default', 'examples'])

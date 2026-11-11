@@ -7,7 +7,10 @@
 
 import { createRequire } from 'node:module'
 import { pathToFileURL } from 'node:url'
-import { toolDefinitions, parameterSpecs } from '../src/tools.js'
+import { parameterSpecs } from '../src/tools.js'
+import { allToolDefinitions } from '../src/index.js'
+
+const toolDefinitions = allToolDefinitions()
 
 const require = createRequire(import.meta.url)
 
@@ -118,6 +121,18 @@ function sampleArgs(name) {
       }
     case 'unity_capture':
       return { request_editor_status: 'editing', target: 'game', max_long_edge: 1280 }
+    case 'code_symbol_search':
+      return { query: 'TakeDamage', max_results: 50 }
+    case 'code_goto_definition':
+      return { file_path: 'Assets/Scripts/Player.cs', symbol: 'TakeDamage', line: 9 }
+    case 'code_find_references':
+      return { file_path: 'Assets/Scripts/Player.cs', symbol: 'TakeDamage', include_declaration: false }
+    case 'code_hover':
+      return { file_path: 'Assets/Scripts/Player.cs', symbol: 'health', line: 5 }
+    case 'code_diagnostics':
+      return { file_path: 'Assets/Scripts/Player.cs', scope: 'file', min_severity: 'warning', max_results: 100 }
+    case 'code_analysis':
+      return { action: 'status' }
     default:
       return {}
   }
