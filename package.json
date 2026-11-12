@@ -31,7 +31,8 @@
     "native/locus-native-protocol/src"
   ],
   "engines": {
-    "node": ">=22.12"
+    "node": ">=22.12",
+    "dsh": ">=0.2.2-rc.2 <0.3.0"
   },
   "repository": {
     "type": "git",

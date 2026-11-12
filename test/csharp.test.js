@@ -793,8 +793,10 @@ test('restore artifacts are read from the csproj BaseIntermediateOutputPath', ()
   )
   const csproj = join(root, 'Assembly-CSharp.csproj')
   const paths = candidateAssetPaths(root, csproj)
+  // The expectation is built with `join` too: the probe returns native paths,
+  // so a POSIX literal would fail on Windows purely on separators.
   assert.ok(
-    paths.some((path) => path.endsWith('Temp/obj/Debug/Assembly-CSharp/project.assets.json')),
+    paths.some((path) => path.endsWith(join('Temp', 'obj', 'Debug', 'Assembly-CSharp', 'project.assets.json'))),
     `expected the Unity-shaped path, got ${paths.join(', ')}`,
   )
   // Debug and Release are both probed.
