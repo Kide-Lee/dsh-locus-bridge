@@ -10,6 +10,8 @@
 // browser-trust fence):
 //
 //   GET  status        connection + editor state for a Session's project
+//   GET  settings      this plugin's feature switches and their effective state
+//   POST settings      merge a switch patch and apply it to the live Host
 //   GET  asset         the property tree for one asset (no body)
 //   POST asset/read    the same tree for one node of an already-open asset
 //   POST asset/write   one SerializedProperty write (in-memory + dirty)
@@ -31,6 +33,9 @@ import { fileURLToPath } from 'node:url'
 import { resolveProjectRoot } from '../args.js'
 import { LocusError } from '../locus-client.js'
 import { BROKER_ERRORS, isReloading } from '../protocol.js'
+import { describeProject, listProjectCandidates } from '../projects.js'
+import { installPackage, writeMarker, editorIsRunning } from '../setup.js'
+import { FEATURE_KEYS, PREFERENCE_KEYS, readSettings, resolveFeatures, saveSettings, settingsPath } from '../settings.js'
 import { readFrameCache, sourceMtimeMs, writeFrameCache } from './frame-cache.js'
 import {
   normalizeAssetPath,
@@ -75,13 +80,83 @@ const PROJECT_CACHE_MS = 5_000
  * `ctx.inject(['webServer'], …)` so a desktop Host without a web surface simply
  * never runs this.
  */
-export function registerAssetRoutes(webCtx) {
+export function registerAssetRoutes(webCtx, { env = process.env, onFeaturesChanged = null } = {}) {
   const png = new PngCache()
   const projectCache = new Map()
   const fences = {
     thumb: new Map(),
     frame: new Map(),
   }
+
+  /**
+   * Refuse an asset request while the preview plane is switched off.
+   *
+   * The tab is not registered at all in that state, so this only fires for a
+   * tab that was already open when the switch flipped, or for a stale page
+   * after a reload. Answering 409 with the switch named is what lets the panel
+   * say "this feature is off" instead of painting a Unity failure.
+   */
+  const previewOff = (res) => {
+    if (resolveFeatures(readSettings(env), env).preview) return false
+    sendJson(res, 409, {
+      ok: false,
+      error: {
+        code: 'feature_disabled',
+        message: 'The Unity asset preview is switched off in Settings → dsh-locus-bridge.',
+      },
+    })
+    return true
+  }
+
+  /**
+   * Directories the project list scans.
+   *
+   * `?roots=` wins so the page can browse anywhere the user pointed it; a
+   * `sessionId` falls back to that Session's workspace, which is the set the
+   * conversation is actually about. Neither form accepts a path from the page
+   * without it naming a real directory: `listProjectCandidates` skips the rest.
+   */
+  const projectRootsFor = (url) => {
+    const explicit = (url.searchParams.get('roots') ?? '')
+      .split(',')
+      .map((part) => part.trim())
+      .filter(Boolean)
+    if (explicit.length > 0) return explicit
+    const sessionId = url.searchParams.get('sessionId') ?? ''
+    if (sessionId) {
+      const record = projectOf(sessionId)
+      // A Session whose workspace *is* the project still gets that one row.
+      return [...new Set([record.workspace, record.root].filter(Boolean))]
+    }
+    // No Session and no explicit roots: fall back to the workspaces the Host
+    // itself has registered. This is the case a Settings page hit, which has no
+    // Session of its own — and reading the registry is far better than asking
+    // the page to guess a path it cannot know.
+    const registry = webCtx.get('workspaceRegistry')
+    try {
+      const workspaces = registry?.list?.() ?? []
+      return workspaces.map((workspace) => workspace?.path).filter(Boolean)
+    } catch {
+      return []
+    }
+  }
+
+  /**
+   * Whether a rendered frame may be written into the user's Unity project.
+   *
+   * Off means the panel still caches in memory for the life of the route, but
+   * never creates `Library/Locus/asset-preview-cache`; that is the difference
+   * browsing is allowed to make to a project the user did not hand over.
+   */
+  const frameCacheEnabled = (targetEnv) => readSettings(targetEnv).preferences.frameCache === true
+
+  /**
+   * Where the settings document lives, for the page to display.
+   *
+   * Reported, never trusted: the browser names no path for it, exactly like the
+   * asset routes above.
+   */
+  const settingsPathFor = (targetEnv) => settingsPath(targetEnv)
 
   const fence = (req) => {
     const connection = webCtx.get('connection')
@@ -214,9 +289,145 @@ export function registerAssetRoutes(webCtx) {
   const routes = [
     {
       kind: 'exact',
+      path: `${ROUTE_PREFIX}/settings`,
+      handler: async (req, res) => {
+        if (!fence(req)) return sendJson(res, 403, { ok: false, error: { code: 'forbidden', message: 'forbidden' } })
+        const stored = readSettings(env)
+        if (req.method === 'GET') {
+          sendJson(res, 200, {
+            ok: true,
+            features: { ...stored.features },
+            effective: { ...resolveFeatures(stored, env) },
+            preferences: { ...stored.preferences },
+            // The UI has to be able to explain a switch that refuses to move.
+            // `csharp` is the one plane another owner can pin off.
+            locked: {
+              csharp: stored.features.csharp && !resolveFeatures(stored, env).csharp,
+            },
+            path: settingsPathFor(env),
+          })
+          return
+        }
+        if (req.method !== 'POST') return methodNotAllowed(res)
+        try {
+          const body = await readJsonBody(req)
+          if (!isSwitchPatch(body)) {
+            throw new HttpError(400, `features and preferences may only carry the keys ${FEATURE_KEYS.join(', ')} and booleans.`)
+          }
+          const saved = saveSettings({ features: body.features, preferences: body.preferences }, env)
+          // The Host tool set follows the same notification the tools register
+          // on, so a failed re-registration must be reported here instead of
+          // leaving the page claiming a state the process does not have.
+          try {
+            onFeaturesChanged?.(resolveFeatures(saved, env))
+          } catch (error) {
+            throw new HttpError(500, `saved, but applying it failed: ${error?.message ?? error}`)
+          }
+          sendJson(res, 200, {
+            ok: true,
+            features: { ...saved.features },
+            effective: { ...resolveFeatures(saved, env) },
+            preferences: { ...saved.preferences },
+            locked: { csharp: saved.features.csharp && !resolveFeatures(saved, env).csharp },
+            path: settingsPathFor(env),
+          })
+        } catch (error) {
+          respondError(res, error)
+        }
+      },
+    },
+    {
+      // Which Unity projects exist near a Session, and whether the bridge can
+      // reach each one.
+      //
+      // The roots come from the caller because this plugin has no global
+      // "where are all the projects" knowledge: `GET ?sessionId=` resolves the
+      // Session's own project set, `?roots=a,b` names directories explicitly.
+      // Either way every row is a real directory probe, never a guess.
+      kind: 'exact',
+      path: `${ROUTE_PREFIX}/projects`,
+      handler: async (req, res) => {
+        if (!fence(req)) return sendJson(res, 403, { ok: false, error: { code: 'forbidden', message: 'forbidden' } })
+        if (req.method !== 'GET') return methodNotAllowed(res)
+        try {
+          const url = urlOf(req)
+          const roots = projectRootsFor(url)
+          const candidates = listProjectCandidates(roots)
+          // Sequential on purpose: each row opens a socket. Firing twenty at once
+          // would be a burst of connection attempts against one editor, which is
+          // exactly the shape of a port scan to anything watching.
+          const projects = []
+          for (const root of candidates) {
+            try {
+              projects.push(await describeProject(root, { env }))
+            } catch (error) {
+              // One unreadable project must not blank the whole list.
+              projects.push({ projectRoot: root, name: root.split(/[\\/]/).pop(), state: 'unknown', error: String(error?.message ?? error) })
+            }
+          }
+          sendJson(res, 200, { ok: true, roots, projects })
+        } catch (error) {
+          respondError(res, error)
+        }
+      },
+    },
+    {
+      // Install the bundled Locus package into one project.
+      //
+      // Refuses while the editor holds the project open — that is `installPackage`'s
+      // own guard, surfaced here as a 409 the page can explain, not a 500. The
+      // page must follow this up by telling the user to reopen the editor: this
+      // plugin never launches Unity.
+      kind: 'exact',
+      path: `${ROUTE_PREFIX}/projects/install`,
+      handler: async (req, res) => {
+        if (!fence(req)) return sendJson(res, 403, { ok: false, error: { code: 'forbidden', message: 'forbidden' } })
+        if (req.method !== 'POST') return methodNotAllowed(res)
+        try {
+          const body = await readJsonBody(req)
+          const root = String(body.projectRoot ?? '').trim()
+          if (!root) throw new HttpError(400, 'projectRoot is required.')
+          // Only a path that is already a project this list would show is
+          // installable: the button must not become an arbitrary-tree copier.
+          const known = listProjectCandidates([root])
+          if (!known.includes(resolve(root))) {
+            throw new HttpError(400, `${root} is not a Unity project (expected Assets/ and ProjectSettings/).`)
+          }
+          if (editorIsRunning(root)) {
+            sendJson(res, 409, {
+              ok: false,
+              error: {
+                code: 'editor_running',
+                message:
+                  'The Unity Editor has this project open and holds the package assemblies. ' +
+                  'Close the editor, install, then reopen it.',
+              },
+            })
+            return
+          }
+          const installed = installPackage(root)
+          // The marker is what makes the editor start the native bridge. An
+          // install without it is the exact state `not_connected` reports, so
+          // writing it here means a reopened editor actually connects.
+          const marker = writeMarker(root)
+          sendJson(res, 200, {
+            ok: true,
+            projectRoot: resolve(root),
+            installed,
+            marker,
+            next: 'Reopen the Unity Editor: the bridge starts on launch once the marker is present.',
+          })
+        } catch (error) {
+          respondError(res, error)
+        }
+      },
+    },
+    {
+      kind: 'exact',
       path: `${ROUTE_PREFIX}/status`,
       handler: async (req, res) => {
         if (!fence(req)) return sendJson(res, 403, { ok: false, error: { code: 'forbidden', message: 'forbidden' } })
+        if (previewOff(res)) return
         if (req.method !== 'GET') return methodNotAllowed(res)
         try {
           const url = urlOf(req)
@@ -256,6 +467,7 @@ export function registerAssetRoutes(webCtx) {
       path: `${ROUTE_PREFIX}/asset`,
       handler: async (req, res) => {
         if (!fence(req)) return sendJson(res, 403, { ok: false, error: { code: 'forbidden', message: 'forbidden' } })
+        if (previewOff(res)) return
         if (req.method !== 'GET') return methodNotAllowed(res)
         try {
           const url = urlOf(req)
@@ -319,6 +531,7 @@ export function registerAssetRoutes(webCtx) {
       path: `${ROUTE_PREFIX}/asset/read`,
       handler: async (req, res) => {
         if (!fence(req)) return sendJson(res, 403, { ok: false, error: { code: 'forbidden', message: 'forbidden' } })
+        if (previewOff(res)) return
         if (req.method !== 'POST') return methodNotAllowed(res)
         try {
           const body = await readJsonBody(req)
@@ -343,6 +556,7 @@ export function registerAssetRoutes(webCtx) {
       path: `${ROUTE_PREFIX}/asset/write`,
       handler: async (req, res) => {
         if (!fence(req)) return sendJson(res, 403, { ok: false, error: { code: 'forbidden', message: 'forbidden' } })
+        if (previewOff(res)) return
         if (req.method !== 'POST') return methodNotAllowed(res)
         try {
           const body = await readJsonBody(req)
@@ -373,6 +587,7 @@ export function registerAssetRoutes(webCtx) {
       path: `${ROUTE_PREFIX}/asset/save`,
       handler: async (req, res) => {
         if (!fence(req)) return sendJson(res, 403, { ok: false, error: { code: 'forbidden', message: 'forbidden' } })
+        if (previewOff(res)) return
         if (req.method !== 'POST') return methodNotAllowed(res)
         try {
           const body = await readJsonBody(req)
@@ -389,6 +604,7 @@ export function registerAssetRoutes(webCtx) {
       path: `${ROUTE_PREFIX}/asset/select`,
       handler: async (req, res) => {
         if (!fence(req)) return sendJson(res, 403, { ok: false, error: { code: 'forbidden', message: 'forbidden' } })
+        if (previewOff(res)) return
         if (req.method !== 'POST') return methodNotAllowed(res)
         try {
           const body = await readJsonBody(req)
@@ -445,6 +661,7 @@ export function registerAssetRoutes(webCtx) {
       path: `${ROUTE_PREFIX}/model`,
       handler: async (req, res) => {
         if (!fence(req)) return sendJson(res, 403, { ok: false, error: { code: 'forbidden', message: 'forbidden' } })
+        if (previewOff(res)) return
         if (req.method !== 'GET' && req.method !== 'HEAD') return methodNotAllowed(res)
         try {
           const url = urlOf(req)
@@ -488,6 +705,7 @@ export function registerAssetRoutes(webCtx) {
       path: `${ROUTE_PREFIX}/thumb`,
       handler: async (req, res) => {
         if (!fence(req)) return sendJson(res, 403, { ok: false, error: { code: 'forbidden', message: 'forbidden' } })
+        if (previewOff(res)) return
         if (req.method !== 'GET' && req.method !== 'HEAD') return methodNotAllowed(res)
         try {
           const url = urlOf(req)
@@ -512,6 +730,7 @@ export function registerAssetRoutes(webCtx) {
       path: `${ROUTE_PREFIX}/frame`,
       handler: async (req, res) => {
         if (!fence(req)) return sendJson(res, 403, { ok: false, error: { code: 'forbidden', message: 'forbidden' } })
+        if (previewOff(res)) return
         if (req.method !== 'GET' && req.method !== 'HEAD') return methodNotAllowed(res)
         try {
           const url = urlOf(req)
@@ -521,8 +740,15 @@ export function registerAssetRoutes(webCtx) {
           // `restore=1` is what the panel asks on mount: give it the last frame
           // written by a previous session, including the camera that produced
           // it. A miss is a normal state, not an error the panel should paint.
+          //
+          // With the disk cache switched off there is nothing to restore from:
+          // reporting a miss (rather than reading a file the user asked us not
+          // to keep) is what makes the switch mean what it says.
           if (url.searchParams.get('restore') === '1') {
-            const cached = mtime === null ? null : readFrameCache(root, path, { expectedMtimeMs: mtime })
+            const cached =
+              mtime === null || !frameCacheEnabled(env)
+                ? null
+                : readFrameCache(root, path, { expectedMtimeMs: mtime })
             if (!cached) {
               sendJson(res, 404, {
                 ok: false,
@@ -552,7 +778,10 @@ export function registerAssetRoutes(webCtx) {
           let entry = png.get(key)
           let source = 'cache'
           if (!entry) {
-            const cached = mtime === null ? null : readFrameCache(root, path, { expectedMtimeMs: mtime, params })
+            const cached =
+              mtime === null || !frameCacheEnabled(env)
+                ? null
+                : readFrameCache(root, path, { expectedMtimeMs: mtime, params })
             if (cached) {
               entry = { bytes: cached.bytes, mimeType: cached.mimeType, etag: etagOf(key, cached.bytes), key }
               source = 'cache'
@@ -566,7 +795,11 @@ export function registerAssetRoutes(webCtx) {
           // A drag frame may already sit in the in-memory cache under the same
           // key as the settle frame. Persist on the settle request even when no
           // editor render was needed, or the disk would keep an older angle.
-          if (persist && mtime !== null) {
+          //
+          // The disk cache is a *project* write (it lives under Library/), so it
+          // is the one thing the `frameCache` preference governs: with it off the
+          // in-memory cache still answers, but browsing never adds files.
+          if (persist && mtime !== null && frameCacheEnabled(env)) {
             try {
               writeFrameCache(root, path, { ...entry, ...params })
             } catch {
@@ -675,6 +908,32 @@ async function readSubtree(root, path, encoded) {
   }
   const read = await readNode({ projectRoot: root }, node, {})
   return { root: read, target: read?.target ?? null }
+}
+
+/** Path of one field's value in a settings patch; only booleans are writable. */
+function isSwitchPatch(body) {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return false
+  for (const key of Object.keys(body)) {
+    if (key !== 'features' && key !== 'preferences') return false
+  }
+  const sections = [body.features, body.preferences]
+  for (const section of sections) {
+    if (section === undefined) continue
+    if (!section || typeof section !== 'object' || Array.isArray(section)) return false
+    for (const value of Object.values(section)) {
+      if (typeof value !== 'boolean') return false
+    }
+  }
+  // A patch that only names keys outside the known set would silently do
+  // nothing, which reads as "the switch is broken" in the UI — so an unknown
+  // key in either section is a bad request, not a no-op.
+  for (const key of Object.keys(body.features ?? {})) {
+    if (!FEATURE_KEYS.includes(key)) return false
+  }
+  for (const key of Object.keys(body.preferences ?? {})) {
+    if (!PREFERENCE_KEYS.includes(key)) return false
+  }
+  return true
 }
 
 function urlOf(req) {

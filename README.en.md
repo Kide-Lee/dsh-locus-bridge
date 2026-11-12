@@ -161,7 +161,9 @@ exist.
 | `code_analysis` | Inspect, install, warm, restart or reset the backend (`status` / `install` / `warm` / `restart` / `reset`) |
 
 The first use needs `code_analysis action:"install"`, which fetches about 90 MB (a ~60 MB Roslyn
-server; the ~30 MB runtime is skipped when the machine already has .NET 10).
+server; the ~30 MB runtime is skipped when the machine already has .NET 10). It can be switched off in
+Settings, or forced off deployment-wide with `DSH_LOCUS_CSHARP=0` (a deployment switch the settings page
+cannot override).
 
 All three copy upstream's approach, but they are constrained by "this plugin is only a broker client", so the
 limits are worth stating.
@@ -268,6 +270,60 @@ no locale plugin mounted (or in a bare test composition) `t()` falls back to
 bodies coming from Unity are arbitrary technical text, so only their severity is
 localised (warning / error / info); the message itself stays verbatim —
 translating it would mean inventing Unity's wording.
+
+## Settings
+
+DSH's Settings has a **Unity bridge** page (`settings.section`, id `dsh-locus-bridge`) with one switch per
+feature plane plus one cache preference:
+
+| Switch | What turning it off does |
+|---|---|
+| **Unity control** | The ten `unity_*` tools leave the model's tool list (the Host unregisters them; they are not merely hidden) |
+| **C# analysis** | The six `code_*` tools leave, and any Roslyn language-server processes already started are closed |
+| **File preview** | The right-Sidebar Unity asset tab is no longer registered, and every Unity-backed `/locus/api` route answers `feature_disabled` |
+| **Cache preview frames in the project** | Rendered frames stop being written under `Library/Locus/asset-preview-cache`; the in-memory cache still answers |
+
+A change takes effect immediately with no restart: the page `POST`s to `/locus/api/settings`, the Host
+re-registers its tool set, and the `preview` plane makes the client re-read the switch (on window focus) and
+register or dispose the tab type accordingly.
+
+Design notes:
+
+- **Stored in the plugin's own file, not in `cordis.patch.yml`.** The path is
+  `<user data dir>/locus/locus-bridge/settings.json` (Windows: `%APPDATA%\locus\locus-bridge\settings.json`);
+  `DSH_LOCUS_BRIDGE_HOME` relocates it. The patch layer is configuration a human edits by hand, and a settings
+  page rewriting it would fight every manual edit and every `plugin_manager` write.
+- **`DSH_LOCUS_CSHARP=0` still wins.** That is a deployment statement ("this profile must not carry the
+  surface"), so the page renders it as locked instead of as a usable switch; the user preference lives inside
+  that envelope.
+- **A malformed file falls back to the defaults.** A broken JSON document costs a preference, never the whole
+  tool set.
+- **Non-boolean values are not coerced.** `"off"` or `0` falls back to that key's default; guessing either way
+  would silently keep a plane on or silently switch one off.
+
+### The Unity projects panel
+
+The same page lists the Unity projects on this machine and whether the Locus bridge can reach each one. Every
+row is a real directory in one of three states:
+
+| State | Meaning | What the row offers |
+|---|---|---|
+| **Connected** | A broker answered on the endpoint that project derives | The package version |
+| **Not connected** | The package is installed but nothing answered | Splits "editor closed" from "editor open, bridge off", because those are fixed differently |
+| **Plugin missing** | The project has no Locus package, or an incomplete one | An **Install plugin** button |
+
+Where the list comes from: a three-level scan below the given roots (`?roots=` names them explicitly,
+`?sessionId=` takes that Session's project set, and with neither the Host falls back to its own registered
+workspaces — a Settings page belongs to no Session, so that is the only honest source). `Temp/UnityLockfile`
+says whether the editor is open; a probe of the endpoint is the only evidence of "connected".
+
+The install button is deliberately narrow:
+
+- **It installs; it never launches Unity.** It writes the marker the editor's native bridge starts on, then
+  tells you to reopen the editor.
+- **It refuses while the editor has the project open** (409 `editor_running`) — the editor holds the package
+  assemblies. The page turns that refusal into a sentence rather than printing the status code.
+- **It only handles paths this list would show**, so the button never becomes an arbitrary directory copier.
 
 ## Differences from the Locus desktop client
 

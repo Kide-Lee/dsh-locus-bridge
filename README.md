@@ -62,7 +62,8 @@ dsh plugin --profile <profile> add github:Kide-Lee/dsh-locus-bridge
 | `code_analysis` | 查看/安装/预热/重启/重置分析后端（`status` / `install` / `warm` / `restart` / `reset`） |
 
 首次使用需 `code_analysis action:"install"`，下载约 90 MB（Roslyn 服务器约 60 MB；本机已有
-.NET 10 运行时则跳过约 30 MB 的运行时）。用 `DSH_LOCUS_CSHARP=0` 可整组关闭。
+.NET 10 运行时则跳过约 30 MB 的运行时）。可在设置里关掉，或用 `DSH_LOCUS_CSHARP=0` 整组强制关闭
+（后者是部署级开关，设置页无法覆盖）。
 
 这三个工具都照搬上游的做法，但都受「插件只做 broker 客户端」这一条约束，能力边界值得写清楚。
 
@@ -149,6 +150,53 @@ DSH 的浏览器信任闸（`ctx.connection.requestRejection`）。
 退回 `navigator.language`，再退回英文，绝不会渲染成原始 key。Unity 侧发来的诊断正文
 是任意技术文本，只本地化它的 severity（警告/错误/信息），消息本身保持原文——翻译它会
 变成替 Unity 编造措辞。
+
+## 设置
+
+DSH 设置里有一个 **Unity 桥接** 页（`settings.section`，id `dsh-locus-bridge`），用来开关三个功能面和一项缓存偏好：
+
+| 开关 | 关掉之后 |
+|---|---|
+| **Unity 操纵** | 十个 `unity_*` 工具从模型的工具列表里消失（Host 侧注销，并非只在 UI 隐藏） |
+| **C# 分析** | 六个 `code_*` 工具消失，并关闭已启动的 Roslyn 语言服务器进程 |
+| **文件预览** | 右栏 Unity 资产标签页不再注册；`/locus/api` 下访问 Unity 的路由一律返回 `feature_disabled` |
+| **预览帧写入工程** | 不再往工程的 `Library/Locus/asset-preview-cache` 写帧；内存缓存仍然生效 |
+
+开关改动**立即生效、无需重启**：页面向 `POST /locus/api/settings` 提交后，Host 重新注册工具集，
+`preview` 则由客户端在窗口重新获得焦点时重新读取并相应注册/注销标签页类型。
+
+几个设计选择：
+
+- **存在插件自己的文件里，不写进 `cordis.patch.yml`。** 路径是
+  `<用户数据目录>/locus/locus-bridge/settings.json`（Windows：`%APPDATA%\locus\locus-bridge\settings.json`），
+  可用 `DSH_LOCUS_BRIDGE_HOME` 改到别处。patch 层是给人手改的配置，让设置页去改写它会和每一次手工编辑、
+  每一次 `plugin_manager` 写入打架。
+- **`DSH_LOCUS_CSHARP=0` 仍然优先。** 那是部署级声明（这个 profile 就不该带这组能力），设置页会把它显示成
+  锁定状态而不是可点的开关；用户偏好被夹在这个上限之内。
+- **坏文件退回默认值。** 手改坏的 JSON 只会丢掉偏好，不会因为一个文件解析失败就让整组工具消失。
+- **JSON 里的非布尔值不被强转。** `"off"` 或 `0` 会退回该键的默认值——把拼写错误默认当 `true` 或当 `false`
+  都是在替用户猜。
+
+### Unity 工程面板
+
+同一页下面列出这台机器上的 Unity 工程，以及 Locus 桥接能不能连上它们。每一行是一个真实目录的三态之一：
+
+| 状态 | 含义 | 这一行给什么 |
+|---|---|---|
+| **已连接** | 该工程推导出的 broker 端点确实有人应答 | 插件版本 |
+| **未连接** | 插件装好了，但端点没人应答 | 区分「编辑器没开」和「编辑器开着但原生桥没启」，因为两者修法不同 |
+| **缺插件** | 工程里没有 Locus 包，或包不完整 | **安装插件** 按钮 |
+
+推导方式：工程列表来自给定根目录向下三层的扫描（`?roots=` 显式指定，`?sessionId=` 取该会话的工程，
+两者都没有时回退到 Host 已注册的工作区——设置页不属于任何会话，这是它唯一诚实的来源）。
+`Temp/UnityLockfile` 判断编辑器是否开着，端点探测才是「已连接」的唯一证据。
+
+安装按钮有几个刻意的限制：
+
+- **只装、不启动 Unity。** 装完写 marker（编辑器的原生桥靠它在启动时拉起），提示你重开编辑器。
+- **编辑器开着就拒绝**（409 `editor_running`）——它正占着包的程序集文件。页面把这个拒绝解释成一句
+  人话，而不是一个状态码。
+- **只处理这个列表会列出的路径。** 按钮不会变成一个任意的目录复制器。
 
 ## 与 Locus 桌面端的差异
 

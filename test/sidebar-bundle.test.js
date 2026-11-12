@@ -88,10 +88,20 @@ test('applying the built bundle registers the tab type and its body', () => {
   assert.ok(types[0].patterns.every((pattern) => pattern.startsWith('dsh-resource://file/**/*.')))
   assert.ok(types[0].patterns.every((pattern) => pattern.length > 'dsh-resource://file/**'.length))
   assert.equal(types[0].title('dsh-resource://file/session/s/Assets/X/y.prefab'), 'y.prefab')
-  assert.equal(bodies.length, 1)
-  assert.equal(bodies[0].definition.name, 'sidebar.right.pane.tab')
-  assert.equal(bodies[0].definition.key, 'dsh-locus-bridge/asset')
-  assert.equal(typeof bodies[0].component, 'function')
+  const tabBody = bodies.find((entry) => entry.definition.name === 'sidebar.right.pane.tab')
+  assert.ok(tabBody, 'the tab body registers under the type id')
+  assert.equal(tabBody.definition.key, 'dsh-locus-bridge/asset')
+  assert.equal(typeof tabBody.component, 'function')
+  // The settings page and its nav icon: the icon id must equal the section id,
+  // or the shell silently keeps its default glyph.
+  const section = bodies.find((entry) => entry.definition.name === 'settings.section')
+  const icon = bodies.find((entry) => entry.definition.name === 'settings.section.icon')
+  assert.ok(section, 'the settings page registers')
+  assert.ok(icon, 'the settings nav icon registers')
+  assert.equal(section.definition.id, exports.SETTINGS_SECTION_ID)
+  assert.equal(icon.definition.id, exports.SETTINGS_SECTION_ID)
+  assert.equal(typeof section.component, 'function')
+  assert.equal(typeof icon.component, 'function')
 })
 
 test('the bundle requests nothing outside the platform module table', () => {

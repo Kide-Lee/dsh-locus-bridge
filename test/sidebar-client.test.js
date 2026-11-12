@@ -6,6 +6,7 @@ import {
   EXTENSIONS,
   LOCALE_NS,
   MODEL_EXTENSIONS,
+  SETTINGS_SECTION_ID,
   TAB_ID,
   TAB_KIND,
   activeLocaleId,
@@ -444,6 +445,109 @@ test('apiUrl resolves under the page directory and encodes parameters', () => {
 
 // ── plugin shape ────────────────────────────────────────────────────────────
 
+test('the settings switch copies the host primitive instead of inventing one', async () => {
+  // The whole point of this test is that the control *looks like the host's*.
+  // A future edit that "improves" the capsule silently breaks that, so the
+  // geometry and the aria keying are asserted, not just "there is a button".
+  const source = readFileSync(new URL('../src/client/plugin.js', import.meta.url), 'utf8')
+  const css = source.slice(source.indexOf('.locus-settings-switch{'))
+  const rule = css.slice(0, css.indexOf('}'))
+
+  // 36×20 capsule with 2px padding and a 10px radius (half the height), matching
+  // Switch.module.css in @deepseek-ai/dsh-client-ui-primitives.
+  assert.match(rule, /width:36px/)
+  assert.match(rule, /height:20px/)
+  assert.match(rule, /padding:2px/)
+  assert.match(rule, /border-radius:10px/)
+  // The capsule must opt out of the global superellipse, or its ends square off
+  // against the round thumb inside it.
+  assert.match(rule, /corner-shape:round/)
+  // The track colour is keyed off aria-checked, never a parallel modifier class:
+  // that is what keeps the picture and the accessible state from disagreeing.
+  assert.match(css, /\.locus-settings-switch\[aria-checked='true'\]\{background:/)
+  assert.doesNotMatch(css, /\.locus-settings-switch\.is-on/)
+  // 16px thumb translating exactly one track-width of travel (36 - 2*2 - 16).
+  assert.match(css, /\.locus-settings-switch-thumb\{[^}]*width:16px/)
+  assert.match(css, /\.locus-settings-switch-thumb\{[^}]*height:16px/)
+  assert.match(css, /\[aria-checked='true'\] \.locus-settings-switch-thumb\{transform:translateX\(16px\)/)
+
+  // The rendered control carries the switch role and copies no primitive module.
+  assert.match(source, /role: 'switch'/)
+  const component = source.slice(source.indexOf('function SwitchRow'))
+  const body = component.slice(0, component.indexOf('\n  }'))
+  assert.match(body, /'aria-checked': on \? 'true' : 'false'/)
+  assert.match(body, /'aria-label': label/)
+  // A bare capsule, like the host's: the visible copy belongs to the row.
+  assert.doesNotMatch(body, /settingsOn|settingsOff|switch-text/)
+
+  const requests = [...source.matchAll(/\bfrom\s+['"]([^'"]+)['"]/g)].map((match) => match[1])
+  assert.deepEqual(requests, [], 'a plain-JS client plugin imports no packages at all')
+})
+
+test('the settings nav icon is the supplied Unity mark, drawn verbatim', async () => {
+  // The artwork was supplied by the user as a 128-unit three-facet Unity logo.
+  // Rendering it means keeping its viewBox, its three paths (in order) and its
+  // own greys; a redrawn or recoloured "equivalent" is a different logo, so the
+  // exact geometry is asserted rather than "some svg exists".
+  const source = readFileSync(new URL('../src/client/plugin.js', import.meta.url), 'utf8')
+  const block = source.slice(source.indexOf("ctx.slots.inject('settings.section.icon'"))
+  const component = block.slice(0, block.indexOf("ctx.slots.inject('settings.section',"))
+
+  assert.match(component, /viewBox: '0 0 128 128'/)
+  // The three supplied paths, in the supplied order, with the supplied fills.
+  assert.match(component, /d: 'm64\.414 122\.93 47\.606-27\.49/)
+  assert.match(component, /fill: '#4d4d4d'/)
+  assert.match(component, /d: 'm53\.738 95\.676-18\.664-10\.79/)
+  assert.match(component, /fill: 'gray'/)
+  assert.match(component, /d: 'M68\.988 5\.07v21\.086/)
+  assert.equal([...component.matchAll(/\bh\('path'/g)].length, 3, 'exactly the three supplied paths')
+  // The dark facet is a literal, so the mark must NOT be turned into a
+  // currentColor stroke icon: that would drop the fills entirely.
+  assert.doesNotMatch(component, /stroke: 'currentColor'/)
+  // Sized by the slot, hidden from assistive tech, and addressable by the dark
+  // theme override.
+  assert.match(component, /width: size/)
+  assert.match(component, /height: size/)
+  assert.match(component, /'aria-hidden': 'true'/)
+  assert.match(component, /className: 'locus-unity-mark'/)
+})
+
+test('the nav icon is recoloured for dark mode and left alone in light', async () => {
+  // The supplied mark's darkest facet is near-black, which disappears on a dark
+  // panel. The fix is a CSS override keyed off the Host's own dark marker
+  // (`body[data-ds-dark-theme]` — verified against the Host theme stylesheet;
+  // there is no `data-theme`), never a redraw of the artwork.
+  const source = readFileSync(new URL('../src/client/plugin.js', import.meta.url), 'utf8')
+  const css = source.slice(source.indexOf('.locus-unity-mark{'))
+
+  // One rule per facet, so the mark keeps its three-tone structure in dark mode.
+  for (const facet of ['1', '2', '3']) {
+    assert.match(
+      css,
+      new RegExp(`body\\[data-ds-dark-theme\\] \\.locus-unity-mark path:nth-of-type\\(${facet}\\)\\{fill:`),
+      `facet ${facet} needs a dark-theme fill`,
+    )
+  }
+  // Every dark fill resolves through a registered theme token, so a palette
+  // change follows automatically instead of leaving a hard-coded grey behind.
+  // Slice exactly the dark rules: neighbouring settings rules use other tokens.
+  const darkRules = css.slice(css.indexOf('body[data-ds-dark-theme]'))
+  const darkBlock = darkRules.slice(0, darkRules.indexOf('.locus-settings-note'))
+  assert.doesNotMatch(darkBlock, /fill:#[0-9a-fA-F]{3,8}/, 'dark fills must be tokens, not literals')
+  assert.match(darkBlock, /--dsw-alias-label-primary/)
+  assert.match(darkBlock, /--dsw-alias-label-secondary/)
+  // Only registered tokens: the theme token list has no label-tertiary. Strip
+  // comments first, because the note above the third rule names that token to
+  // explain why it is not used.
+  const darkDeclarations = darkBlock.replace(/\/\*[\s\S]*?\*\//g, '')
+  assert.doesNotMatch(darkDeclarations, /--dsw-alias-label-tertiary/)
+  // Light mode is the supplied artwork: the override is scoped to dark only, so
+  // there is no unscoped .locus-unity-mark path { fill } rule that would also
+  // repaint the light theme.
+  const lightRules = [...css.matchAll(/^\.locus-unity-mark path[^{]*\{[^}]*fill:[^}]*\}/gm)]
+  assert.deepEqual(lightRules.map((m) => m[0]), [], 'no light-mode fill override may exist')
+})
+
 test('the plugin registers one tab type and one body under that key', () => {
   const registrations = []
   const effects = []
@@ -507,6 +611,15 @@ test('the plugin registers one tab type and one body under that key', () => {
     assert.ok(body, 'the body registers under the type id')
     assert.equal(typeof body.component, 'function')
     assert.equal(typeof body.definition.inject('s1').sessionId, 'string')
+    // The settings page and its nav icon share one id: the shell matches icons to
+    // sections by id and silently keeps the default glyph on a mismatch.
+    const section = registrations.find((entry) => entry.definition?.name === 'settings.section')
+    const icon = registrations.find((entry) => entry.definition?.name === 'settings.section.icon')
+    assert.ok(section, 'the settings page registers')
+    assert.ok(icon, 'the settings nav icon registers')
+    assert.equal(section.definition.id, SETTINGS_SECTION_ID)
+    assert.equal(icon.definition.id, SETTINGS_SECTION_ID)
+    assert.equal(typeof section.component, 'function')
   } finally {
     delete globalThis.document
   }

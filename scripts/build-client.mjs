@@ -66,6 +66,7 @@ export function renderBundle(source) {
     '    exports.TAB_ID = TAB_ID;',
     '    exports.TAB_KIND = TAB_KIND;',
     '    exports.EXTENSIONS = EXTENSIONS;',
+    '    exports.SETTINGS_SECTION_ID = SETTINGS_SECTION_ID;',
     '    exports.inject = plugin.inject;',
     '    exports.apply = plugin.apply;',
     '    return module.exports;',
