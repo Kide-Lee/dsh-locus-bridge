@@ -55,6 +55,7 @@
     "test": "node --test --test-concurrency=1 \"test/*.test.js\"",
     "test:live": "node scripts/live-smoke.mjs",
     "dump-tools": "node scripts/dump-tools.mjs",
+    "verify-schema": "node scripts/verify-dsh-schema.mjs",
     "validate": "node scripts/dump-tools.mjs && node scripts/typecheck.mjs && node scripts/validate-dsh-tools.mjs && node scripts/build-client.mjs --check",
     "typecheck": "node scripts/typecheck.mjs",
     "check": "node --test --test-concurrency=1 \"test/*.test.js\" && node scripts/dump-tools.mjs && node scripts/typecheck.mjs && node scripts/build-client.mjs --check",

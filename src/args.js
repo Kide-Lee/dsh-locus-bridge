@@ -206,11 +206,34 @@ export function normalizeProjectPath(value, cwd) {
   return isAbsolute(raw) ? resolve(raw) : raw
 }
 
+/**
+ * The live Session-directory service, registered by the plugin entry.
+ *
+ * Tool bodies receive a tool `exec` as their context, and an `exec` carries
+ * `{ name, callId, signal, agent, token, ... }` — no service accessors. Reading
+ * `exec.workingDirectory` therefore always yields `undefined` and the resolution
+ * silently falls back to the frozen `session.header.cwd`, so a `working_directory`
+ * change made mid-session never takes effect. The real service lives on the
+ * plugin context, which only the entry point holds.
+ */
+let workingDirectoryProvider = null
+
+/**
+ * Register the working-directory service (or clear it with `null`).
+ * Exported for `src/index.js` only.
+ */
+export function attachWorkingDirectory(service) {
+  workingDirectoryProvider = service ?? null
+}
+
 function sessionCwd(ctx) {
   try {
     const agent = ctx?.agent
     if (agent) {
-      const live = ctx?.workingDirectory?.get?.(agent.session)
+      // Prefer a service handed in on the context (the sidebar route passes the
+      // real plugin context), then the one the entry point registered.
+      const service = ctx?.workingDirectory ?? workingDirectoryProvider
+      const live = service?.get?.(agent.session)
       if (live) return live
     }
     return agent?.session?.header?.cwd ?? null

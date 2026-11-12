@@ -13,6 +13,7 @@ import {
   unitySocketPath,
 } from '../src/pipe-name.js'
 import { toolDefinitions, parameterSpecs } from '../src/tools.js'
+import { registryDefinitions, allToolDefinitions } from '../src/index.js'
 import { validateToolDefinitions } from '../scripts/dump-tools.mjs'
 
 /** A fixed environment so the socket-derivation test does not depend on the host. */
@@ -107,9 +108,14 @@ test('the test namespace suffixes both endpoint shapes', { skip: isWindowsHost()
 })
 
 test('every tool definition fits the DSH schema subset', () => {
-  assert.deepEqual(validateToolDefinitions(toolDefinitions), [])
+  // The REGISTRY definitions, not the authored ones: these are what
+  // `ctx.tools.register` receives and what the model sees as `input_schema`.
+  // Validating the authored form is what let a property-map `parameters` reach
+  // the registry uncompiled while every check still passed.
+  const registry = registryDefinitions()
+  assert.deepEqual(validateToolDefinitions(registry, allToolDefinitions()), [])
   assert.deepEqual(
-    toolDefinitions.map((definition) => definition.name),
+    registry.map((definition) => definition.name),
     [
       'unity_status',
       'unity_execute',
@@ -121,7 +127,43 @@ test('every tool definition fits the DSH schema subset', () => {
       'unity_asset_graph',
       'unity_capture',
       'unity_scene',
+      'code_symbol_search',
+      'code_goto_definition',
+      'code_find_references',
+      'code_hover',
+      'code_diagnostics',
+      'code_analysis',
     ],
+  )
+})
+
+test('registry parameters are object-rooted schemas with authored requiredness', () => {
+  const registry = registryDefinitions()
+  for (const definition of registry) {
+    assert.equal(definition.parameters.type, 'object', `${definition.name} must be object-rooted`)
+    assert.equal(typeof definition.parameters.properties, 'object', `${definition.name} must declare properties`)
+    // No field-level `required` may survive into the registry form.
+    for (const [key, node] of Object.entries(definition.parameters.properties)) {
+      assert.equal(node.required, undefined, `${definition.name}.${key} kept a field-level required`)
+    }
+    // The root must be an open object: DSH rejects a closed root for parameters.
+    assert.equal(definition.parameters.additionalProperties, undefined)
+  }
+  // Spot-check the tools whose requiredness the model depends on.
+  const capture = registry.find((definition) => definition.name === 'unity_capture')
+  assert.deepEqual([...capture.parameters.required].sort(), ['request_editor_status', 'target'])
+  const execute = registry.find((definition) => definition.name === 'unity_execute')
+  assert.deepEqual([...execute.parameters.required].sort(), ['code', 'request_editor_status'])
+})
+
+test('an uncompiled definition is rejected by the schema check', () => {
+  // Regression guard: this is precisely the shipped bug — registering the
+  // authored property map instead of the compiled schema.
+  const violations = validateToolDefinitions(toolDefinitions, toolDefinitions)
+  assert.ok(violations.length > 0, 'the authored property map must fail validation')
+  assert.ok(
+    violations.some((violation) => violation.includes('parameters.type must be "object"')),
+    'the check must name the missing object root',
   )
 })
 

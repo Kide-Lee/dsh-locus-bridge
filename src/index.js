@@ -1,15 +1,14 @@
 // DSH entry (Cordis plugin).
 //
-// Two ways to use the package:
-//   - Default runtime: `ctx.tools` is the real DSH registry, so the definitions
-//     below are registered directly (defineTool() returns a plain object; the
-//     registry validates each `parameters` schema against the supported JSON
-//     Schema subset and feeds it into the model-facing tool catalog).
-//   - If a future DSH requires `defineTool()` wrapping, call
-//     `registerLocusTools(defineTool)` and `apply(ctx)` with the returned list.
-//
-// Tool bodies live in ./tools.js (Unity broker tools) and ./csharp/tools.js
+// Tools are authored in ./tools.js (Unity broker tools) and ./csharp/tools.js
 // (Roslyn semantic analysis); only this module touches the host context.
+//
+// Registration MUST go through `toRegistryDefinition()`: the authored
+// `parameters` is an *implicit property map* (`{ code: { type: 'string' } }`),
+// and the registry hands a definition's `parameters` to the model verbatim as
+// `input_schema` without compiling it. Registering the map directly therefore
+// declares no properties at all — every call arrives as `{}` and the required
+// checks never run. See src/schema.js.
 //
 // The C# tools are a separate feature plane, not an extension of the Unity
 // tools: they own .NET child processes and ~90 MB of downloaded assets, and
@@ -19,15 +18,24 @@
 // (or the reverse).
 
 import { toolDefinitions, parameterSpecs, shutdownPool, attachHost } from './tools.js'
+import { attachWorkingDirectory } from './args.js'
 import { csharpToolDefinitions } from './csharp/tools.js'
 import { shutdownCsharpPool } from './csharp/lsp-pool.js'
 import { registerAssetRoutes } from './sidebar/routes.js'
+import { toRegistryDefinition } from './schema.js'
 
 export const name = 'dsh-locus-bridge'
-/** Services this plugin consumes (the tool registry). */
-export const inject = ['tools']
-
-let pending = null
+/**
+ * Services this plugin consumes.
+ *
+ * `workingDirectory` is required, not optional: tool bodies only ever see a
+ * tool `exec`, which has no service accessors, so without this injection the
+ * project resolution can only read the Session's frozen `header.cwd` and a
+ * mid-session `working_directory` change never applies. `apply()` registers the
+ * service with `src/args.js` so every Unity tool resolves against the live
+ * directory.
+ */
+export const inject = ['tools', 'workingDirectory']
 
 /**
  * Whether the C# analysis tools are registered.
@@ -48,14 +56,14 @@ export function allToolDefinitions(env = process.env) {
 }
 
 /**
- * Wrap the shared definitions with `defineTool` (drop-in compatible with
- * `@deepseek-ai/dsh-tools`). Returns the wrapped definitions.
+ * The definitions this plugin hands to `ctx.tools.register`: one per authored
+ * tool, with `parameters` and `output.schema` compiled to raw JSON Schema.
+ *
+ * Registration must use these, not the authored definitions: the registry
+ * forwards `parameters` to the model as `input_schema` without compiling it.
  */
-export function registerLocusTools(defineTool, env = process.env) {
-  // Parameters are plain JSON (not DSL references) because the same objects
-  // are validated by scripts/dump-tools.mjs; defineTool compiles both shapes.
-  pending = allToolDefinitions(env).map((raw) => defineTool({ ...raw, parameters: parameterSpecs(raw) }))
-  return pending
+export function registryDefinitions(env = process.env) {
+  return allToolDefinitions(env).map((raw) => toRegistryDefinition({ ...raw, parameters: parameterSpecs(raw) }))
 }
 
 /**
@@ -67,8 +75,14 @@ export function apply(ctx) {
   // `attachments` to carry the image itself). They read them off this handle,
   // exactly as `read_image` closes over its own `ctx`.
   attachHost(ctx)
-  for (const definition of pending ?? allToolDefinitions()) ctx.tools.register(definition)
-  ctx.effect(() => () => shutdownPool().catch(() => {}))
+  // Tool bodies receive a tool `exec`, never this context, so the live
+  // Session directory has to be registered rather than read off `exec`.
+  attachWorkingDirectory(ctx.workingDirectory)
+  for (const definition of registryDefinitions()) ctx.tools.register(definition)
+  ctx.effect(() => () => {
+    attachWorkingDirectory(null)
+    return shutdownPool().catch(() => {})
+  })
   if (csharpEnabled()) {
     ctx.effect(() => () => shutdownCsharpPool().catch(() => {}))
   }
