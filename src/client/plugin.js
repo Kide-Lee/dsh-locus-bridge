@@ -73,6 +73,201 @@ export const MODEL_EXTENSIONS = ['fbx', 'obj', 'dae', '3ds', 'max', 'blend', 'gl
 const FILE_ADDRESS_PREFIX = 'dsh-resource://file/'
 const PREVIEW_COLLAPSE_WIDTH = 560
 
+// ── localisation ────────────────────────────────────────────────────────────
+//
+// The panel's copy follows the DSH i18n system, like every shipped UI plugin:
+// the client apply attaches the `locale` service and registers this plugin's
+// dictionaries under {@link LOCALE_NS}. `t()` resolves the active language from
+// the service's snapshot — so switching the Host locale re-renders the panel
+// live — and falls back to the browser language when no service is attached (a
+// bare test composition, or a Host that never mounted a locale plugin).
+//
+// Deliberately not `ctx.locale.bind()`: the copy is needed synchronously inside
+// plain functions (`valueSummary`, `encodeWrite`) as well as components, and
+// threading a bound translate function through all of them is more machinery
+// than one module-level holder. A missing service degrades to the browser
+// language, never to raw keys.
+
+/** Locale namespace this plugin registers its dictionaries under. */
+export const LOCALE_NS = 'locusBridge'
+
+/** Chinese copy — the source of truth: every key here exists in `en` too. */
+const zh = Object.freeze({
+  loading: '加载中…',
+  errorBusyTitle: 'Unity 正忙',
+  errorReadTitle: '无法读取该资产',
+  retry: '重试',
+  chipOffline: '离线',
+  chipCompiling: '编译中',
+  chipError: '错误',
+  editorEditing: '编辑中',
+  editorPlaying: '运行中',
+  editorPlayingPaused: '已暂停',
+  editorDisconnected: '未连接',
+  previewHide: '隐藏预览',
+  previewShow: '预览',
+  locate: '定位',
+  reload: '重新读取',
+  revert: '还原',
+  save: '保存',
+  saveWithCount: '保存（{n}）',
+  saving: '保存中…',
+  saved: '已保存',
+  tooltipLocate: '在 Unity 中选中该资产',
+  tooltipReload: '从 Unity 重新读取',
+  tooltipRevert: '把所有改过的字段还原为打开此标签页时的值',
+  tooltipNothingToRevert: '没有可还原的修改',
+  tooltipSave: '把修改后的资产保存到磁盘',
+  tooltipNoEdits: '没有未保存的修改',
+  noThumbnail: '该资产没有缩略图。',
+  noOrbit: '该资产没有轨道预览，显示缩略图。',
+  orbitHint: '拖动旋转，滚轮缩放',
+  rendering: '渲染中…',
+  expand: '展开',
+  collapse: '折叠',
+  addElement: '添加元素',
+  removeElement: '移除最后一个元素',
+  none: '无',
+  clearReference: '清空该引用',
+  flatSummaryTitle: '共 {n} 个对象（摘要）',
+  notFileAddress: '此标签页不是会话文件地址。',
+  readingAsset: '正在读取资产…',
+  noSerializedData: '该资产没有可序列化的数据。',
+  dirtyFooter: '{n} 项未保存的修改（仅在内存中，按保存写入文件）',
+  savedToDisk: '已保存到磁盘',
+  noUnsaved: '没有未保存的修改',
+  itemCount: '{n} 项',
+  notEditable: '该属性在此不可编辑。',
+  expectedNumber: '需要一个有限数值。',
+  severityWarning: '警告',
+  severityError: '错误',
+  severityInfo: '信息',
+})
+
+/** English copy; must carry exactly the same keys as {@link zh}. */
+const en = Object.freeze({
+  loading: 'Loading…',
+  errorBusyTitle: 'Unity is busy',
+  errorReadTitle: 'Could not read this asset',
+  retry: 'Retry',
+  chipOffline: 'offline',
+  chipCompiling: 'compiling',
+  chipError: 'error',
+  editorEditing: 'editing',
+  editorPlaying: 'playing',
+  editorPlayingPaused: 'paused',
+  editorDisconnected: 'disconnected',
+  previewHide: 'Hide preview',
+  previewShow: 'Preview',
+  locate: 'Locate',
+  reload: 'Reload',
+  revert: 'Revert',
+  save: 'Save',
+  saveWithCount: 'Save ({n})',
+  saving: 'Saving…',
+  saved: 'Saved',
+  tooltipLocate: 'Select this asset in Unity',
+  tooltipReload: 'Re-read from Unity',
+  tooltipRevert: 'Put every edited field back to the value it had when this tab opened',
+  tooltipNothingToRevert: 'Nothing to revert',
+  tooltipSave: 'Save the edited asset to disk',
+  tooltipNoEdits: 'No unsaved edits',
+  noThumbnail: 'No thumbnail for this asset.',
+  noOrbit: 'This asset has no orbit preview; showing its thumbnail.',
+  orbitHint: 'Drag to orbit, scroll to zoom',
+  rendering: 'Rendering…',
+  expand: 'Expand',
+  collapse: 'Collapse',
+  addElement: 'Add element',
+  removeElement: 'Remove last element',
+  none: 'None',
+  clearReference: 'Clear this reference',
+  flatSummaryTitle: '{n} object(s) (summary)',
+  notFileAddress: 'This tab is not a Session file address.',
+  readingAsset: 'Reading the asset…',
+  noSerializedData: 'No serialized data for this asset.',
+  dirtyFooter: '{n} unsaved change(s) (in memory; press Save to write the file)',
+  savedToDisk: 'Saved to disk',
+  noUnsaved: 'No unsaved changes',
+  itemCount: '{n} item(s)',
+  notEditable: 'This property is not editable here.',
+  expectedNumber: 'Expected a finite number.',
+  severityWarning: 'warning',
+  severityError: 'error',
+  severityInfo: 'info',
+})
+
+/** The attached DSH locale service, or null (browser-language fallback). */
+let localeService = null
+
+/** Attach (or clear, with null/undefined) the DSH locale service. */
+export function attachLocale(service) {
+  localeService = service ?? null
+}
+
+/** The active locale id ('zh', 'en', …) from the service, else the browser's. */
+export function activeLocaleId() {
+  const fromService = localeService?.getSnapshot?.()?.active
+  if (typeof fromService === 'string' && fromService !== '') return fromService
+  const navigatorLanguage = typeof navigator !== 'undefined' ? navigator?.language : ''
+  return typeof navigatorLanguage === 'string' ? navigatorLanguage : ''
+}
+
+/** Whether the active language is Chinese. */
+export function isChineseUi() {
+  return activeLocaleId().toLowerCase().startsWith('zh')
+}
+
+/**
+ * Translate one copy key; `{name}` placeholders interpolate from `params`.
+ *
+ * An unknown key falls back to English, then to the key itself, so a missing
+ * entry shows something identifiable instead of `undefined`.
+ */
+export function t(key, params) {
+  const dictionary = isChineseUi() ? zh : en
+  let text = dictionary[key]
+  if (typeof text !== 'string') text = en[key]
+  if (typeof text !== 'string') text = String(key)
+  if (params !== undefined) {
+    for (const [name, value] of Object.entries(params)) text = text.replaceAll(`{${name}}`, String(value))
+  }
+  return text
+}
+
+/** Subscribe to locale switches; returns an unsubscribe function (never throws). */
+export function subscribeLocale(listener) {
+  const service = localeService
+  if (typeof service?.subscribe !== 'function') return () => {}
+  try {
+    const off = service.subscribe(listener)
+    return typeof off === 'function' ? off : () => {}
+  } catch {
+    return () => {}
+  }
+}
+
+/** The keys either dictionary defines (used by the tests and `severityLabel`). */
+export function copyKeys() {
+  return Object.keys(zh)
+}
+
+/** Editor status ('editing' | 'playing' | 'playing_paused') as localised text. */
+export function editorStatusLabel(status) {
+  const value = String(status ?? '').trim().toLowerCase()
+  const key = `editor${value.charAt(0).toUpperCase()}${value.slice(1).replace(/_([a-z])/g, (_, letter) => letter.toUpperCase())}`
+  return key in zh ? t(key) : String(status ?? '')
+}
+
+/** A diagnostic severity as localised text (`warning` / `error` / `info`). */
+export function severityLabel(severity) {
+  const value = String(severity ?? 'warning').trim().toLowerCase()
+  if (value === 'error') return t('severityError')
+  if (value === 'info') return t('severityInfo')
+  return t('severityWarning')
+}
+
+
 /**
  * Read `{ sessionId, path }` out of a `dsh-resource://file/session/<id>/<path>`
  * address. Mirrors the document preview's parser: the whole address is the
@@ -233,7 +428,7 @@ export function isLeaf(node) {
 /** A short label for a node's current value, used in collapsed rows. */
 export function valueSummary(node) {
   if (!node) return ''
-  if (Array.isArray(node.value)) return `${node.value.length} item(s)`
+  if (Array.isArray(node.value)) return t('itemCount', { n: node.value.length })
   const display = node.displayValue
   if (typeof display === 'string' && display !== '') return display
   if (node.value === null || node.value === undefined) return ''
@@ -276,14 +471,14 @@ export function editorFor(node) {
  */
 export function encodeWrite(node, value) {
   const editor = editorFor(node)
-  if (!editor) throw new Error('This property is not editable here.')
+  if (!editor) throw new Error(t('notEditable'))
   switch (editor.kind) {
     case 'boolean':
       return Boolean(value)
     case 'integer':
     case 'number': {
       const number = Number(value)
-      if (!Number.isFinite(number)) throw new Error('Expected a finite number.')
+      if (!Number.isFinite(number)) throw new Error(t('expectedNumber'))
       return editor.kind === 'integer' ? Math.round(number) : number
     }
     case 'string':
@@ -305,7 +500,7 @@ export function encodeWrite(node, value) {
     case 'reference':
       return value === undefined || value === null ? null : value
     default:
-      throw new Error('This property is not editable here.')
+      throw new Error(t('notEditable'))
   }
 }
 
@@ -365,7 +560,7 @@ export function createLocusAssetPlugin(require) {
 
   // ── small building blocks ─────────────────────────────────────────────────
   function Spinner({ label }) {
-    return h('div', { className: 'locus-asset-loading' }, h('span', { className: 'locus-asset-dot' }), h('span', null, label ?? 'Loading…'))
+    return h('div', { className: 'locus-asset-loading' }, h('span', { className: 'locus-asset-dot' }), h('span', null, label ?? t('loading')))
   }
 
   function ErrorBox({ error, onRetry }) {
@@ -373,9 +568,9 @@ export function createLocusAssetPlugin(require) {
     return h(
       'div',
       { className: 'locus-asset-error', 'data-locus-asset-error': error?.code ?? 'error' },
-      h('div', { className: 'locus-asset-error-title' }, retryable ? 'Unity is busy' : 'Could not read this asset'),
+      h('div', { className: 'locus-asset-error-title' }, retryable ? t('errorBusyTitle') : t('errorReadTitle')),
       h('div', { className: 'locus-asset-error-line' }, String(error?.message ?? error)),
-      onRetry ? h('button', { type: 'button', className: 'locus-asset-btn', onClick: onRetry }, 'Retry') : null,
+      onRetry ? h('button', { type: 'button', className: 'locus-asset-btn', onClick: onRetry }, t('retry')) : null,
     )
   }
 
@@ -389,16 +584,16 @@ export function createLocusAssetPlugin(require) {
         'div',
         { className: 'locus-asset-toolbar-main' },
         h('span', { className: 'locus-asset-path', title: path }, basenameOf(path)),
-        h('span', { className: `locus-asset-chip locus-asset-chip-${connected ? editorStatus : 'off'}` }, connected ? editorStatus : 'offline'),
-        status?.reload && status.reload.is_compiling ? h('span', { className: 'locus-asset-chip locus-asset-chip-busy' }, 'compiling') : null,
-        error ? h('span', { className: 'locus-asset-chip locus-asset-chip-error', title: String(error.message ?? error) }, 'error') : null,
+        h('span', { className: `locus-asset-chip locus-asset-chip-${connected ? editorStatus : 'off'}` }, connected ? editorStatusLabel(editorStatus) : t('chipOffline')),
+        status?.reload && status.reload.is_compiling ? h('span', { className: 'locus-asset-chip locus-asset-chip-busy' }, t('chipCompiling')) : null,
+        error ? h('span', { className: 'locus-asset-chip locus-asset-chip-error', title: String(error.message ?? error) }, t('chipError')) : null,
       ),
       h(
         'div',
         { className: 'locus-asset-toolbar-actions' },
-        h('button', { type: 'button', className: 'locus-asset-btn', onClick: onTogglePreview }, preview ? 'Hide preview' : 'Preview'),
-        h('button', { type: 'button', className: 'locus-asset-btn', onClick: onSelect, title: 'Select this asset in Unity' }, 'Locate'),
-        h('button', { type: 'button', className: 'locus-asset-btn', onClick: onReload, title: 'Re-read from Unity' }, 'Reload'),
+        h('button', { type: 'button', className: 'locus-asset-btn', onClick: onTogglePreview }, preview ? t('previewHide') : t('previewShow')),
+        h('button', { type: 'button', className: 'locus-asset-btn', onClick: onSelect, title: t('tooltipLocate') }, t('locate')),
+        h('button', { type: 'button', className: 'locus-asset-btn', onClick: onReload, title: t('tooltipReload') }, t('reload')),
         h(
           'button',
           {
@@ -406,9 +601,9 @@ export function createLocusAssetPlugin(require) {
             className: 'locus-asset-btn',
             onClick: onRevert,
             disabled: saving || dirty === 0,
-            title: dirty ? 'Put every edited field back to the value it had when this tab opened' : 'Nothing to revert',
+            title: dirty ? t('tooltipRevert') : t('tooltipNothingToRevert'),
           },
-          'Revert',
+          t('revert'),
         ),
         h(
           'button',
@@ -417,9 +612,9 @@ export function createLocusAssetPlugin(require) {
             className: `locus-asset-btn locus-asset-btn-primary${dirty ? '' : ' locus-asset-btn-idle'}`,
             onClick: onSave,
             disabled: saving || dirty === 0,
-            title: dirty ? 'Save the edited asset to disk' : 'No unsaved edits',
+            title: dirty ? t('tooltipSave') : t('tooltipNoEdits'),
           },
-          saving ? 'Saving…' : dirty ? `Save (${dirty})` : 'Saved',
+          saving ? t('saving') : dirty ? t('saveWithCount', { n: dirty }) : t('saved'),
         ),
       ),
     )
@@ -430,7 +625,10 @@ export function createLocusAssetPlugin(require) {
     const [dragging, setDragging] = useState(false)
     const [frameSrc, setFrameSrc] = useState(null)
     const [thumbSrc, setThumbSrc] = useState(null)
-    const [failed, setFailed] = useState(null)
+    // A *key*, not a sentence: the note must re-translate when the locale
+    // switches, so the state holds which message to show and `t()` resolves its
+    // text during render.
+    const [failedKey, setFailedKey] = useState(null)
     const dragRef = useRef(null)
     const boxRef = useRef(null)
     // A model orbits exactly like a prefab: `asset_preview_render` drives the
@@ -449,12 +647,12 @@ export function createLocusAssetPlugin(require) {
         // A prefab or model often has no AssetPreview (nothing imported an icon
         // for it), and the orbit render is the real picture there — so silence
         // the thumbnail failure instead of reporting a broken asset.
-        setFailed(isPrefab ? null : 'No thumbnail for this asset.')
+        setFailedKey(isPrefab ? null : 'noThumbnail')
         onError?.(null)
       }
       image.onload = () => {
         if (cancelled) return
-        setFailed(null)
+        setFailedKey(null)
       }
       image.src = url.toString()
       return () => {
@@ -488,14 +686,14 @@ export function createLocusAssetPlugin(require) {
         image.onload = () => {
           if (!cancelled) {
             setFrameSrc(url.toString())
-            setFailed(null)
+            setFailedKey(null)
           }
         }
         image.onerror = () => {
           if (cancelled) return
           // A model without a renderable prefab still has a thumbnail; do not
           // replace a working picture with an error.
-          setFailed('This asset has no orbit preview; showing its thumbnail.')
+          setFailedKey('noOrbit')
         }
         image.src = url.toString()
       }, dragging ? 180 : 40)
@@ -551,11 +749,11 @@ export function createLocusAssetPlugin(require) {
           onPointerUp,
           onPointerCancel: onPointerUp,
           onWheel,
-          title: isPrefab ? 'Drag to orbit, scroll to zoom' : undefined,
+          title: isPrefab ? t('orbitHint') : undefined,
         },
-        source ? h('img', { src: source, alt: '', draggable: false }) : h(Spinner, { label: 'Rendering…' }),
+        source ? h('img', { src: source, alt: '', draggable: false }) : h(Spinner, { label: t('rendering') }),
       ),
-      failed ? h('div', { className: 'locus-asset-preview-note' }, failed) : null,
+      failedKey ? h('div', { className: 'locus-asset-preview-note' }, t(failedKey)) : null,
     )
   }
 
@@ -578,7 +776,7 @@ export function createLocusAssetPlugin(require) {
             className: `locus-asset-fold${children ? '' : ' is-empty'}`,
             onClick: children ? () => onToggle(node, key) : undefined,
             tabIndex: children ? 0 : -1,
-            'aria-label': children ? (open ? 'Collapse' : 'Expand') : undefined,
+            'aria-label': children ? (open ? t('collapse') : t('expand')) : undefined,
           },
           children ? (open ? '▾' : '▸') : '',
         ),
@@ -602,8 +800,8 @@ export function createLocusAssetPlugin(require) {
       'span',
       { className: 'locus-asset-array' },
       h('span', { className: 'locus-asset-count' }, `${size}`),
-      h('button', { type: 'button', className: 'locus-asset-mini', disabled, title: 'Add element', onClick: () => onWrite(node, arrayCommand('insert', { index: size })) }, '+'),
-      h('button', { type: 'button', className: 'locus-asset-mini', disabled: disabled || size === 0, title: 'Remove last element', onClick: () => onWrite(node, arrayCommand('delete', { index: size - 1 })) }, '−'),
+      h('button', { type: 'button', className: 'locus-asset-mini', disabled, title: t('addElement'), onClick: () => onWrite(node, arrayCommand('insert', { index: size })) }, '+'),
+      h('button', { type: 'button', className: 'locus-asset-mini', disabled: disabled || size === 0, title: t('removeElement'), onClick: () => onWrite(node, arrayCommand('delete', { index: size - 1 })) }, '−'),
     )
   }
 
@@ -698,7 +896,7 @@ export function createLocusAssetPlugin(require) {
       return h(
         'span',
         { className: 'locus-asset-reference' },
-        h('span', { className: 'locus-asset-ref-text', title: text }, text || 'None'),
+        h('span', { className: 'locus-asset-ref-text', title: text }, text || t('none')),
         editor.present
           ? h(
               'button',
@@ -706,7 +904,7 @@ export function createLocusAssetPlugin(require) {
                 type: 'button',
                 className: 'locus-asset-mini',
                 disabled,
-                title: 'Clear this reference',
+                title: t('clearReference'),
                 onClick: () => commit(null),
               },
               '×',
@@ -831,7 +1029,7 @@ export function createLocusAssetPlugin(require) {
     return h(
       'div',
       { className: 'locus-asset-flat' },
-      h('div', { className: 'locus-asset-flat-title' }, `${objects.length} object${objects.length === 1 ? '' : 's'} (summary)`),
+      h('div', { className: 'locus-asset-flat-title' }, t('flatSummaryTitle', { n: objects.length })),
       objects.map((object) => {
         const open = openObjects.has(object.objectId)
         return h(
@@ -875,7 +1073,10 @@ export function createLocusAssetPlugin(require) {
             'div',
             { className: 'locus-asset-flat-diagnostics' },
             flat.diagnostics.map((diagnostic, index) =>
-              h('div', { key: `${diagnostic.code ?? index}`, className: 'locus-asset-preview-note' }, `${diagnostic.severity ?? 'warning'}: ${diagnostic.message ?? diagnostic.code ?? ''}`),
+              // The severity is this panel's own vocabulary, so it is localised;
+              // the message is Unity's own diagnostic text (an arbitrary
+              // technical string) and translating it would be inventing words.
+              h('div', { key: `${diagnostic.code ?? index}`, className: 'locus-asset-preview-note' }, `${severityLabel(diagnostic.severity)}: ${diagnostic.message ?? diagnostic.code ?? ''}`),
             ),
           )
         : null,
@@ -883,6 +1084,20 @@ export function createLocusAssetPlugin(require) {
   }
 
   // ── the tab body ──────────────────────────────────────────────────────────
+  /**
+   * Re-render the panel when the UI language switches.
+   *
+   * `t()` reads the locale service synchronously during render, so a switch
+   * only becomes visible when something re-renders. Subscribing here (rather
+   * than in every component) keeps `AssetBody` itself free of i18n plumbing;
+   * the counter is intentionally only read for its effect of forcing a render.
+   */
+  function LocalizedAssetBody(props) {
+    const [, setLocaleTick] = useState(0)
+    useEffect(() => subscribeLocale(() => setLocaleTick((value) => value + 1)), [])
+    return h(AssetBody, props)
+  }
+
   function AssetBody(props) {
     const { useTabInfo, sessionId } = props
     const { tab } = useTabInfo()
@@ -919,17 +1134,19 @@ export function createLocusAssetPlugin(require) {
     const loadStatus = useCallback(async () => {
       if (!session) return
       try {
-        const payload = await callApi('status', { params: { sessionId: session } })
+        // The path lets the Host pick the right project when the workspace holds
+        // more than one; without it a multi-project workspace has no answer.
+        const payload = await callApi('status', { params: { sessionId: session, path: path || undefined } })
         if (mountedRef.current) setStatus(payload)
       } catch (failure) {
         if (mountedRef.current) setStatus({ connected: false, error: failure.message })
       }
-    }, [session])
+    }, [session, path])
 
     const load = useCallback(
       async ({ keepEdits = false } = {}) => {
         if (!session || !path) {
-          setError(new Error('This tab is not a Session file address.'))
+          setError(new Error(t('notFileAddress')))
           setLoading(false)
           return
         }
@@ -1124,7 +1341,7 @@ export function createLocusAssetPlugin(require) {
       h(
         'div',
         { className: 'locus-asset-scroll' },
-        loading && !tree && !flat ? h(Spinner, { label: 'Reading the asset…' }) : null,
+        loading && !tree && !flat ? h(Spinner, { label: t('readingAsset') }) : null,
         error ? h(ErrorBox, { error, onRetry: () => void load({ keepEdits: false }) }) : null,
         // `flat` is the read-only summary the Host falls back to when the
         // property tree has no visible children (an AnimatorController keeps its
@@ -1142,12 +1359,12 @@ export function createLocusAssetPlugin(require) {
               disabled: saving,
             }))
           : null,
-        !loading && !error && !hasTreeRows(tree) && !flat ? h('div', { className: 'locus-asset-empty' }, 'No serialized data for this asset.') : null,
+        !loading && !error && !hasTreeRows(tree) && !flat ? h('div', { className: 'locus-asset-empty' }, t('noSerializedData')) : null,
       ),
       h(
         'div',
         { className: 'locus-asset-footer' },
-        h('span', { className: 'locus-asset-footer-text' }, dirtyCount > 0 ? `${dirtyCount} unsaved change${dirtyCount === 1 ? '' : 's'} (in memory; press Save to write the file)` : lastSave ? 'Saved to disk' : 'No unsaved changes'),
+        h('span', { className: 'locus-asset-footer-text' }, dirtyCount > 0 ? t('dirtyFooter', { n: dirtyCount }) : lastSave ? t('savedToDisk') : t('noUnsaved')),
         h('span', { className: 'locus-asset-footer-path', title: path }, path),
       ),
     )
@@ -1156,8 +1373,37 @@ export function createLocusAssetPlugin(require) {
   // ── registration ──────────────────────────────────────────────────────────
   return {
     name: 'dsh-locus-bridge',
+    // `locale` is optional on purpose: a Host that mounts no locale plugin must
+    // still get the panel (with browser-language copy), so a required injection
+    // would turn a cosmetic absence into a missing tab.
     inject: ['slots', 'sidebarRightTabs'],
     apply(ctx) {
+      // Attach the DSH locale service and register this plugin's dictionaries.
+      // Both disposers run on fiber disposal, so re-activation re-registers
+      // cleanly instead of duplicating entries.
+      const locale = ctx.get?.('locale')
+      if (locale) {
+        attachLocale(locale)
+        ctx.effect(() => {
+          const disposers = []
+          for (const [id, dict] of [
+            ['zh', zh],
+            ['en', en],
+          ]) {
+            try {
+              const off = locale.register(LOCALE_NS, id, dict)
+              if (typeof off === 'function') disposers.push(off)
+            } catch {
+              // A locale service with a different registration face is not worth
+              // failing the tab over: `t()` still resolves from the snapshot.
+            }
+          }
+          return () => {
+            for (const off of disposers) off()
+            attachLocale(null)
+          }
+        }, 'dsh-locus-bridge: locale dictionaries')
+      }
       ctx.effect(
         () =>
           ctx.sidebarRightTabs.register({
@@ -1181,7 +1427,7 @@ export function createLocusAssetPlugin(require) {
                 key: TAB_ID,
                 inject: (sessionId) => ({ sessionId }),
               },
-              AssetBody,
+              LocalizedAssetBody,
             ),
           ),
         'dsh-locus-bridge: tab body',

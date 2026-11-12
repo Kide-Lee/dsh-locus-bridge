@@ -54,9 +54,12 @@ test('normalizeAssetPath refuses escapes, absolute paths and non-Assets roots', 
   }
 })
 
-test('assertInsideProject resolves inside the root and refuses a traversal', () => {
-  const root = '/opt/Unity/MyProject'
-  assert.equal(assertInsideProject(root, 'Assets/A.prefab'), '/opt/Unity/MyProject/Assets/A.prefab')
+test('assertInsideProject resolves inside the root and refuses a traversal', async () => {
+  const { resolve } = await import('node:path')
+  // A file: URL's path is POSIX on one host and a drive letter on another, so
+  // the expectation is built with the same `resolve` the function uses.
+  const root = resolve('/opt/Unity/MyProject')
+  assert.equal(assertInsideProject(root, 'Assets/A.prefab'), resolve(root, 'Assets/A.prefab'))
   // normalizeAssetPath would catch this first; the resolved check is the belt.
   assert.throws(() => assertInsideProject(root, 'Assets/../../etc/passwd'))
 })
@@ -240,6 +243,171 @@ test('a workspace-rooted file address resolves to a project-relative asset path'
     // An unknown Session is also a client error, not a crash.
     const unknown = await fetch(`${base}/asset?sessionId=nope&path=Assets%2Fx.prefab`)
     assert.equal(unknown.status, 404)
+  } finally {
+    await new Promise((done) => server.close(done))
+    rmSync(workspace, { recursive: true, force: true })
+  }
+})
+
+// A workspace holding more than one Unity project is a real layout (a game plus
+// a simulation side by side). Resolving the Session alone then has no answer and
+// `resolveProjectRoot` rightly refuses; the clicked file address does have one.
+test('projectRootForAssetPath finds the project a clicked asset lives in', async () => {
+  const { mkdirSync, mkdtempSync, rmSync } = await import('node:fs')
+  const { tmpdir } = await import('node:os')
+  const { join, resolve } = await import('node:path')
+  const { projectRootForAssetPath } = await import('../src/sidebar/paths.js')
+
+  const workspace = mkdtempSync(join(tmpdir(), 'locus-multi-'))
+  const game = join(workspace, 'Projects', 'Tower of Babel')
+  const sim = join(workspace, 'Projects', 'Economic System')
+  for (const project of [game, sim]) {
+    mkdirSync(join(project, 'Assets'), { recursive: true })
+    mkdirSync(join(project, 'ProjectSettings'), { recursive: true })
+  }
+  try {
+    assert.equal(
+      projectRootForAssetPath(workspace, 'Projects/Tower of Babel/Assets/Resources/altar.prefab'),
+      resolve(game),
+    )
+    assert.equal(projectRootForAssetPath(workspace, 'Projects/Economic System/Assets/X.asset'), resolve(sim))
+    // The address is rooted at the Session's directory, but the callers also
+    // hand over a bare project-relative path when the workspace *is* the project.
+    assert.equal(projectRootForAssetPath(game, 'Assets/A.prefab'), resolve(game))
+    // A path inside no project, and every hostile shape, is not a project.
+    for (const [root, path] of [
+      [workspace, 'Design/notes.md'],
+      [workspace, 'Assets/A.prefab'],
+      [workspace, '../outside/Assets/A.prefab'],
+      [workspace, '/abs/Assets/A.prefab'],
+      [workspace, 'Projects/../Assets/A.prefab'],
+      [workspace, ''],
+      ['', 'Assets/A.prefab'],
+      [undefined, 'Assets/A.prefab'],
+    ]) {
+      assert.equal(projectRootForAssetPath(root, path), null, `${root} + ${path} must not resolve`)
+    }
+  } finally {
+    rmSync(workspace, { recursive: true, force: true })
+  }
+})
+
+test('a click in a multi-project workspace reads that project, not the Session', async () => {
+  // Regression: `altar.prefab` in `Projects/Tower of Babel` used to fail with
+  // "The working directory … contains several Unity projects 2 level(s) down;
+  // pass project_path to choose one." That message belongs to a tool call, which
+  // can take `project_path`; a Sidebar tab cannot, and does not need to — the
+  // address it was opened from names the file, and the file names the project.
+  const { createServer } = await import('node:http')
+  const { mkdirSync, mkdtempSync, rmSync } = await import('node:fs')
+  const { tmpdir } = await import('node:os')
+  const { join } = await import('node:path')
+  const { registerAssetRoutes, ROUTE_PREFIX } = await import('../src/sidebar/routes.js')
+  const { __resetPoolForTest } = await import('../src/client-pool.js')
+
+  const workspace = mkdtempSync(join(tmpdir(), 'locus-multi-routes-'))
+  const game = join(workspace, 'Projects', 'Tower of Babel')
+  const sim = join(workspace, 'Projects', 'Economic System')
+  for (const project of [game, sim]) {
+    mkdirSync(join(project, 'Assets'), { recursive: true })
+    mkdirSync(join(project, 'ProjectSettings'), { recursive: true })
+  }
+  const session = 'session-multi'
+  const handlers = []
+  registerAssetRoutes({
+    webServer: { register: (route) => { handlers.push(route); return () => {} } },
+    effect: (fn) => fn(),
+    get: (name) => name === 'sessions' ? { get: (id) => (id === session ? { header: { cwd: workspace } } : undefined) }
+      : name === 'workingDirectory' ? { get: () => workspace }
+      : name === 'connection' ? { requestRejection: () => undefined }
+      : undefined,
+  })
+
+  const server = createServer((req, res) => {
+    const path = new URL(req.url ?? '/', 'http://x').pathname
+    const route = handlers.find((entry) => entry.path === path)
+    if (!route) { res.writeHead(404); res.end(); return }
+    void route.handler(req, res)
+  })
+  await new Promise((done) => server.listen(0, '127.0.0.1', done))
+  const base = `http://127.0.0.1:${server.address().port}${ROUTE_PREFIX}`
+  __resetPoolForTest()
+  try {
+    // The project resolution now succeeds, so the request reaches the broker and
+    // fails there (no editor runs in a test) — the point is that it is no longer
+    // the 409 "several Unity projects … pass project_path" refusal, which the
+    // panel could only render as a dead end.
+    const asset = await fetch(
+      `${base}/asset?sessionId=${session}&path=${encodeURIComponent('Projects/Tower of Babel/Assets/Resources/altar.prefab')}`,
+    )
+    const payload = await asset.json()
+    const message = String(payload?.error?.message ?? '')
+    assert.ok(!/several Unity projects|pass project_path/.test(message), message)
+
+    // `/status` answers for the tab's own project instead of refusing outright.
+    const status = await fetch(
+      `${base}/status?sessionId=${session}&path=${encodeURIComponent('Projects/Economic System/Assets/X.asset')}`,
+    )
+    const statusPayload = await status.json()
+    assert.equal(statusPayload.ok, true)
+    assert.match(String(statusPayload.projectRoot), /Economic System$/)
+
+    // Without a path the Session still cannot choose, and that is reported as a
+    // state the panel can show rather than a crash.
+    const bare = await fetch(`${base}/status?sessionId=${session}`)
+    const barePayload = await bare.json()
+    assert.equal(barePayload.ok, true)
+    assert.equal(barePayload.connected, false)
+    assert.match(String(barePayload.reason), /several Unity projects/)
+  } finally {
+    await new Promise((done) => server.close(done))
+    rmSync(workspace, { recursive: true, force: true })
+  }
+})
+
+test('an offline editor is a retryable state, not a 500', async () => {
+  // Regression: a closed editor reaches the panel as a `LocusError` carrying
+  // `managed_not_ready` (a closed editor is not a reload) whose message talks
+  // about pipes. Classifying only on text produced a red 500 "unity_error",
+  // which the panel renders as a broken asset instead of "Unity is offline".
+  const { createServer } = await import('node:http')
+  const { mkdirSync, mkdtempSync, rmSync } = await import('node:fs')
+  const { tmpdir } = await import('node:os')
+  const { join } = await import('node:path')
+  const { registerAssetRoutes, ROUTE_PREFIX } = await import('../src/sidebar/routes.js')
+  const { __resetPoolForTest } = await import('../src/client-pool.js')
+
+  const workspace = mkdtempSync(join(tmpdir(), 'locus-offline-'))
+  const project = join(workspace, 'unity-test')
+  mkdirSync(join(project, 'Assets'), { recursive: true })
+  mkdirSync(join(project, 'ProjectSettings'), { recursive: true })
+  const session = 'session-offline'
+  const handlers = []
+  registerAssetRoutes({
+    webServer: { register: (route) => { handlers.push(route); return () => {} } },
+    effect: (fn) => fn(),
+    get: (name) => name === 'sessions' ? { get: (id) => (id === session ? { header: { cwd: workspace } } : undefined) }
+      : name === 'workingDirectory' ? { get: () => workspace }
+      : name === 'connection' ? { requestRejection: () => undefined }
+      : undefined,
+  })
+  const server = createServer((req, res) => {
+    const path = new URL(req.url ?? '/', 'http://x').pathname
+    const route = handlers.find((entry) => entry.path === path)
+    if (!route) { res.writeHead(404); res.end(); return }
+    void route.handler(req, res)
+  })
+  await new Promise((done) => server.listen(0, '127.0.0.1', done))
+  const base = `http://127.0.0.1:${server.address().port}${ROUTE_PREFIX}`
+  __resetPoolForTest()
+  try {
+    const response = await fetch(`${base}/asset?sessionId=${session}&path=${encodeURIComponent('unity-test/Assets/A.prefab')}`)
+    const payload = await response.json()
+    // No editor is running in a test, so the broker is unreachable: that is
+    // exactly the offline case the panel must survive.
+    assert.equal(response.status, 503, JSON.stringify(payload))
+    assert.equal(payload.retryable, true)
+    assert.equal(payload.error.code, 'unity_unavailable')
   } finally {
     await new Promise((done) => server.close(done))
     rmSync(workspace, { recursive: true, force: true })

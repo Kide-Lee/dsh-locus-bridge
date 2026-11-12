@@ -9,6 +9,8 @@
 
 import { isAbsolute, relative, resolve, sep } from 'node:path'
 
+import { isUnityProject } from '../args.js'
+
 /** The Unity asset suffixes `asset_api` can serialize (`LocusBridge.AssetApi.cs`). */
 export const ASSET_API_EXTENSIONS = Object.freeze([
   '.asset',
@@ -145,3 +147,59 @@ export function assertInsideProject(projectRoot, assetPath) {
   }
   return target
 }
+
+/** How deep below the workspace a Unity project may sit before a click names it. */
+export const ASSET_PATH_SEARCH_DEPTH = 8
+
+/**
+ * The Unity project a clicked asset path belongs to, or `null`.
+ *
+ * A workspace can hold several Unity projects (a game plus an economy
+ * simulation side by side, which is a real layout this plugin runs against).
+ * Resolving the project from the *Session* then has no single answer —
+ * `resolveProjectRoot` rightly refuses and names the candidates — but the
+ * Sidebar does have an answer: the file address says exactly which project the
+ * user clicked in, so the deepest ancestor holding `Assets/` + `ProjectSettings/`
+ * is that project, and it is also the one whose `Assets/…` path the broker
+ * expects.
+ *
+ * `workspace` is the directory the address is rooted at (the Session's own
+ * directory), and `assetPath` is the address below it, so the two are joined
+ * unambiguously: no `..`, no absolute segment (the browser never gets to name a
+ * filesystem path). The deepest match wins because a project may sit inside
+ * another directory that also looks like one; `null` means no project was found
+ * and the caller should fall back to the Session-based resolution.
+ */
+export function projectRootForAssetPath(workspace, assetPath, { maxDepth = ASSET_PATH_SEARCH_DEPTH } = {}) {
+  const root = String(workspace ?? '').trim()
+  const path = String(assetPath ?? '').trim().replaceAll('\\', '/')
+  if (!root || !path) return null
+  const rel = path.replace(/^\/+/, '')
+  if (!rel || isAbsolute(rel) || /^[A-Za-z]:\//.test(rel)) return null
+  const segments = rel.split('/').filter(Boolean)
+  if (segments.length === 0 || segments.some((segment) => segment === '.' || segment === '..' || segment.includes('\0'))) {
+    return null
+  }
+  // The asset itself is never the project root, so the deepest candidate is the
+  // directory holding `Assets/`. `workspace` itself is a candidate too: an
+  // address rooted at the project (the common case where the workspace *is* the
+  // Unity project) names `Assets/…` directly.
+  const assetsAt = segments.lastIndexOf('Assets')
+  const candidates = []
+  // Deepest first: a project nested inside another directory wins over the
+  // workspace itself, which is only a Unity project in the single-project case.
+  for (let index = Math.min(segments.length - 1, maxDepth); index >= 1; index -= 1) {
+    candidates.push(resolve(root, ...segments.slice(0, index)))
+  }
+  if (assetsAt > 0) {
+    // The project the path actually names comes first regardless of depth: an
+    // `Assets/…` segment says exactly which directory holds the asset.
+    candidates.unshift(resolve(root, ...segments.slice(0, assetsAt)))
+  }
+  candidates.push(resolve(root))
+  for (const candidate of candidates) {
+    if (isUnityProject(candidate)) return candidate
+  }
+  return null
+}
+

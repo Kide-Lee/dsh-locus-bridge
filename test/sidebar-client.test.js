@@ -4,19 +4,25 @@ import { readFileSync } from 'node:fs'
 
 import {
   EXTENSIONS,
+  LOCALE_NS,
   MODEL_EXTENSIONS,
   TAB_ID,
   TAB_KIND,
+  activeLocaleId,
   apiUrl,
   arrayCommand,
+  attachLocale,
   basenameOf,
   colorToHex,
+  copyKeys,
   createLocusAssetPlugin,
   editorFor,
+  editorStatusLabel,
   encodeWrite,
   flattenTree,
   hasChildren,
   hexToColor,
+  isChineseUi,
   isLeaf,
   nodeChildren,
   nodeKey,
@@ -24,10 +30,30 @@ import {
   patternsFor,
   replaceNode,
   rowKey,
+  severityLabel,
+  subscribeLocale,
   suffixOf,
+  t,
   targetKey,
   valueSummary,
 } from '../src/client/plugin.js'
+
+/**
+ * Force one UI language for the duration of `run`.
+ *
+ * `t()` falls back to `navigator.language`, which is the machine's language and
+ * therefore not a stable input for a test: assertions about *copy* must pin the
+ * locale instead of depending on whoever runs the suite.
+ */
+async function withLocale(active, run) {
+  attachLocale({ getSnapshot: () => ({ active }), register: () => () => {}, subscribe: () => () => {} })
+  try {
+    return await run()
+  } finally {
+    attachLocale(null)
+  }
+}
+
 
 // ── addresses ───────────────────────────────────────────────────────────────
 
@@ -194,8 +220,12 @@ test('encodeWrite produces the valueJson vocabulary SetSerializedPropertyValue p
   assert.deepEqual(write('Color', { r: 2, g: -1, b: 0.5 }), { r: 1, g: 0, b: 0.5, a: 1 }, 'channels clamp')
   assert.deepEqual(write('ObjectReference', { globalObjectId: 'g' }), { globalObjectId: 'g' })
   assert.equal(write('ObjectReference', null), null)
-  assert.throws(() => write('Float', 'abc'), /finite number/)
-  assert.throws(() => encodeWrite(node({ valueType: 'Generic', propertyPath: 'm_X' }), 1), /not editable/)
+  // The refusal messages are localised copy now, so the assertion pins the
+  // language instead of matching an English sentence.
+  return withLocale('en', () => {
+    assert.throws(() => write('Float', 'abc'), /finite number/)
+    assert.throws(() => encodeWrite(node({ valueType: 'Generic', propertyPath: 'm_X' }), 1), /not editable/)
+  })
 })
 
 test('arrayCommand carries only the fields the command needs', () => {
@@ -224,9 +254,173 @@ test('colorToHex writes sRGB and hexToColor inverts it back to linear', () => {
 test('valueSummary prefers displayValue and falls back per shape', () => {
   assert.equal(valueSummary(node({ displayValue: 'Center' })), 'Center')
   assert.equal(valueSummary(node({ value: true })), 'true')
-  assert.equal(valueSummary(node({ value: [1, 2, 3] })), '3 item(s)')
-  assert.equal(valueSummary(node({ value: { x: 1 } })), '{"x":1}')
-  assert.equal(valueSummary(null), '')
+  return withLocale('en', () => {
+    assert.equal(valueSummary(node({ value: [1, 2, 3] })), '3 item(s)')
+  })
+  .then(() =>
+    withLocale('zh', () => {
+      assert.equal(valueSummary(node({ value: [1, 2, 3] })), '3 项')
+    }),
+  )
+  .then(() => {
+    assert.equal(valueSummary(node({ value: { x: 1 } })), '{"x":1}')
+    assert.equal(valueSummary(null), '')
+  })
+})
+
+// ── localisation ───────────────────────────────────────────────────────────
+
+test('both dictionaries define exactly the same keys', () => {
+  // The zh dictionary is the source of truth; a key present in one and not the
+  // other would silently fall back to English (or to raw keys) in one language.
+  const keys = copyKeys()
+  assert.ok(keys.length > 40, `expected a full dictionary, got ${keys.length} keys`)
+  return withLocale('en', () => {
+    const english = keys.map((key) => t(key))
+    for (const [index, key] of keys.entries()) {
+      assert.notEqual(english[index], key, `${key} is missing from the English dictionary`)
+    }
+  }).then(() =>
+    withLocale('zh', () => {
+      for (const key of keys) {
+        const text = t(key)
+        assert.notEqual(text, key, `${key} is missing from the Chinese dictionary`)
+      }
+    }),
+  )
+})
+
+test('t() resolves the active locale and interpolates placeholders', () => {
+  return withLocale('zh-CN', () => {
+    assert.equal(isChineseUi(), true)
+    assert.equal(t('save'), '保存')
+    assert.equal(t('saveWithCount', { n: 3 }), '保存（3）')
+    assert.equal(t('dirtyFooter', { n: 2 }), '2 项未保存的修改（仅在内存中，按保存写入文件）')
+  })
+    .then(() =>
+      withLocale('en-US', () => {
+        assert.equal(isChineseUi(), false)
+        assert.equal(t('save'), 'Save')
+        assert.equal(t('saveWithCount', { n: 3 }), 'Save (3)')
+      }),
+    )
+    .then(() =>
+      withLocale('ja-JP', () => {
+        // A language this plugin does not carry falls back to English rather
+        // than to raw keys.
+        assert.equal(isChineseUi(), false)
+        assert.equal(t('save'), 'Save')
+      }),
+    )
+})
+
+test('an unknown key degrades to the key itself, never to undefined', () => {
+  return withLocale('zh', () => {
+    assert.equal(t('noSuchKey'), 'noSuchKey')
+    assert.equal(t('noSuchKey', { n: 1 }), 'noSuchKey')
+  })
+})
+
+test('activeLocaleId prefers the locale service over the browser language', () => {
+  return withLocale('zh', () => {
+    assert.equal(activeLocaleId(), 'zh')
+  }).then(() => {
+    // With no service attached the browser language is the fallback, so the
+    // answer must at least be a string and never a crash.
+    attachLocale(null)
+    assert.equal(typeof activeLocaleId(), 'string')
+  })
+})
+
+test('editorStatusLabel and severityLabel localise values the broker sends', async () => {
+  await withLocale('zh', () => {
+    assert.equal(editorStatusLabel('editing'), '编辑中')
+    assert.equal(editorStatusLabel('playing'), '运行中')
+    assert.equal(editorStatusLabel('playing_paused'), '已暂停')
+    assert.equal(severityLabel('warning'), '警告')
+    assert.equal(severityLabel('error'), '错误')
+    assert.equal(severityLabel('info'), '信息')
+  })
+  await withLocale('en', () => {
+    assert.equal(editorStatusLabel('editing'), 'editing')
+    assert.equal(editorStatusLabel('playing_paused'), 'paused')
+    assert.equal(severityLabel('warning'), 'warning')
+  })
+})
+
+test('an unknown editor status and severity pass through unchanged', async () => {
+  await withLocale('zh', () => {
+    // A future editor state must not print a fabricated translation.
+    assert.equal(editorStatusLabel('compiling'), 'compiling')
+    assert.equal(severityLabel(undefined), '警告')
+  })
+})
+
+test('subscribeLocale tolerates a service without subscribe and never throws', () => {
+  attachLocale({ getSnapshot: () => ({ active: 'zh' }) })
+  try {
+    const off = subscribeLocale(() => {})
+    assert.equal(typeof off, 'function')
+    off()
+  } finally {
+    attachLocale(null)
+  }
+  // No service at all.
+  assert.equal(typeof subscribeLocale(() => {}), 'function')
+})
+
+test('the locale service is attached and both dictionaries are registered', () => {
+  const registered = []
+  const disposed = []
+  const fakeReact = {
+    createElement: (type, props, ...children) => ({ type, props, children }),
+    useCallback: (fn) => fn,
+    useEffect: () => {},
+    useMemo: (fn) => fn(),
+    useRef: (value) => ({ current: value }),
+    useState: (value) => [typeof value === 'function' ? value() : value, () => {}],
+  }
+  const locale = {
+    getSnapshot: () => ({ active: 'zh' }),
+    register: (ns, id, dict) => {
+      registered.push({ ns, id, dict })
+      return () => disposed.push(id)
+    },
+    subscribe: () => () => {},
+  }
+  const ctx = {
+    get: (name) => (name === 'locale' ? locale : undefined),
+    effect(fn) {
+      const dispose = fn()
+      if (typeof dispose === 'function') ctx.disposers.push(dispose)
+    },
+    on: () => {},
+    disposers: [],
+    sidebarRightTabs: { register: () => () => {} },
+    slots: { inject: () => () => {}, register: () => () => {} },
+  }
+  globalThis.document = {
+    documentElement: { dataset: {} },
+    head: { querySelector: () => null, appendChild: () => {} },
+    createElement: () => ({ setAttribute() {}, textContent: '' }),
+  }
+  try {
+    const plugin = createLocusAssetPlugin(() => fakeReact)
+    plugin.apply(ctx)
+    assert.deepEqual(
+      registered.map((entry) => `${entry.ns}/${entry.id}`),
+      [`${LOCALE_NS}/zh`, `${LOCALE_NS}/en`],
+    )
+    // Registered dictionaries are the real ones, so the Host can resolve copy.
+    assert.equal(registered[0].dict.save, '保存')
+    assert.equal(registered[1].dict.save, 'Save')
+    // Disposal unregisters both and detaches the service.
+    for (const dispose of ctx.disposers) dispose()
+    assert.deepEqual(disposed.sort(), ['en', 'zh'])
+  } finally {
+    attachLocale(null)
+    delete globalThis.document
+  }
 })
 
 // ── urls ────────────────────────────────────────────────────────────────────

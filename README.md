@@ -130,6 +130,18 @@ DSH 的浏览器信任闸（`ctx.connection.requestRejection`）。
 本插件因此使用 `dsh-resource://file/**/*.prefab` 这样的完整地址模式（≥28 字符），
 否则 `.prefab` 永远会被对方的文本编辑器抢走。
 
+### 界面语言
+
+面板文案跟随 DSH 的 i18n 体系，和官方 UI 插件同一套做法：客户端 `apply` 把
+`ctx.locale` 接进来，并在 `locusBridge` 命名空间下注册中英两份词典（`zh` / `en`）。
+`t()` 从 locale 服务的 `getSnapshot().active` 取当前语言，所以**在设置里切换语言会立刻
+重刷面板**，不用重开标签页。
+
+`locale` 服务是**可选**的（没有写进 `inject`）：没挂 locale 插件（或裸测试组合）时
+退回 `navigator.language`，再退回英文，绝不会渲染成原始 key。Unity 侧发来的诊断正文
+是任意技术文本，只本地化它的 severity（警告/错误/信息），消息本身保持原文——翻译它会
+变成替 Unity 编造措辞。
+
 ## 与 Locus 桌面端的差异
 
 - **会话工作目录不必是 Unity 项目。** 插件会向下最多三层、广度优先地寻找 Unity 工程，找不到

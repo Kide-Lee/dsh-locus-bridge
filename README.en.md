@@ -243,6 +243,22 @@ Two address rules are worth stating, because both cost real debugging time:
   (≥28 characters); with a short `*.prefab` every prefab would open in the text
   editor instead.
 
+### UI language
+
+The panel's copy follows the DSH i18n system, the same way the official UI
+plugins do: the client `apply` attaches `ctx.locale` and registers two
+dictionaries (`zh` / `en`) under the `locusBridge` namespace. `t()` resolves the
+active language from the locale service's `getSnapshot().active`, so **switching
+the language in Settings re-renders the panel immediately** — no need to reopen
+the tab.
+
+The `locale` service is deliberately **optional** (it is not in `inject`): with
+no locale plugin mounted (or in a bare test composition) `t()` falls back to
+`navigator.language`, then to English, and never renders raw keys. Diagnostic
+bodies coming from Unity are arbitrary technical text, so only their severity is
+localised (warning / error / info); the message itself stays verbatim —
+translating it would mean inventing Unity's wording.
+
 ## Differences from the Locus desktop client
 
 - **The session working directory does not have to be the Unity project.** The plugin searches up to three

@@ -26,8 +26,8 @@ import { relative, resolve, sep } from 'node:path'
 
 import { resolveProjectRoot } from '../args.js'
 import { LocusError } from '../locus-client.js'
-import { isReloading } from '../protocol.js'
-import { normalizeAssetPath, assertInsideProject, isAssetApiPath, isEditableAssetPath, suffixOf } from './paths.js'
+import { BROKER_ERRORS, isReloading } from '../protocol.js'
+import { normalizeAssetPath, assertInsideProject, isAssetApiPath, isEditableAssetPath, projectRootForAssetPath, suffixOf } from './paths.js'
 import {
   PngCache,
   assetVersion,
@@ -72,14 +72,12 @@ export function registerAssetRoutes(webCtx) {
   }
 
   /**
-   * Resolve the Unity project for one Session id.
+   * The Session's Unity project root (when it has exactly one) and its
+   * workspace directory.
    *
    * The Session's working directory is the authority (the same value every
    * `unity_*` tool resolves from), so a Sidebar tab shows the project the
    * conversation is actually about.
-   */
-  /**
-   * The Session's Unity project root and its workspace directory.
    *
    * `workspace` matters because a file address is relative to the Session's
    * working directory, not to the Unity project: a project checked out at
@@ -89,6 +87,11 @@ export function registerAssetRoutes(webCtx) {
    * (which speaks project-relative paths) will accept it. Resolving through the
    * session's own cwd is the only honest way to do that: a bare `Assets/x`
    * string is ambiguous the moment two projects could live under one workspace.
+   *
+   * `root` is **null** when the workspace holds more than one Unity project:
+   * that is a normal layout (a game and a simulation side by side), not an
+   * error worth failing every request over. `rootError` keeps the explanation
+   * so a request that has no path to disambiguate can still report it.
    */
   const projectOf = (sessionId) => {
     if (!sessionId) throw new HttpError(400, 'sessionId is required.')
@@ -99,17 +102,18 @@ export function registerAssetRoutes(webCtx) {
     if (!session) throw new HttpError(404, `Unknown Session ${sessionId}.`)
     const workingDirectory = webCtx.get('workingDirectory')
     const agent = { session }
-    let root
+    let root = null
+    let rootError = null
     try {
       root = resolveProjectRoot(undefined, { agent, workingDirectory })
     } catch (error) {
-      throw new HttpError(409, String(error?.message ?? error))
+      rootError = String(error?.message ?? error)
     }
     // The session's own directory is where its file addresses are rooted.
     // `workingDirectory` is a service; a plain `cwd` on the record is the
     // fallback the Session store also carries.
     const workspace = workingDirectory?.get?.(session) ?? session?.header?.cwd ?? session?.cwd ?? root
-    const record = { root, workspace }
+    const record = { root, workspace, rootError }
     projectCache.set(sessionId, { ...record, at: Date.now() })
     return record
   }
@@ -140,18 +144,48 @@ export function registerAssetRoutes(webCtx) {
   }
 
   /**
+   * The project a browser-supplied path belongs to, with the path made relative
+   * to it.
+   *
+   * `projectOf` answers "which project is this Session about?", which has no
+   * single answer when the workspace holds more than one Unity project: it
+   * throws and names the candidates (`src/args.js`), and a workspace with a game
+   * and a simulation side by side is a real layout, not a mistake. A click in
+   * the Sidebar *does* have an answer — the file address names the file, and the
+   * file lives in exactly one project — so that project wins whenever it can be
+   * found. The Session-based resolution stays the fallback for every path that
+   * does not sit inside a project (a stale address, a deleted checkout), which
+   * is also where its diagnostics are worth showing.
+   */
+  const projectForPath = (sessionId, rawPath) => {
+    const record = projectOf(sessionId)
+    const fromPath = projectRootForAssetPath(record.workspace, rawPath)
+    if (!fromPath) {
+      // No project named by the path: fall back to the Session's own project,
+      // and when even that is ambiguous the explanation is the answer.
+      if (!record.root) throw new HttpError(409, record.rootError ?? 'This Session does not resolve to one Unity project.')
+      return { ...record, path: assetPathOf(record, rawPath) }
+    }
+    const absolute = resolve(record.workspace, String(rawPath ?? '').replaceAll('\\', '/'))
+    const inside = relative(fromPath, absolute)
+    // The path must really be below the project it named; anything else falls
+    // back rather than silently widening what the browser may touch.
+    const path = inside === '' || inside.startsWith('..') ? assetPathOf(record, rawPath) : inside.split(sep).join('/')
+    return { ...record, root: fromPath, path }
+  }
+
+  /**
    * Validate one request's `path` against its Session's project.
    *
    * A rejected path is a bad request (400), never a Unity failure: reporting it
    * as 500 would look like an editor problem and invite a retry.
    */
   const assetOf = (sessionId, rawPath) => {
-    const record = projectOf(sessionId)
+    const record = projectForPath(sessionId, rawPath)
     const root = record.root
-    rawPath = assetPathOf(record, rawPath)
     let path
     try {
-      path = normalizeAssetPath(rawPath)
+      path = normalizeAssetPath(record.path)
       assertInsideProject(root, path)
     } catch (error) {
       throw new HttpError(400, String(error?.message ?? error))
@@ -168,7 +202,25 @@ export function registerAssetRoutes(webCtx) {
         if (req.method !== 'GET') return methodNotAllowed(res)
         try {
           const url = urlOf(req)
-          const root = projectOf(url.searchParams.get('sessionId') ?? '').root
+          const sessionId = url.searchParams.get('sessionId') ?? ''
+          const hint = url.searchParams.get('path')
+          // The panel asks for status for the tab it is showing, so the asset
+          // path disambiguates a workspace holding more than one project. Without
+          // one, a Session that resolves to no single project reports "no
+          // project" instead of failing the whole tab.
+          const record = projectOf(sessionId)
+          const root = hint ? assetOf(sessionId, hint).root : record.root
+          if (!root) {
+            sendJson(res, 200, {
+              ok: true,
+              projectRoot: null,
+              projectName: null,
+              connected: false,
+              status: 'disconnected',
+              reason: record.rootError ?? 'This Session does not resolve to one Unity project.',
+            })
+            return
+          }
           const status = await editorStatus({ projectRoot: root })
           sendJson(res, 200, {
             ok: true,
@@ -548,12 +600,18 @@ function respondError(res, error) {
     return
   }
   const code = error instanceof LocusError ? String(error.code ?? '') : ''
-  if (isReloading(code) || /managed_reloading|managed_not_ready|main_thread_unresponsive/i.test(message)) {
-    sendJson(res, 503, { ok: false, retryable: true, error: { code: 'unity_busy', message } })
+  // "The editor is not there" is a state, not a failure of this request: the
+  // panel must offer a retry and keep whatever it already shows. The client
+  // connection failure carries `managed_not_ready` (a disabled editor is not a
+  // reload, so `isReloading` says no) and its message speaks of pipes and
+  // sockets, which is why matching the text alone missed it and every read
+  // became a red 500.
+  if (code === BROKER_ERRORS.MANAGED_NOT_READY || /locus_not_connected|ENOENT|ECONNREFUSED|EPERM|EACCES/i.test(message)) {
+    sendJson(res, 503, { ok: false, retryable: true, error: { code: 'unity_unavailable', message } })
     return
   }
-  if (/locus_not_connected|ENOENT|ECONNREFUSED/i.test(message) || code === 'locus_not_connected') {
-    sendJson(res, 503, { ok: false, retryable: true, error: { code: 'unity_unavailable', message } })
+  if (isReloading(code) || /managed_reloading|managed_not_ready|main_thread_unresponsive/i.test(message)) {
+    sendJson(res, 503, { ok: false, retryable: true, error: { code: 'unity_busy', message } })
     return
   }
   if (/^revision_conflict|^dirty_asset|^persist_failed/i.test(message)) {
