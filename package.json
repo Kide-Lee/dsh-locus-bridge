@@ -56,9 +56,9 @@
     "test:live": "node scripts/live-smoke.mjs",
     "dump-tools": "node scripts/dump-tools.mjs",
     "verify-schema": "node scripts/verify-dsh-schema.mjs",
-    "validate": "node scripts/dump-tools.mjs && node scripts/typecheck.mjs && node scripts/validate-dsh-tools.mjs && node scripts/build-client.mjs --check",
+    "validate": "node scripts/dump-tools.mjs && node scripts/typecheck.mjs && node scripts/validate-dsh-tools.mjs && node scripts/build-client.mjs --check && node scripts/build-model-viewer.mjs --check",
     "typecheck": "node scripts/typecheck.mjs",
-    "check": "node --test --test-concurrency=1 \"test/*.test.js\" && node scripts/dump-tools.mjs && node scripts/typecheck.mjs && node scripts/build-client.mjs --check",
+    "check": "node --test --test-concurrency=1 \"test/*.test.js\" && node scripts/dump-tools.mjs && node scripts/typecheck.mjs && node scripts/build-client.mjs --check && node scripts/build-model-viewer.mjs --check",
     "build:native": "cargo build --release --manifest-path native/locus_unix_native/Cargo.toml",
     "test:native": "cargo test --release --manifest-path native/locus_unix_native/Cargo.toml",
     "sync:payload": "node scripts/sync-payload.mjs",
@@ -67,6 +67,8 @@
     "test:csharp": "node scripts/live-csharp.mjs",
     "build:client": "node scripts/build-client.mjs",
     "check:client": "node scripts/build-client.mjs --check",
+    "build:viewer": "node scripts/build-model-viewer.mjs",
+    "check:viewer": "node scripts/build-model-viewer.mjs --check",
     "test:live:sidebar": "node scripts/live-sidebar.mjs",
     "test:live:render": "node scripts/live-render.mjs"
   },
@@ -80,5 +82,9 @@
         "@deepseek-ai/dsh-client-ui-sidebar-right"
       ]
     }
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.2",
+    "three": "^0.185.1"
   }
 }

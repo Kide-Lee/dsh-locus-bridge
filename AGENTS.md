@@ -35,6 +35,9 @@
 
 - `npm test` 跑 JS 测试套件。`npm run typecheck` 检查模块接线；
   `node scripts/dump-tools.mjs` 校验每个工具 schema。
+- `src/model-viewer/` 是浏览器 three.js 模型查看器的源码，构建成独立的
+  `lib/model-viewer.js`（`npm run build:viewer`）；它由侧栏按需懒加载，不进主客户端包。
+  `three`/`esbuild` 是 devDependencies，`lib/client.js` 与 `lib/model-viewer.js` 都是生成物。
 - `src/tools.js` 存放七个工具定义；`src/args.js` 负责工程解析，由
   `test/args.test.js` 覆盖。
 - `src/setup.js` 负责工程诊断与包安装，由 `test/setup.test.js` 覆盖；把

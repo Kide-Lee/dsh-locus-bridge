@@ -6,6 +6,7 @@
 # DSH / Node tooling
 node_modules/
 .tmp/
+.npm-cache/
 
 # The Unity test project is a disposable fixture: it is created locally by
 # `scripts/live-smoke` setup and must never be version-controlled from here.

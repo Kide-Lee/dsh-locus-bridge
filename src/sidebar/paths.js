@@ -75,12 +75,32 @@ export const PREVIEW_EXTENSIONS = Object.freeze([
   'glb',
 ])
 
-/** Model suffixes: previewable (tree + orbit) but never writable. */
+/** Model suffixes: previewable (tree + Unity orbit or browser viewer) but never writable. */
 export const MODEL_EXTENSIONS = Object.freeze(['.fbx', '.obj', '.dae', '.3ds', '.max', '.blend', '.gltf', '.glb'])
 
 /** True when this suffix is a model (read-only preview only). */
 export function isModelPath(path) {
   return MODEL_EXTENSIONS.includes(suffixOf(path))
+}
+
+/**
+ * Model files the browser viewer parses itself.
+ *
+ * This is the Locus split: `.fbx` and `.glb` are self-contained binary models
+ * that three.js can read from one ArrayBuffer. `.gltf` is deliberately absent —
+ * it is JSON plus external `.bin`/textures, which a single-file viewer cannot
+ * resolve. Those formats keep the Unity orbit fallback.
+ */
+export const WEB_MODEL_EXTENSIONS = Object.freeze(['.fbx', '.glb'])
+
+/** True when the browser-side three.js viewer owns this model. */
+export function isWebModelPath(path) {
+  return WEB_MODEL_EXTENSIONS.includes(suffixOf(path))
+}
+
+/** MIME type for a web-previewed model (`application/octet-stream` is safe for FBX). */
+export function webModelMimeType(path) {
+  return suffixOf(path) === '.glb' ? 'model/gltf-binary' : 'application/octet-stream'
 }
 
 /** Lowercased lookup for `PREVIEW_EXTENSIONS` (`suffixOf` lowercases first). */

@@ -203,14 +203,24 @@ It **is** Locus' own call path — nothing re-implements Unity's serialization i
 | edit one field | `property_tree_apply` (one write) | `unityPropertyApi.write` (also an in-memory edit that dirties the object) |
 | save to disk | `execute_code` following `SaveAssetApiScopeAllowed`'s branches | the desktop app leaves saving to the editor; the browser gets an explicit button |
 | thumbnail | `asset_thumbnail` | `AssetPreview.GetAssetPreview` |
-| orbitable 3D preview | `asset_preview_render` | `PreviewRenderUtility` |
+| orbitable prefab preview | `asset_preview_render` | `PreviewRenderUtility` |
+| `.fbx` / `.glb` model | `GET /locus/api/model` + browser three.js | `ModelViewer` (WebGL parses the model bytes) |
 | reveal in the editor | `select_asset` | Project-window ping |
 
 Formats: `.prefab` (hierarchy + components + fields, with an orbitable preview), `.asset` / `.mat`
-(ScriptableObject and material fields), `.anim` (clip fields), `.controller` (a sub-asset summary table),
-textures and models (`AssetPreview` thumbnails). `.unity` scenes are **read-only**: reading one requires the
-scene to be loaded in the editor, and "opening it rewrites what the editor has open" is not a decision a file
-viewer should make. A write is refused with the reason.
+(ScriptableObject and material fields), `.anim` (clip fields), `.controller` (a sub-asset summary table).
+Models take two paths: `.fbx` / `.glb` are parsed directly by the browser three.js viewer, with animation,
+wireframe, clay, grid and statistics; other model formats (`.obj` / `.dae` / `.gltf`, …) still go through
+Unity's `PreviewRenderUtility` when the project has the matching importer. `.unity` scenes are **read-only**:
+reading one requires the scene to be loaded in the editor, and "opening it rewrites what the editor has open"
+is not a decision a file viewer should make. A write is refused with the reason.
+
+Prefab orbit frames are requested continuously while dragging (90 ms floor, one Unity render in flight at a
+time) and once more on pointer-up. The last frame and its camera are written to
+`Library/Locus/asset-preview-cache/` (Locus' directory layout; this plugin hashes with SHA-256 while Locus
+uses BLAKE3, so the two keep independent entries); reopening restores that angle, and the sidecar is
+invalidated by the source file's mtime. The three.js viewer is a lazy, separate bundle
+(`lib/model-viewer.js`) and never enters the main client bundle; rebuild it with `npm run build:viewer`.
 
 Behaviour worth knowing, all of it Unity's own semantics:
 
@@ -276,10 +286,12 @@ translating it would mean inventing Unity's wording.
 ## Development
 
 ```bash
+npm install                # dev dependencies (three / esbuild, needed to build the model viewer)
 npm test                   # no Unity or network needed
 npm run typecheck          # static check of import / export
-npm run validate           # tool definitions + static checks + client bundle freshness
+npm run validate           # tool definitions + static checks + both bundle freshness checks
 npm run build:client       # generate lib/client.js from src/client/plugin.js (the Sidebar panel)
+npm run build:viewer       # generate lib/model-viewer.js from src/model-viewer/viewer.js (three.js viewer)
 npm run build:native       # the Linux/macOS broker (Rust)
 npm run test:live          # tools: end-to-end against a real editor, see scripts/live-smoke.mjs
 npm run test:live:sidebar  # sidebar routes: real HTTP + real Unity, see scripts/live-sidebar.mjs
@@ -290,6 +302,9 @@ npm run test:csharp        # C# analysis end-to-end against a real Roslyn server
 The Sidebar client lives in `src/client/plugin.js` (plain ESM, so tests import it directly);
 `npm run build:client` wraps it into the `__ModuleLoader__` factory a DSH client bundle needs and writes
 `lib/client.js`. Edit the source and regenerate — `npm run check:client` fails when the artifact is stale.
+The three.js model viewer lives separately in `src/model-viewer/`; `npm run build:viewer` bundles it with
+esbuild into `lib/model-viewer.js`. The Sidebar loads it lazily — do **not** fold it into the main client
+bundle. `npm run check:viewer` verifies the artifact.
 
 `unity-test/` is a local disposable verification project, ignored by git.
 

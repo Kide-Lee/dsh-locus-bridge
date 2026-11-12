@@ -17,17 +17,31 @@
 //   POST asset/select  reveal the asset in Unity's Project window
 //   GET  thumb         cached PNG thumbnail, ETag revalidated
 //   GET  frame         cached PNG orbit frame for a prefab/model, ETag revalidated
+//   GET  model         raw `.fbx`/`.glb` bytes for the browser three.js viewer
+//   GET  model-viewer.js  the lazily loaded three.js viewer bundle
 //
 // Nothing here trusts the browser's idea of the filesystem: a request names a
 // project-relative `Assets/…` path, the Session names the project, and
 // `paths.js` refuses everything else.
 
-import { relative, resolve, sep } from 'node:path'
+import { readFileSync, statSync } from 'node:fs'
+import { join, relative, resolve, sep } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 import { resolveProjectRoot } from '../args.js'
 import { LocusError } from '../locus-client.js'
 import { BROKER_ERRORS, isReloading } from '../protocol.js'
-import { normalizeAssetPath, assertInsideProject, isAssetApiPath, isEditableAssetPath, projectRootForAssetPath, suffixOf } from './paths.js'
+import { readFrameCache, sourceMtimeMs, writeFrameCache } from './frame-cache.js'
+import {
+  normalizeAssetPath,
+  assertInsideProject,
+  isAssetApiPath,
+  isEditableAssetPath,
+  isWebModelPath,
+  projectRootForAssetPath,
+  suffixOf,
+  webModelMimeType,
+} from './paths.js'
 import {
   PngCache,
   assetVersion,
@@ -47,6 +61,10 @@ import {
 /** Route prefix; also the document-relative base the client fetches under. */
 export const ROUTE_PREFIX = '/locus/api'
 const MAX_BODY_BYTES = 1024 * 1024
+/** Same ceiling as Locus' browser model viewer (25 MB). */
+export const MODEL_VIEW_MAX_BYTES = 25 * 1024 * 1024
+/** Built by `npm run build:viewer`; absent in a checkout that never ran it. */
+export const MODEL_VIEWER_BUNDLE_PATH = fileURLToPath(new URL('../../lib/model-viewer.js', import.meta.url))
 /** Project resolution is a filesystem walk; a short cache keeps typing cheap. */
 const PROJECT_CACHE_MS = 5_000
 
@@ -383,6 +401,89 @@ export function registerAssetRoutes(webCtx) {
       },
     },
     {
+      // The browser half loads this only when a `.fbx`/`.glb` is opened, so
+      // three.js stays out of the main DSH client bundle.
+      kind: 'exact',
+      path: `${ROUTE_PREFIX}/model-viewer.js`,
+      handler: async (req, res) => {
+        if (req.method !== 'GET' && req.method !== 'HEAD') return methodNotAllowed(res)
+        let bytes
+        try {
+          bytes = readFileSync(MODEL_VIEWER_BUNDLE_PATH)
+        } catch {
+          sendJson(res, 503, {
+            ok: false,
+            error: {
+              code: 'model_viewer_missing',
+              message: 'The model viewer bundle is not built. Run `npm run build:viewer`.',
+            },
+          })
+          return
+        }
+        const etag = etagOf('model-viewer', bytes)
+        const headers = {
+          'content-type': 'text/javascript; charset=utf-8',
+          'content-length': bytes.length,
+          'cache-control': 'no-cache',
+          etag,
+          'x-content-type-options': 'nosniff',
+        }
+        if (req.headers['if-none-match'] === etag) {
+          res.writeHead(304, headers)
+          res.end()
+          return
+        }
+        res.writeHead(200, headers)
+        res.end(req.method === 'HEAD' ? undefined : bytes)
+      },
+    },
+    {
+      // Raw bytes for one `.fbx`/`.glb`. The client fetches this into an
+      // ArrayBuffer and hands it to the lazily loaded three.js viewer; no file
+      // path ever comes from the browser and no bytes leave the project.
+      kind: 'exact',
+      path: `${ROUTE_PREFIX}/model`,
+      handler: async (req, res) => {
+        if (!fence(req)) return sendJson(res, 403, { ok: false, error: { code: 'forbidden', message: 'forbidden' } })
+        if (req.method !== 'GET' && req.method !== 'HEAD') return methodNotAllowed(res)
+        try {
+          const url = urlOf(req)
+          const { root, path } = assetOf(url.searchParams.get('sessionId') ?? '', url.searchParams.get('path'))
+          if (!isWebModelPath(path)) {
+            throw new HttpError(400, 'The browser model viewer only accepts .fbx and .glb paths.')
+          }
+          const absolute = join(root, path)
+          let info
+          try {
+            info = statSync(absolute)
+          } catch {
+            throw new HttpError(404, `Model was not found: ${path}`)
+          }
+          if (!info.isFile()) throw new HttpError(404, `Model was not found: ${path}`)
+          if (info.size > MODEL_VIEW_MAX_BYTES) {
+            throw new HttpError(413, `Model is larger than ${Math.trunc(MODEL_VIEW_MAX_BYTES / (1024 * 1024))} MB.`)
+          }
+          const etag = `"m-${info.size.toString(16)}-${Math.trunc(info.mtimeMs).toString(16)}"`
+          if (req.headers['if-none-match'] === etag) {
+            res.writeHead(304, { etag })
+            res.end()
+            return
+          }
+          const bytes = readFileSync(absolute)
+          res.writeHead(200, {
+            'content-type': webModelMimeType(path),
+            'content-length': bytes.length,
+            'cache-control': 'private, max-age=0, must-revalidate',
+            etag,
+            'x-content-type-options': 'nosniff',
+          })
+          res.end(req.method === 'HEAD' ? undefined : bytes)
+        } catch (error) {
+          respondError(res, error)
+        }
+      },
+    },
+    {
       kind: 'exact',
       path: `${ROUTE_PREFIX}/thumb`,
       handler: async (req, res) => {
@@ -415,9 +516,29 @@ export function registerAssetRoutes(webCtx) {
         try {
           const url = urlOf(req)
           const { root, path } = assetOf(url.searchParams.get('sessionId') ?? '', url.searchParams.get('path'))
+          const mtime = sourceMtimeMs(root, path)
+
+          // `restore=1` is what the panel asks on mount: give it the last frame
+          // written by a previous session, including the camera that produced
+          // it. A miss is a normal state, not an error the panel should paint.
+          if (url.searchParams.get('restore') === '1') {
+            const cached = mtime === null ? null : readFrameCache(root, path, { expectedMtimeMs: mtime })
+            if (!cached) {
+              sendJson(res, 404, {
+                ok: false,
+                error: { code: 'frame_cache_miss', message: 'No cached preview frame for this asset.' },
+              })
+              return
+            }
+            const key = `frame|restore|${path}|${mtime}`
+            const entry = { bytes: cached.bytes, mimeType: cached.mimeType, etag: etagOf(key, cached.bytes), key }
+            sendPng(req, res, entry, frameHeaders(cached, 'cache'))
+            return
+          }
+
           const params = {
             width: numberParam(url, 'w') ?? 480,
-            height: numberParam(url, 'h') ?? 320,
+            height: numberParam(url, 'h') ?? 360,
             yaw: numberParam(url, 'yaw') ?? 25,
             pitch: numberParam(url, 'pitch') ?? -12,
             distance: numberParam(url, 'distance') ?? 1.15,
@@ -426,14 +547,33 @@ export function registerAssetRoutes(webCtx) {
             panZ: numberParam(url, 'panZ') ?? 0,
           }
           const version = url.searchParams.get('v') || assetVersion(root, path)
+          const persist = url.searchParams.get('cache') !== '0'
           const key = `frame|${path}|${version}|${JSON.stringify(params)}`
           let entry = png.get(key)
+          let source = 'cache'
           if (!entry) {
-            const image = await renderFrame({ projectRoot: root }, { path, ...params })
-            entry = { ...image, etag: etagOf(key, image.bytes), key }
+            const cached = mtime === null ? null : readFrameCache(root, path, { expectedMtimeMs: mtime, params })
+            if (cached) {
+              entry = { bytes: cached.bytes, mimeType: cached.mimeType, etag: etagOf(key, cached.bytes), key }
+              source = 'cache'
+            } else {
+              const image = await renderFrame({ projectRoot: root }, { path, ...params })
+              entry = { ...image, etag: etagOf(key, image.bytes), key }
+              source = 'render'
+            }
             png.set(key, entry)
           }
-          sendPng(req, res, entry)
+          // A drag frame may already sit in the in-memory cache under the same
+          // key as the settle frame. Persist on the settle request even when no
+          // editor render was needed, or the disk would keep an older angle.
+          if (persist && mtime !== null) {
+            try {
+              writeFrameCache(root, path, { ...entry, ...params })
+            } catch {
+              // Best effort, exactly like Locus' cache.
+            }
+          }
+          sendPng(req, res, entry, frameHeaders({ ...params, ...entry }, source))
         } catch (error) {
           respondError(res, error)
         }
@@ -559,13 +699,37 @@ function sendJson(res, status, payload) {
   res.end(body)
 }
 
-function sendPng(req, res, entry) {
+/**
+ * Camera headers that accompany one preview frame.
+ *
+ * The panel uses these when restoring a cached frame: the PNG alone cannot say
+ * which yaw/pitch/distance produced it, and guessing would make the first drag
+ * jump. They are also useful in a HAR when diagnosing a stale preview.
+ */
+function frameHeaders(frame, source) {
+  const number = (key, fallback) => {
+    const value = Number(frame?.[key])
+    return Number.isFinite(value) ? value : fallback
+  }
+  return {
+    'x-locus-frame-yaw': String(number('yaw', 25)),
+    'x-locus-frame-pitch': String(number('pitch', -12)),
+    'x-locus-frame-distance': String(number('distance', 1.15)),
+    'x-locus-frame-pan-x': String(number('panX', 0)),
+    'x-locus-frame-pan-y': String(number('panY', 0)),
+    'x-locus-frame-pan-z': String(number('panZ', 0)),
+    'x-locus-frame-source': source,
+  }
+}
+
+function sendPng(req, res, entry, extraHeaders) {
   const headers = {
     'content-type': entry.mimeType || 'image/png',
     'content-length': entry.bytes.length,
     'cache-control': 'private, max-age=0, must-revalidate',
     etag: entry.etag,
     'x-content-type-options': 'nosniff',
+    ...extraHeaders,
   }
   if (req.headers['if-none-match'] === entry.etag) {
     res.writeHead(304, headers)

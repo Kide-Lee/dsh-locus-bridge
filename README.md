@@ -98,13 +98,21 @@ dsh plugin --profile <profile> add github:Kide-Lee/dsh-locus-bridge
 | 改一个字段 | `property_tree_apply`（一条 write） | `unityPropertyApi.write`（同样是内存改动 + 标脏） |
 | 保存到磁盘 | `execute_code` 里按 `SaveAssetApiScopeAllowed` 的分支保存 | 桌面端让编辑器自己保存，这里给浏览器一个显式按钮 |
 | 缩略图 | `asset_thumbnail` | `AssetPreview.GetAssetPreview` |
-| 可拖动 3D 预览 | `asset_preview_render` | `PreviewRenderUtility` 轨道渲染 |
+| prefab 可拖动预览 | `asset_preview_render` | `PreviewRenderUtility` 轨道渲染 |
+| `.fbx` / `.glb` 模型 | `GET /locus/api/model` + 浏览器 three.js | `ModelViewer`（WebGL 直接解析模型字节） |
 | 在编辑器里定位 | `select_asset` | 项目窗口 Ping |
 
 支持的格式：`.prefab`（层级 + 组件 + 属性，含可旋转预览）、`.asset` / `.mat`
-（ScriptableObject / 材质字段）、`.anim`（剪辑字段）、`.controller`（子资产摘要表）、
-贴图与模型（`AssetPreview` 缩略图）。`.unity` 场景**只读**：读它要求场景已在编辑器里加载，
-而"点开就改写"不是文件查看器该做的决定；写入会直接拒绝并给出原因。
+（ScriptableObject / 材质字段）、`.anim`（剪辑字段）、`.controller`（子资产摘要表）。模型分两条路：
+`.fbx` / `.glb` 由浏览器里的 three.js 查看器直接解析原始字节，支持动画、线框、Clay、网格和统计；
+其余模型格式（`.obj` / `.dae` / `.gltf` 等）仍交给 Unity 的 `PreviewRenderUtility`，前提是 Unity 装了
+对应的 importer。`.unity` 场景**只读**：读它要求场景已在编辑器里加载，而"点开就改写"不是文件查看器
+该做的决定；写入会直接拒绝并给出原因。
+
+prefab 的轨道帧会在拖动时按 90 ms 下限连续请求，并在同一时刻只保留一个 Unity 渲染；松手后立即补一帧。
+最后一张帧连同相机参数写到 `Library/Locus/asset-preview-cache/`（沿用 Locus 的目录布局；文件名哈希用
+SHA-256，Locus 用 BLAKE3，因此两边的条目各自独立），重新打开时先恢复上次的角度，缓存按源文件 mtime 失效。模型查看器的 three.js bundle 是懒加载的独立文件
+（`lib/model-viewer.js`），不进入主客户端包；改查看器源码后运行 `npm run build:viewer`。
 
 几条与 Unity 语义一致、也值得提前知道的行为：
 
@@ -156,10 +164,12 @@ DSH 的浏览器信任闸（`ctx.connection.requestRejection`）。
 ## 开发
 
 ```bash
+npm install                # 开发依赖（three / esbuild，构建模型查看器需要）
 npm test                   # 不需要 Unity、不需要网络
 npm run typecheck          # 静态检查 import / export
-npm run validate           # 工具定义 + 静态检查 + 客户端 bundle 是否最新
+npm run validate           # 工具定义 + 静态检查 + 两个 bundle 是否最新
 npm run build:client       # 由 src/client/plugin.js 生成 lib/client.js（右栏面板）
+npm run build:viewer       # 由 src/model-viewer/viewer.js 生成 lib/model-viewer.js（three.js 查看器）
 npm run build:native       # Linux/macOS 的 broker（Rust）
 npm run test:live          # 工具面：对着真实编辑器端到端，见 scripts/live-smoke.mjs
 npm run test:live:sidebar  # 右栏路由：真 HTTP + 真 Unity，见 scripts/live-sidebar.mjs
@@ -169,7 +179,9 @@ npm run test:csharp        # C# 分析：真实 Roslyn 服务器端到端，见 
 
 右栏客户端在 `src/client/plugin.js`（普通 ESM，便于测试），`npm run build:client` 把它包成
 DSH 客户端 bundle 的 `__ModuleLoader__` 工厂写进 `lib/client.js`。改面板请改源文件再重新生成；
-`npm run check:client` 会校验产物是否过期。
+`npm run check:client` 会校验产物是否过期。three.js 模型查看器单独放在 `src/model-viewer/`，
+`npm run build:viewer` 用 esbuild 打成 `lib/model-viewer.js`；它由侧栏按需懒加载，**不要**把它
+并进主客户端 bundle。`npm run check:viewer` 校验该产物。
 
 ## 许可证
 

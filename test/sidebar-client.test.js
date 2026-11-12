@@ -16,6 +16,7 @@ import {
   colorToHex,
   copyKeys,
   createLocusAssetPlugin,
+  detectModelFormat,
   editorFor,
   editorStatusLabel,
   encodeWrite,
@@ -76,6 +77,14 @@ test('basenameOf and suffixOf mirror the Server-side helpers', () => {
   assert.equal(basenameOf('Assets/A/B.PREFAB'), 'B.PREFAB')
   assert.equal(suffixOf('Assets/A/B.PREFAB'), 'prefab')
   assert.equal(suffixOf('Assets/A/noext'), '')
+})
+
+test('detectModelFormat lets content override a wrong extension', () => {
+  const bytes = (text) => Uint8Array.from(text, (character) => character.charCodeAt(0)).buffer
+  assert.equal(detectModelFormat(bytes('glTF\x02\x00\x00\x00'), 'fbx'), 'glb')
+  assert.equal(detectModelFormat(bytes('Kaydara FBX Binary  \x00'), 'glb'), 'fbx')
+  assert.equal(detectModelFormat(bytes('; FBX 7.4.0 project'), 'glb'), 'fbx')
+  assert.equal(detectModelFormat(bytes('not a model'), 'glb'), 'glb')
 })
 
 test('EXTENSIONS matches the Host preview list', () => {
