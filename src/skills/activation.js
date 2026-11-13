@@ -1,4 +1,5 @@
-// Compiling and remembering the executable half of the two Unity skills.
+// The editor half of the two executable skills: compiling them into the
+// connected project and keeping them alive across domain reloads.
 //
 // The Unity bridge shipped in `payload/locus_unity` already knows how to compile
 // a skill's C# (`compile_skill_package`) and keeps the resulting assembly active
@@ -6,10 +7,10 @@
 // bridge does not know is *which* sources a package has — that is the desktop
 // client's job, and this module is this plugin's replacement for it.
 //
-// Activation is deliberately separate from writing the Markdown: the editor may
-// be closed, and a settings page that failed to write documentation because no
-// editor was running would be worse than one that writes the docs and reports
-// the capability as inactive.
+// Activation is implicit: the first `unity_execute` in a project whose skill
+// switch is on compiles the enabled packages before the snippet runs. There is
+// no button and no route, so a project never depends on the settings page being
+// open at the right moment.
 //
 // The editor keeps skill assemblies in a static registry that a domain reload
 // clears (`get_reload_state`'s `domain_generation` names the new domain). So the
@@ -22,9 +23,7 @@ import { createHash } from 'node:crypto'
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 
-import { withClient, describeTarget } from '../client-pool.js'
-import { probeEndpointDetailed } from '../endpoint.js'
-import { bridgeHome } from '../settings.js'
+import { bridgeHome, readSettings } from '../settings.js'
 import { UNITY_SKILLS, readUnitySkillSources } from './catalog.js'
 
 /** Per-user activation memory: which package was compiled for which project. */
@@ -129,14 +128,19 @@ export function recordActivation(projectRoot, results, env = process.env, { gene
 }
 
 /**
- * The activation state of every executable skill for one project.
+ * The activation state of the executable skills for one project.
  *
  * `stale` means the bundled sources changed since the last compile, so the
  * assembly the editor holds no longer matches what this plugin ships.
+ *
+ * `ids` narrows the report to the skills that are switched on: a disabled skill
+ * is never compiled, so an old record for it is not something the page should
+ * present as a state.
  */
-export function activationState(projectRoot, env = process.env) {
+export function activationState(projectRoot, env = process.env, { ids = null } = {}) {
   const stored = readActivationStore(env).projects[String(projectRoot)] ?? {}
-  return UNITY_SKILLS.map((skill) => {
+  const wanted = ids === null ? UNITY_SKILLS : UNITY_SKILLS.filter((skill) => ids.includes(skill.id))
+  return wanted.map((skill) => {
     const entry = stored[skill.id]
     const currentHash = skillSourceHash(skill)
     if (!entry) return { id: skill.id, state: 'inactive' }
@@ -176,10 +180,10 @@ export async function readDomainGeneration(client) {
  * Each package is independent: one failure never cancels the others, because a
  * RenderDoc compile error must not cost the UI Toolkit assembly.
  */
-async function compileWithClient(client, { timeoutMs = COMPILE_TIMEOUT_MS } = {}) {
+async function compileWithClient(client, { timeoutMs = COMPILE_TIMEOUT_MS, skills = UNITY_SKILLS } = {}) {
   const generation = await readDomainGeneration(client)
   const packages = []
-  for (const skill of UNITY_SKILLS) {
+  for (const skill of skills) {
     const sourceHash = skillSourceHash(skill)
     const scripts = readUnitySkillSources(skill)
     try {
@@ -206,48 +210,13 @@ async function compileWithClient(client, { timeoutMs = COMPILE_TIMEOUT_MS } = {}
 }
 
 /**
- * Compile every executable skill through a freshly opened connection.
+ * Make sure the switched-on skills are compiled in the editor's *current* domain.
  *
- * Used by the settings page. A closed editor is a state to report, not a
- * failure: `probeEndpointDetailed` answers in at most two seconds, whereas the
- * pool's reconnect budget would hold the request for over a minute.
- */
-export async function activateSkillPackages(projectRoot, { timeoutMs = COMPILE_TIMEOUT_MS } = {}) {
-  const target = describeTarget({ projectRoot })
-  if (!target.pipe) {
-    return {
-      generation: '',
-      packages: UNITY_SKILLS.map((skill) => ({
-        id: skill.id,
-        sourceHash: skillSourceHash(skill),
-        state: 'unavailable',
-        message: 'The project has no broker endpoint.',
-      })),
-    }
-  }
-  const probe = await probeEndpointDetailed(target.pipe, { timeoutMs: 2000 })
-  if (!probe.listening) {
-    return {
-      generation: '',
-      packages: UNITY_SKILLS.map((skill) => ({
-        id: skill.id,
-        sourceHash: skillSourceHash(skill),
-        state: 'unavailable',
-        message: 'The Unity editor is not connected; open the project and activate again.',
-      })),
-    }
-  }
-  return await withClient({ projectRoot }, (client) => compileWithClient(client, { timeoutMs }))
-}
-
-/**
- * Make sure the installed skills are compiled in the editor's *current* domain.
- *
- * Called before a C# snippet runs. It does nothing until the settings page has
- * activated the skills once for this project: a project that never used them
- * must not pay a `get_reload_state` round trip per snippet. Once it has, the
- * check is one cheap request, and a compile only happens when the domain
- * generation changed (editor restart, domain reload) or the sources changed.
+ * Called before a C# snippet runs, and it is where activation happens: a skill
+ * whose switch is on gets compiled the first time it is needed, with no button
+ * and no route of its own. After that the check is one cheap request, and a
+ * compile only happens when the domain generation moved (editor restart, domain
+ * reload) or the sources changed.
  *
  * A failed compile is retried at most once a minute, so a package that cannot
  * build in this editor does not turn every snippet into a compile attempt.
@@ -255,28 +224,36 @@ export async function activateSkillPackages(projectRoot, { timeoutMs = COMPILE_T
  * @returns `{ state: 'skipped' | 'unchanged' | 'reactivated' | 'cooling_down', ... }`
  */
 export async function ensureSkillActivation(client, projectRoot, { env = process.env, timeoutMs = COMPILE_TIMEOUT_MS } = {}) {
-  const stored = readActivationStore(env).projects[String(projectRoot)]
-  if (!stored) return { state: 'skipped' }
+  const settings = readSettings(env)
+  const wanted = UNITY_SKILLS.filter((skill) => settings.skills[skill.id] === true)
+  // Nothing switched on: a snippet must not pay a `get_reload_state` round trip.
+  if (wanted.length === 0) return { state: 'skipped' }
 
-  const states = activationState(projectRoot, env)
-  const stale = states.some((entry) => entry.state === 'stale')
+  const ids = wanted.map((skill) => skill.id)
+  const stored = readActivationStore(env).projects[String(projectRoot)]
+  const states = activationState(projectRoot, env, { ids })
+  // Inactive means this project never compiled that skill — the case that must
+  // compile by itself. Stale means the shipped sources moved since it did.
+  const needsCompile = states.some((entry) => entry.state === 'inactive' || entry.state === 'stale')
   const failed = states.some((entry) => entry.state === 'error')
-  const knownGeneration = typeof stored.__generation === 'string' ? stored.__generation : ''
-  const lastAttempt = Number(stored.__lastAttempt) || 0
+  const knownGeneration = typeof stored?.__generation === 'string' ? stored.__generation : ''
+  const lastAttempt = Number(stored?.__lastAttempt) || 0
   const generation = await readDomainGeneration(client)
   // An unreadable generation is not evidence of a reload; the cheap path is to
   // leave the current state alone rather than recompile on every snippet.
   const generationChanged = generation !== '' && knownGeneration !== generation
 
-  if (!generationChanged && !stale) {
+  if (!generationChanged && !needsCompile) {
     if (failed && Date.now() - lastAttempt >= RETRY_COOLDOWN_MS) {
       // Fall through: retry a failed compile after the cooldown.
+    } else if (failed) {
+      return { state: 'cooling_down', generation }
     } else {
       return { state: 'unchanged', generation }
     }
   }
 
-  const outcome = await compileWithClient(client, { timeoutMs })
+  const outcome = await compileWithClient(client, { timeoutMs, skills: wanted })
   const recorded = recordActivation(projectRoot, outcome.packages, env, {
     generation: outcome.generation || generation,
   })

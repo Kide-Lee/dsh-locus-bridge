@@ -57,7 +57,7 @@ bundle; see the bundled third-party notices below for its MIT dependencies.
 
 Five Markdown skill documents copied from upstream Locus and **modified only** in
 their YAML frontmatter: Locus' `summary`/`tools` fields are replaced by the
-`name`/`description` pair DSH's filesystem skill provider requires, and
+`name`/`description` pair this plugin's skill provider serves to DSH, and
 `metadata.portedFrom` / `metadata.upstream` record where each body came from. The
 bodies are otherwise verbatim:
 

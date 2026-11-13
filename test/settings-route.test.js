@@ -7,41 +7,30 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { createServer } from 'node:http'
-import { mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 
 import { registerAssetRoutes, ROUTE_PREFIX } from '../src/sidebar/routes.js'
 import { HOME_ENV, readSettings, saveSettings, settingsPath } from '../src/settings.js'
-import { skillSourceHash } from '../src/skills/activation.js'
-import { UNITY_SKILLS } from '../src/skills/catalog.js'
 
 /** One registered route table over a throwaway settings document. */
-function fixture(t, { features = {}, preferences = {}, workspaces = [], activateSkills = null } = {}) {
+function fixture(t, { features = {}, preferences = {}, skills = {}, workspaces = [] } = {}) {
   const home = mkdtempSync(join(tmpdir(), 'locus-settings-route-'))
   t.after(() => rmSync(home, { recursive: true, force: true }))
   const env = { [HOME_ENV]: home }
-  if (Object.keys(features).length > 0 || Object.keys(preferences).length > 0) {
-    saveSettings({ features, preferences }, env)
+  if (
+    Object.keys(features).length > 0 ||
+    Object.keys(preferences).length > 0 ||
+    Object.keys(skills).length > 0
+  ) {
+    saveSettings({ features, preferences, skills }, env)
   }
   const handlers = []
   const applied = []
-  const activations = []
   const registry = {
     list: () => workspaces.map((workspace, index) => ({ id: `w${index}`, title: `W${index}`, ...workspace })),
   }
-  const activate = activateSkills ?? (async (projectRoot) => {
-    activations.push(projectRoot)
-    return {
-      generation: 'test-generation',
-      packages: UNITY_SKILLS.map((skill) => ({
-        id: skill.id,
-        sourceHash: skillSourceHash(skill),
-        state: 'compiled',
-        assemblyId: `asm-${skill.id}`,
-      })),
-    }
-  })
   registerAssetRoutes(
     {
       webServer: {
@@ -63,10 +52,9 @@ function fixture(t, { features = {}, preferences = {}, workspaces = [], activate
     {
       env,
       onFeaturesChanged: (effective) => applied.push(effective),
-      activateSkills: activate,
     },
   )
-  return { env, home, handlers, applied, activations }
+  return { env, home, handlers, applied }
 }
 
 async function serve(handlers, run) {
@@ -248,181 +236,67 @@ test('the projects scan follows the stored workspace and never a sibling', async
   })
 })
 
-test('POST /skills/install writes the five domain skills into the workspace', async (t) => {
-  const workspace = mkdtempSync(join(tmpdir(), 'locus-ws-skills-'))
-  t.after(() => rmSync(workspace, { recursive: true, force: true }))
-  // DSH resolves a project root by its nearest `.git`; the workspace itself is
-  // the project here, so the skills land directly under it.
-  mkdirSync(join(workspace, '.git'), { recursive: true })
-  const { handlers } = fixture(t, { workspaces: [{ path: workspace }] })
-  await serve(handlers, async (base) => {
-    const first = await fetch(`${base}/skills/install`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ workspacePath: workspace }),
-    })
-    const payload = await first.json()
-    assert.equal(first.status, 200)
-    assert.deepEqual(payload.written, ['debugger', 'profiler', 'graphics-debugger', 'ui-toolkit', 'view'])
-    assert.equal(payload.skillsDir, join(workspace, '.dsh', 'skills'))
-    const text = readFileSync(join(workspace, '.dsh', 'skills', 'debugger', 'SKILL.md'), 'utf8')
-    assert.match(text, /^---\nname: debugger\n/)
-    assert.match(text, /portedFrom: locus/)
-
-    const second = await fetch(`${base}/skills/install`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ workspacePath: workspace }),
-    })
-    const again = await second.json()
-    assert.deepEqual(again.written, [], 'a second run rewrites nothing')
-    assert.equal(again.unchanged.length, 5)
-  })
-})
-
-test('a skills install refuses a directory the registry does not own', async (t) => {
-  const outside = mkdtempSync(join(tmpdir(), 'locus-ws-outside-'))
-  t.after(() => rmSync(outside, { recursive: true, force: true }))
-  const { handlers } = fixture(t, { workspaces: [{ path: outside }] })
-  await serve(handlers, async (base) => {
-    const response = await fetch(`${base}/skills/install`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ workspacePath: join(outside, 'elsewhere') }),
-    })
-    assert.equal(response.status, 400)
-  })
-})
-
-test('GET /skills/state lists the executable packages and their activation state', async (t) => {
-  const workspace = mkdtempSync(join(tmpdir(), 'locus-ws-state-'))
-  t.after(() => rmSync(workspace, { recursive: true, force: true }))
-  const project = join(workspace, 'game')
-  mkdirSync(join(project, 'Assets'), { recursive: true })
-  mkdirSync(join(project, 'ProjectSettings'), { recursive: true })
-  const { handlers, activations } = fixture(t, { workspaces: [{ path: workspace }] })
-  await serve(handlers, async (base) => {
-    const before = await fetch(`${base}/skills/state?workspacePath=${encodeURIComponent(workspace)}`)
-    const beforePayload = await before.json()
-    assert.equal(before.status, 200)
-    assert.equal(beforePayload.projectRoot, project)
-    assert.deepEqual(
-      beforePayload.packages.filter((entry) => entry.executable).map((entry) => entry.id),
-      ['graphics-debugger', 'ui-toolkit'],
-    )
-    assert.deepEqual(
-      beforePayload.states.map((entry) => entry.state),
-      ['inactive', 'inactive'],
-      'nothing activated yet',
-    )
-
-    const activation = await fetch(`${base}/skills/activate`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ workspacePath: workspace }),
-    })
-    const activationPayload = await activation.json()
-    assert.equal(activation.status, 200)
-    assert.deepEqual(activations, [project], 'compilation targets the workspace project')
-    assert.deepEqual(activationPayload.packages.map((entry) => entry.state), ['compiled', 'compiled'])
-
-    const after = await fetch(`${base}/skills/state?workspacePath=${encodeURIComponent(workspace)}`)
-    const afterPayload = await after.json()
-    assert.deepEqual(afterPayload.states.map((entry) => entry.state), ['active', 'active'])
-    assert.equal(afterPayload.states[0].assemblyId, 'asm-graphics-debugger')
-  })
-})
-
-test('activation reports a workspace without a Unity project instead of failing', async (t) => {
-  const workspace = mkdtempSync(join(tmpdir(), 'locus-ws-empty-'))
-  t.after(() => rmSync(workspace, { recursive: true, force: true }))
-  mkdirSync(join(workspace, 'docs'), { recursive: true })
-  const { handlers, activations } = fixture(t, { workspaces: [{ path: workspace }] })
-  await serve(handlers, async (base) => {
-    const response = await fetch(`${base}/skills/activate`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ workspacePath: workspace }),
-    })
-    const payload = await response.json()
-    assert.equal(response.status, 200)
-    assert.equal(payload.projectRoot, null)
-    assert.deepEqual(payload.packages, [])
-    assert.match(payload.message, /No Unity project/)
-    assert.deepEqual(activations, [], 'nothing is compiled without a project')
-  })
-})
-
-test('an explicit projectRoot must be a Unity project inside the workspace', async (t) => {
-  const parent = mkdtempSync(join(tmpdir(), 'locus-ws-bound-'))
-  t.after(() => rmSync(parent, { recursive: true, force: true }))
-  const workspace = join(parent, 'ws')
-  const outside = join(parent, 'outside')
-  mkdirSync(join(workspace, 'game', 'Assets'), { recursive: true })
-  mkdirSync(join(workspace, 'game', 'ProjectSettings'), { recursive: true })
-  mkdirSync(join(outside, 'Assets'), { recursive: true })
-  mkdirSync(join(outside, 'ProjectSettings'), { recursive: true })
-  const { handlers } = fixture(t, { workspaces: [{ path: workspace }] })
-  await serve(handlers, async (base) => {
-    const response = await fetch(`${base}/skills/activate`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ workspacePath: workspace, projectRoot: outside }),
-    })
-    assert.equal(response.status, 400)
-  })
-})
-
-test('one skill can be downloaded on its own, and state reports what is on disk', async (t) => {
-  const workspace = mkdtempSync(join(tmpdir(), 'locus-ws-single-'))
-  t.after(() => rmSync(workspace, { recursive: true, force: true }))
-  const { handlers } = fixture(t, { workspaces: [{ path: workspace }] })
-  await serve(handlers, async (base) => {
-    const response = await fetch(`${base}/skills/install`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ workspacePath: workspace, skillId: 'ui-toolkit' }),
-    })
-    const payload = await response.json()
-    assert.equal(response.status, 200)
-    assert.deepEqual(payload.written, ['ui-toolkit'])
-
-    const state = await fetch(`${base}/skills/state?workspacePath=${encodeURIComponent(workspace)}`)
-    const statePayload = await state.json()
-    const downloaded = statePayload.packages.filter((entry) => entry.downloaded).map((entry) => entry.id)
-    assert.deepEqual(downloaded, ['ui-toolkit'], 'only the written skill reads as downloaded')
-    assert.equal(statePayload.skillsDir, join(workspace, '.dsh', 'skills'))
-  })
-})
-
-test('an unknown skill id is a bad request, not a silent no-op', async (t) => {
-  const workspace = mkdtempSync(join(tmpdir(), 'locus-ws-unknown-'))
-  t.after(() => rmSync(workspace, { recursive: true, force: true }))
-  const { handlers } = fixture(t, { workspaces: [{ path: workspace }] })
-  await serve(handlers, async (base) => {
-    const response = await fetch(`${base}/skills/install`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ workspacePath: workspace, skillId: 'no-such-skill' }),
-    })
-    assert.equal(response.status, 400)
-  })
-})
-
-test('skills state still lists the packages without a workspace', async (t) => {
-  const { handlers } = fixture(t)
+test('GET /skills/state lists the package catalog and its switches', async (t) => {
+  const { handlers } = fixture(t, { skills: { 'ui-toolkit': true } })
   await serve(handlers, async (base) => {
     const response = await fetch(`${base}/skills/state`)
     const payload = await response.json()
     assert.equal(response.status, 200)
-    assert.equal(payload.workspace, '')
-    assert.equal(payload.skillsDir, null)
     assert.equal(payload.packages.length, 5)
-    assert.equal(payload.packages.every((entry) => entry.downloaded === false), true)
-    assert.deepEqual(payload.states, [])
+    assert.deepEqual(
+      payload.packages.filter((entry) => entry.executable).map((entry) => entry.id),
+      ['graphics-debugger', 'ui-toolkit'],
+    )
+    assert.equal(payload.packages.find((entry) => entry.id === 'ui-toolkit').enabled, true)
+    assert.equal(payload.packages.find((entry) => entry.id === 'debugger').enabled, false)
+    // No workspace, no compile target, no per-skill state: the only thing this
+    // route reports is the catalog and which rows are on.
+    assert.equal('projectRoot' in payload, false)
+    assert.equal('states' in payload, false)
+    assert.equal('skillsDir' in payload, false)
+  })
+})
+test('POST /settings stores one skill switch and leaves the rest alone', async (t) => {
+  const { env, handlers } = fixture(t)
+  await serve(handlers, async (base) => {
+    const response = await fetch(`${base}/settings`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ skills: { profiler: true } }),
+    })
+    const payload = await response.json()
+    assert.equal(response.status, 200)
+    assert.equal(payload.skills.profiler, true)
+    assert.equal(payload.skills.debugger, false, 'a merge must not switch its siblings on')
+    assert.equal(readSettings(env).skills.profiler, true)
+    assert.equal(payload.features.unity, true, 'the feature planes are untouched')
   })
 })
 
+test('an unknown skill id is a bad request, not a silent no-op', async (t) => {
+  const { handlers, applied } = fixture(t)
+  await serve(handlers, async (base) => {
+    const response = await fetch(`${base}/settings`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ skills: { 'no-such-skill': true } }),
+    })
+    assert.equal(response.status, 400)
+    assert.equal(applied.length, 0, 'a refused write must not reach the Host')
+  })
+})
+
+test('there is no master skills switch to send', async (t) => {
+  const { handlers } = fixture(t)
+  await serve(handlers, async (base) => {
+    const response = await fetch(`${base}/settings`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ features: { skills: true } }),
+    })
+    assert.equal(response.status, 400, 'the per-skill switches are the only control')
+  })
+})
 test('POST /settings stores the Unity project choice as a string preference', async (t) => {
   const { env, handlers } = fixture(t)
   await serve(handlers, async (base) => {

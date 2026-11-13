@@ -276,10 +276,10 @@ translating it would mean inventing Unity's wording.
 DSH's Settings has a **Unity bridge** page (`settings.section`, id `dsh-locus-bridge`) with three groups:
 
 - **Workspace**: pick a workspace, pick a Unity project, see or install the Locus plugin;
-- **Domain skills**: download each Unity domain skill (the two with C# compile on download);
 - **Features**: three feature switches. A change takes effect immediately with no restart: the page `POST`s
   to `/locus/api/settings`, the Host re-registers its tool set, and the `preview` plane makes the client
   re-read the switch (on window focus) and register or dispose the tab type accordingly.
+- **Domain skills**: five skills, one switch each (see [Domain skills](#domain-skills)).
 
 | Switch | What turning it off does |
 |---|---|
@@ -309,8 +309,8 @@ Design notes:
 
 The **Workspace** picker lists the workspaces DSH has already registered (the Host's `workspaceRegistry`);
 choosing one stores its path in `preferences.workspacePath` and decides where the project scan looks and which
-workspace the domain skills are written to. With nothing selected the page falls back to the Session's own
-workspace.
+project the domain skills' C# capabilities are activated in. With nothing selected the page falls back to the
+Session's own workspace.
 
 The search direction is only downward: **the workspace itself and its subdirectories**. The plugin no longer
 looks in ancestor directories or in siblings beside a workspace — with several checkouts in one repository, that
@@ -327,7 +327,7 @@ Below it, the **Locus plugin** row reports the selected project in a capsule wit
 | **Connection failed** | The editor is open but the native bridge never started (check `Library/Locus/NativeBridge.enabled`) |
 | **Not installed** | The project has no Locus package, or an incomplete one; the row offers **Install** |
 
-The Workspace, Domain skills and Features groups each sit in their own bordered card, and the row geometry
+The Workspace, Features and Domain skills groups each sit in their own bordered card, and the row geometry
 matches the host Settings page.
 
 The install button is deliberately narrow:
@@ -343,10 +343,13 @@ state; "No plugin" is a filesystem fact, not a connection problem.
 
 ### Domain skills
 
-Each row offers **Download** and writes one skill into the selected workspace's DSH skill
-root (`<project root>/.dsh/skills/<name>/SKILL.md`, where the project root follows DSH's rule: the nearest
-`.git`); the row reads "Downloaded" once the file matches the shipped version. The five documents with no
-DSH equivalent are kept:
+Five skills, one switch each. Turning a row on puts that skill into the model's catalog, loadable with the
+`skill` tool; turning it off removes it again. There is no master switch and nothing is written into the
+workspace: the skills follow the plugin version, so an upgrade cannot leave a stale copy behind in a project.
+
+They appear only in a workspace that holds a Unity project: the provider gates its catalog on the session's
+working directory, so a non-Unity conversation does not pay for these entries. The documents with no DSH
+equivalent are kept:
 
 | Skill | Covers | Executable C# |
 |---|---|---|
@@ -356,20 +359,24 @@ DSH equivalent are kept:
 | `ui-toolkit` | Unity 6.3+ UI Toolkit layout, style and interaction debugging | `UIToolkitApi` |
 | `view` | Locus View panels (Vue UI, inspector, table, graph editors) | — |
 
-Downloading either skill that carries C# also **activates** it: the shipped sources are handed to the editor's
-own `compile_skill_package` command, compiled into an assembly and kept active, so a later `unity_execute` can
-call them with `using Locus.Skills;`. With the editor closed the documentation is still written and the C#
-capability waits for the editor.
+The two skills that carry C# activate **implicitly**: once a switch is on, the first `unity_execute` in that
+project hands the shipped sources to the editor's own `compile_skill_package`, which compiles them into an
+assembly and keeps it active, so a later snippet can call them with `using Locus.Skills;`. There is no button
+and no separate activation step; the target is the project in the **Unity project** dropdown above, and several
+projects in one workspace need no extra choice. A failed compile is retried at most once a minute.
 
-Neither a domain reload nor a plugin upgrade needs a manual click: the next `unity_execute` reads the editor's
-`domain_generation`, recompiles silently when it moved (a cache hit makes it near-free), and a changed source
-hash triggers the same recompile. A failed compile is retried at most once a minute, so a package that cannot
-build never holds up every snippet.
+Injection does not depend on the project count: a switch decides whether that skill reaches the prompt, and the
+C# compile is an addition on top.
+
+After that, neither a domain reload nor a plugin upgrade needs a manual click: the next `unity_execute` reads the
+editor's `domain_generation`, recompiles silently when it moved (a cache hit makes it near-free), and a changed
+source hash triggers the same recompile. A failed compile is retried at most once a minute, so a package that
+cannot build never holds up every snippet.
 
 `RenderDocCaptureApi` only gets compiled and activated: an actual RenderDoc capture still needs the Python
 helpers and the `renderdoc` module that only the Locus desktop app carries, so only the Frame Debugger half of
-the graphics skill is complete here. Repeating the download is idempotent — files whose content already matches
-are not rewritten.
+the graphics skill is complete here. Repeating the activation is idempotent — an assembly that is already
+current is reused from the editor's cache.
 
 ## Differences from the Locus desktop client
 
@@ -377,7 +384,7 @@ are not rewritten.
   levels downward, breadth-first, and never upward or into a directory beside the workspace; an explicit
   `project_path` always takes precedence.
 - **No Locus desktop UI, knowledge base or skill system.** This plugin takes the "call into Unity from another
-  process" capability, plus one right-Sidebar asset panel and five downloadable Unity domain skills; the desktop
+  process" capability, plus one right-Sidebar asset panel and five switchable Unity domain skills; the desktop
   app's main window, knowledge index, skill runtime and agent loop take no part.
 - **The broker supports multiple clients.** When the broker has the `broker_multi_client_v1` capability, DSH and
   the Locus desktop app can be connected to the same editor at the same time, and responses go back to the

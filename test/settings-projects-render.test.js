@@ -223,9 +223,10 @@ async function mountSettings(t, answers) {
 
 const SETTINGS = {
   ok: true,
-  features: { unity: true, csharp: true, preview: true },
-  effective: { unity: true, csharp: true, preview: true },
+  features: { unity: true, csharp: true, preview: true, skills: false },
+  effective: { unity: true, csharp: true, preview: true, skills: false },
   preferences: { frameCache: true, workspacePath: 'E:/proj', unityProject: 'E:/proj/Game' },
+  skills: { debugger: false, profiler: false, 'graphics-debugger': false, 'ui-toolkit': false, view: false },
   locked: { csharp: false },
   path: 'C:/tmp/settings.json',
 }
@@ -267,34 +268,26 @@ const PROJECTS = {
 
 const SKILL_STATE = {
   ok: true,
-  workspace: 'E:/proj',
-  projectRoot: 'E:/proj/Game',
-  candidates: [],
-  skillsDir: 'E:/proj/.dsh/skills',
   packages: [
     {
       id: 'graphics-debugger',
       title: 'Unity Graphics Debugger',
       hint: 'Frame Debugger events and render targets, RenderDoc capture/replay.',
       executable: true,
-      partial: 'RenderDoc needs Python.',
-      downloaded: false,
+      enabled: false,
     },
     {
       id: 'ui-toolkit',
       title: 'UI Toolkit DevTools',
       hint: 'UI Toolkit layout, style and interaction debugging.',
       executable: true,
-      partial: null,
-      downloaded: true,
+      enabled: false,
     },
-    { id: 'debugger', title: 'Unity Debugger', hint: 'PlayerLoop/Tick positioning and paused inspection.', executable: false, partial: null, downloaded: false },
-    { id: 'profiler', title: 'Unity Profiler', hint: 'CPU/GPU/memory samples and baseline comparison.', executable: false, partial: null, downloaded: true },
-    { id: 'view', title: 'Locus View', hint: 'Vue panels, inspectors, tables and graph editors.', executable: false, partial: null, downloaded: false },
+    { id: 'debugger', title: 'Unity Debugger', hint: 'PlayerLoop/Tick positioning and paused inspection.', executable: false, enabled: false },
+    { id: 'profiler', title: 'Unity Profiler', hint: 'CPU/GPU/memory samples and baseline comparison.', executable: false, enabled: false },
+    { id: 'view', title: 'Locus View', hint: 'Vue panels, inspectors, tables and graph editors.', executable: false, enabled: false },
   ],
-  states: [],
 }
-
 function answersFor(overrides = {}) {
   return {
     '/workspaces': WORKSPACES,
@@ -307,20 +300,12 @@ function answersFor(overrides = {}) {
     },
     '/projects': PROJECTS,
     '/skills/state': SKILL_STATE,
-    '/skills/activate': {
-      ok: true,
-      workspace: 'E:/proj',
-      projectRoot: 'E:/proj/Game',
-      packages: [{ id: 'graphics-debugger', state: 'compiled', assemblyId: 'asm-g' }],
-      states: [],
-    },
-    '/skills/install': { ok: true, workspace: 'E:/proj', skillsDir: 'E:/proj/.dsh/skills', written: ['graphics-debugger'], unchanged: [] },
     settings: SETTINGS,
     ...overrides,
   }
 }
 
-test('the page renders the three groups with one row per skill and no cache switch', async (t) => {
+test('the page renders the three groups with one row per skill and a switch each', async (t) => {
   const page = await mountSettings(t, answersFor())
   const text = await page.settle()
 
@@ -329,6 +314,8 @@ test('the page renders the three groups with one row per skill and no cache swit
   assert.match(text, /领域技能/)
   assert.match(text, /功能/)
   assert.equal((text.match(/locus-settings-card/g) ?? []).length, 3, 'each group is its own bordered card')
+  // Features (the tool planes) come before the domain skills.
+  assert.ok(text.indexOf('功能') < text.indexOf('领域技能'), 'the tools group is listed above the skills group')
   // Two host-style selects: the workspace and the Unity project.
   assert.equal(
     page.runtime
@@ -336,36 +323,46 @@ test('the page renders the three groups with one row per skill and no cache swit
       .filter((element) => String(element.props?.className ?? '').includes('locus-select-trigger')).length,
     2,
   )
-  // The skills section names the workspace it writes into, right-aligned.
-  const skillsMeta = page.runtime
-    .elements(page.root)
-    .find((element) => element.props?.className === 'locus-settings-group-meta')
-  assert.ok(skillsMeta, 'the skills heading carries a workspace name')
-  assert.equal((skillsMeta.children ?? []).join(' ').trim(), 'Proj')
-  // Five skill rows, each either a Download button or the Downloaded label.
+  // The skills heading no longer names a workspace: nothing is written anywhere.
+  assert.equal(
+    page.runtime
+      .elements(page.root)
+      .filter((element) => String(element.props?.className ?? '').includes('locus-settings-group-meta')).length,
+    0,
+  )
+  // Five skill rows, each with its own switch — and no master switch above them.
+  for (const id of ['debugger', 'profiler', 'graphics-debugger', 'ui-toolkit', 'view']) {
+    assert.ok(
+      page.runtime.elements(page.root).some((element) => element.props?.['data-locus-switch'] === `skill-${id}`),
+      `${id} renders a switch row`,
+    )
+  }
+  // Five skill switches, plus the three feature switches in the group above.
+  assert.equal(
+    page.runtime
+      .elements(page.root)
+      .filter((element) => String(element.props?.['data-locus-switch'] ?? '').startsWith('skill-')).length,
+    5,
+    'one switch per skill',
+  )
   assert.match(text, /Unity Graphics Debugger/)
   assert.match(text, /UI Toolkit DevTools/)
   assert.match(text, /Unity Debugger/)
   assert.match(text, /Unity Profiler/)
   assert.match(text, /Locus View/)
-  // Every skill row carries its own one-line description, not just the one with
-  // an extra capability note.
+  // Every skill row carries its own one-line description.
   assert.match(text, /Frame Debugger events/)
   assert.match(text, /UI Toolkit layout/)
   assert.match(text, /PlayerLoop\/Tick positioning/)
   assert.match(text, /CPU\/GPU\/memory samples/)
   assert.match(text, /Vue panels/)
-  assert.equal((text.match(/已下载/g) ?? []).length, 2, 'only the two downloaded skills read as downloaded')
-  assert.equal(
-    page.buttons().filter((button) => (button.children ?? []).join(' ').includes('下载')).length,
-    3,
-  )
-  // The cache preference lost its control but the three switches remain.
+  assert.doesNotMatch(text, /仅文档/, 'a row no longer reports a capability label')
+  assert.doesNotMatch(text, /未激活/, 'C# state is implicit now')
   assert.doesNotMatch(text, /缓存/)
-  assert.equal(page.buttons().filter((button) => button.props.role === 'switch').length, 3)
+  assert.equal(page.buttonWithText('下载'), undefined, 'there is nothing to download')
+  assert.equal(page.buttonWithText('激活 C# 能力'), undefined, 'there is no activation button')
   assert.doesNotMatch(text, /\[!/, 'nothing threw')
 })
-
 test('the Unity project picker lists scanned projects and remembers the choice', async (t) => {
   const page = await mountSettings(t, answersFor())
   const text = await page.settle()
@@ -474,36 +471,52 @@ test('a project without the plugin shows the install button and installs on clic
   assert.match(after, /Reopen the Unity Editor/)
 })
 
-test('downloading one skill writes that skill and activates the executable ones', async (t) => {
+test('each skill switch posts its own toggle and nothing else', async (t) => {
   const page = await mountSettings(t, answersFor())
   await page.settle()
 
-  const download = page.buttonWithText('下载')
-  assert.ok(download, 'the first undownloaded skill offers Download')
-  download.props.onClick()
-  const text = await page.settle()
+  const row = page.runtime
+    .elements(page.root)
+    .find((element) => element.props?.['data-locus-switch'] === 'skill-debugger')
+  assert.ok(row, 'the debugger row carries a switch')
+  const toggle = (row.children ?? []).find((child) => child?.props?.role === 'switch')
+  assert.ok(toggle, 'the row control is the switch')
+  assert.equal(toggle.props['aria-checked'], 'false', 'every skill starts off')
 
-  const post = page.requests.find((entry) => entry.url.includes('/skills/install'))
-  assert.ok(post, 'the download goes through the Host')
-  assert.deepEqual(JSON.parse(post.body), { workspacePath: 'E:/proj', skillId: 'graphics-debugger' })
-  assert.ok(
-    page.requests.some((entry) => entry.url.includes('/skills/activate') && entry.method === 'POST'),
-    'an executable skill is compiled after its docs are written',
+  toggle.props.onClick()
+  await page.settle()
+  const post = page.requests.find((entry) => entry.method === 'POST' && entry.url.includes('/settings'))
+  assert.deepEqual(JSON.parse(post.body), { skills: { debugger: true } })
+  assert.equal(
+    page.requests.some((entry) => entry.url.includes('/skills/activate')),
+    false,
+    'compilation has no route of its own',
   )
-  assert.match(text, /已下载/)
 })
 
-test('without a workspace the skill buttons are disabled and the page says why', async (t) => {
-  const settings = { ...SETTINGS, preferences: { frameCache: true, workspacePath: '', unityProject: '' } }
+test('the skill rows stand on their own, with no status line and no warning', async (t) => {
+  // `PROJECTS` holds two projects; nothing in the skills panel may depend on
+  // that, on a selected workspace, or on a compile target.
+  const settings = {
+    ...SETTINGS,
+    preferences: { ...SETTINGS.preferences, unityProject: '' },
+    skills: { ...SETTINGS.skills, 'ui-toolkit': true },
+  }
   const page = await mountSettings(t, answersFor({ settings }))
   const text = await page.settle()
 
-  const download = page.buttonWithText('下载')
-  assert.ok(download)
-  assert.equal(download.props.disabled, true)
-  assert.match(text, /先在上面选择一个工作区/)
+  assert.doesNotMatch(text, /多个 Unity 工程/)
+  assert.doesNotMatch(text, /自动编译/)
+  assert.doesNotMatch(text, /Unity 工程：/)
+  assert.equal(page.buttonWithText('激活 C# 能力'), undefined, 'there is no activation button')
+  assert.equal(
+    page.runtime
+      .elements(page.root)
+      .filter((element) => String(element.props?.['data-locus-switch'] ?? '').startsWith('skill-')).length,
+    5,
+    'the five switches render regardless of the project scan',
+  )
 })
-
 test('a failed project scan is reported, and the switches still work', async (t) => {
   const page = await mountSettings(
     t,

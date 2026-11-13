@@ -23,6 +23,7 @@ import { csharpToolDefinitions } from './csharp/tools.js'
 import { shutdownCsharpPool } from './csharp/lsp-pool.js'
 import { registerAssetRoutes } from './sidebar/routes.js'
 import { onSettingsChanged, readSettings, resolveFeatures } from './settings.js'
+import { createDomainSkillProvider } from './skills/provider.js'
 import { toRegistryDefinition } from './schema.js'
 
 export const name = 'dsh-locus-bridge'
@@ -147,6 +148,51 @@ export function apply(ctx) {
       // on a service this plugin already failed to use.
       console.error(`[dsh-locus-bridge] could not apply the tool switches: ${error?.message ?? error}`)
     }
+  })
+
+  // The domain skills are a *model-facing* plane, not a tool plane: they are
+  // contributed to `ctx.skills` as an in-memory provider (see
+  // `src/skills/provider.js`) and never written into a workspace. There is no
+  // master switch — each skill has its own boolean, and the provider exists only
+  // while at least one of them is on. Turning one on or off disposes and
+  // re-registers the provider, which invalidates the catalog, so
+  // `dsh-tool-skill` appends the replacement list at the next model step instead
+  // of waiting for a restart.
+  //
+  // `inject` rather than a required dependency: a composition without the skill
+  // registry must still get every other plane.
+  ctx.inject(['skills'], (skillCtx) => {
+    let disposeProvider = null
+    const syncSkills = () => {
+      if (disposeProvider !== null) {
+        const dispose = disposeProvider
+        disposeProvider = null
+        try {
+          dispose()
+        } catch {
+          // A provider the registry already dropped is not an error here.
+        }
+      }
+      const stored = readSettings()
+      if (!Object.values(stored.skills).some(Boolean)) return
+      disposeProvider = skillCtx.skills.registerProvider(
+        () => createDomainSkillProvider({ enabled: stored.skills }),
+      )
+    }
+    syncSkills()
+    const stop = onSettingsChanged(syncSkills)
+    skillCtx.effect(() => () => {
+      stop()
+      if (disposeProvider !== null) {
+        const dispose = disposeProvider
+        disposeProvider = null
+        try {
+          dispose()
+        } catch {
+          // Disposal during teardown is best effort.
+        }
+      }
+    })
   })
 
   ctx.effect(() => () => {

@@ -156,9 +156,9 @@ DSH 的浏览器信任闸（`ctx.connection.requestRejection`）。
 DSH 设置里有一个 **Unity 桥接** 页（`settings.section`，id `dsh-locus-bridge`），分三组：
 
 - **工作区**：选择工作区、选择 Unity 工程、查看/安装 Locus 插件；
-- **领域技能**：逐项下载 Unity 领域技能（带 C# 的两项下载后自动编译激活）；
 - **功能**：三个功能面开关，改动**立即生效、无需重启**——页面向 `POST /locus/api/settings` 提交后，
   Host 重新注册工具集，`preview` 则由客户端在窗口重新获得焦点时重新读取并相应注册/注销标签页类型。
+- **领域技能**：五行技能，每行一个开关（见 [领域技能](#领域技能)）。
 
 | 开关 | 关掉之后 |
 |---|---|
@@ -184,8 +184,8 @@ DSH 设置里有一个 **Unity 桥接** 页（`settings.section`，id `dsh-locus
 ### 工作区
 
 设置页顶部的「工作区」下拉框列出 DSH 已经建立的工作区（Host 的 `workspaceRegistry`），选择会写进
-`preferences.workspacePath`。它决定两件事：下面的「Unity 工程」面板从哪里开始找工程，以及「领域技能」
-写到哪个工作区。不选择时退回会话自己的工作区，与旧版本一致。
+`preferences.workspacePath`。它决定两件事：下面的「Unity 工程」面板从哪里开始找工程，以及
+「领域技能」的 C# 能力激活到哪个工程。不选择时退回会话自己的工作区，与旧版本一致。
 
 查找方向只有一个：**工作区本身，以及它下面的子目录**。插件不会再去祖先目录或工作区旁边的兄弟目录
 里找工程——仓库里有多个 checkout 时，那种搜索会把会话接到错误的工程上。
@@ -200,7 +200,7 @@ DSH 设置里有一个 **Unity 桥接** 页（`settings.section`，id `dsh-locus
 | **连接失败** | 编辑器开着，但原生桥没有启动（检查 `Library/Locus/NativeBridge.enabled`） |
 | **没有插件** | 工程里没有 Locus 包，或包不完整；右侧给 **安装** 按钮 |
 
-工作区、领域技能、功能三组各有独立的卡片边框，行几何与宿主设置页一致。
+工作区、功能、领域技能三组各有独立的卡片边框，行几何与宿主设置页一致。
 
 安装按钮有几个刻意的限制：
 
@@ -214,9 +214,12 @@ DSH 设置里有一个 **Unity 桥接** 页（`settings.section`，id `dsh-locus
 
 ### 领域技能
 
-「领域技能」把本插件内置的 Unity 领域知识写入所选工作区的 DSH 技能目录
-（`<项目根>/.dsh/skills/<name>/SKILL.md`，项目根按 DSH 的规则取最近的 `.git`）。只保留 DSH 没有
-对应物的五份文档：
+五行技能，每行一个开关。打开哪一行，那一条就进入模型提示词（DSH 的技能目录），模型可以用
+`skill` 工具按需加载全文；关掉即完全消失。没有总开关，也不往工作区写任何文件：技能随插件版本
+走，升级不会在工作区里留下一份过期的副本。
+
+只有含 Unity 工程的工作区才会看到它们：技能的 provider 用会话工作目录做门控，非 Unity 会话的
+技能目录里不会多出这几条，因此也不占提示词。只保留 DSH 没有对应物的五份文档：
 
 | 技能 | 覆盖 | 可执行 C# |
 |---|---|---|
@@ -226,12 +229,14 @@ DSH 设置里有一个 **Unity 桥接** 页（`settings.section`，id `dsh-locus
 | `ui-toolkit` | Unity 6.3+ UI Toolkit 布局、样式与交互调试 | `UIToolkitApi` |
 | `view` | Locus View 面板（Vue UI / Inspector / 表格 / 图编辑器） | — |
 
-每行一个 **下载**，文件已写入且内容与插件版本一致时显示「已下载」。下载带 C# 的两个技能时，写文档
-之后会紧接着**激活**：把随插件分发的 C# 源码交给编辑器自带的 `compile_skill_package` 命令编译成
-程序集并驻留，之后 `unity_execute` 里可以直接 `using Locus.Skills;` 调用它们。编辑器没开时文档照常
-写入，C# 留到编辑器连上后自动激活。
+带 C# 的两个技能是**隐式激活**的：打开开关后，该工程里第一次执行 `unity_execute` 时，随插件分发
+的 C# 源码会自动交给编辑器自带的 `compile_skill_package` 编译成程序集并驻留，之后 `unity_execute`
+里可以直接 `using Locus.Skills;`。没有按钮，也没有单独的激活动作；目标就是上方「Unity 工程」下拉
+里的那个工程，工作区里有多个工程也不需要再选一次。编译失败后最多每分钟重试一次。
 
-域重载与源码升级都不需要手点：
+技能注入与工程数量无关：开关只管那一条进不进提示词，C# 编译只是附加能力。
+
+激活之后，域重载与源码升级都不需要手点：
 
 - 编辑器重启或域重载后，下一条 `unity_execute` 会先读编辑器的 `domain_generation`，发现换了域就
   静默重新编译一次（命中缓存时几乎无感），然后才执行代码；
@@ -239,15 +244,15 @@ DSH 设置里有一个 **Unity 桥接** 页（`settings.section`，id `dsh-locus
 - 编译失败时错误会写进激活记录，最多每 60 秒重试一次，不会让每条 snippet 都卡在编译上。
 
 `RenderDocCaptureApi` 只完成编译激活：真正的 RenderDoc 抓帧还需要 Locus 桌面端才有的 Python 脚本与
-`renderdoc` 模块，本插件不携带，所以图形技能里只有 Frame Debugger 那半是完整的。重复下载是幂等的
-——内容相同的文件不重写。
+`renderdoc` 模块，本插件不携带，所以图形技能里只有 Frame Debugger 那半是完整的。重复激活是幂等的
+——已经是最新的程序集直接复用编辑器缓存。
 
 ## 与 Locus 桌面端的差异
 
 - **会话工作目录不必是 Unity 项目。** 插件会向下最多三层、广度优先地寻找 Unity 工程，**不会**再向上
   或到工作区旁边的兄弟目录里找；显式传入 `project_path` 时始终以它为准。
 - **没有 Locus 的桌面 UI、知识库和技能系统。** 本插件取走「跨进程调用 Unity」这一项能力，
-  外加一个右栏资产面板和五份可下载的 Unity 领域技能；桌面端的主界面、knowledge 索引、skills 运行时
+  外加一个右栏资产面板和五份可开关的 Unity 领域技能；桌面端的主界面、knowledge 索引、skills 运行时
   和 agent 循环都不参与。
 - **broker 支持多客户端。** 在 broker 具备 `broker_multi_client_v1` capability 时，DSH 与 Locus
   桌面端可以同时连着同一个编辑器，响应回到发起请求的那条连接。

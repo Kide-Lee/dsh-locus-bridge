@@ -1,4 +1,4 @@
-// The Unity domain skills this plugin can write into a DSH workspace.
+// The Unity domain skills this plugin serves to DSH's skill registry.
 //
 // These are the upstream Locus knowledge documents that carry domain facts DSH
 // has no equivalent for: Unity PlayerLoop/Tick debugging, profiler sampling,
@@ -8,13 +8,17 @@
 // `connect-software`, `merge`, `review-context`) are deliberately not shipped.
 //
 // Bodies are verbatim from Locus except for the DSH frontmatter (`name` and
-// `description`), which DSH's filesystem skill provider requires. Two of the
-// skills also carry their Unity C# capability sources (`unity.files`): those
-// are compiled inside the connected editor with the bridge's own
-// `compile_skill_package` command and are what makes `using Locus.Skills;`
-// available to `unity_execute`. The remaining executable assets (the Python
-// RenderDoc helpers and the Locus frontend runtime) are not shipped — see
-// NOTICE.
+// `description`), which `src/skills/provider.js` reads to build the catalog
+// summaries the model sees. Two of the skills also carry their Unity C#
+// capability sources (`unity.files`): those are compiled inside the connected
+// editor with the bridge's own `compile_skill_package` command and are what
+// makes `using Locus.Skills;` available to `unity_execute`. The remaining
+// executable assets (the Python RenderDoc helpers and the Locus frontend
+// runtime) are not shipped — see NOTICE.
+//
+// Nothing here is written to the user's workspace: the provider serves these
+// bodies from the installed package, so a skill follows the plugin version
+// instead of becoming a file the user has to maintain.
 //
 // See NOTICE for the upstream revision and licence of the copied text.
 
@@ -77,11 +81,11 @@ export const DOMAIN_SKILLS = Object.freeze([
 export const UNITY_SKILLS = Object.freeze(DOMAIN_SKILLS.filter((skill) => skill.unity !== undefined))
 
 /**
- * One skill's Markdown, exactly as it is written to disk.
+ * One skill's Markdown, exactly as the provider serves it.
  *
- * Read from the package on every install instead of being duplicated in this
- * module: the shipped text is what users end up with, so there is one source of
- * truth and no chance of a stale inline copy.
+ * Read from the package instead of being duplicated in this module: the shipped
+ * text is what the model receives, so there is one source of truth and no
+ * chance of a stale inline copy.
  */
 export function readDomainSkill(id) {
   const skill = DOMAIN_SKILLS.find((entry) => entry.id === id)

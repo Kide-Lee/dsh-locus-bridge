@@ -1,10 +1,16 @@
-// User-facing feature switches for this plugin, and where they are stored.
+// User-facing switches for this plugin, and where they are stored.
 //
-// Three planes can be turned off independently:
+// Three feature planes can be turned off independently:
 //
 //   unity     the ten `unity_*` broker tools
 //   csharp    the `code_*` Roslyn tools (and their ~90 MB of downloaded assets)
 //   preview   the right-Sidebar Unity asset tab and its `/locus/api/*` routes
+//
+// Plus one per-skill section: `skills` holds one boolean per bundled Unity
+// domain skill. There is deliberately no "all skills" master switch — the only
+// thing that decides whether a skill reaches the model is that skill's own
+// switch, and all of them start off. Nothing is ever written to a workspace, so
+// these booleans are the entire state of that feature.
 //
 // They are deliberately *additive* to the environment switches, not a
 // replacement: `DSH_LOCUS_CSHARP=0` is a deployment-level statement ("this
@@ -28,6 +34,8 @@ import { mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSyn
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 
+import { DOMAIN_SKILLS } from './skills/catalog.js'
+
 /** The feature planes a user may switch off, in UI order. */
 export const FEATURE_KEYS = Object.freeze(['unity', 'csharp', 'preview'])
 
@@ -36,10 +44,22 @@ export const FEATURE_KEYS = Object.freeze(['unity', 'csharp', 'preview'])
  *
  * Everything is on: the tools are inert until a Unity editor connects or
  * `code_analysis action:"install"` runs, so a default-off plugin would only
- * make the feature invisible. `preview` is on because the tab is how a Unity
- * project becomes browsable from the conversation.
+ * make the feature invisible.
  */
 export const DEFAULT_FEATURES = Object.freeze({ unity: true, csharp: true, preview: true })
+
+/** Every bundled domain skill id, in the order the settings page lists them. */
+export const SKILL_IDS = Object.freeze(DOMAIN_SKILLS.map((skill) => skill.id))
+
+/**
+ * Default per-skill switches: all off.
+ *
+ * A skill changes the model's prompt, and only a Unity workspace benefits from
+ * it, so exposure is something the user asks for one skill at a time.
+ */
+export const DEFAULT_SKILLS = Object.freeze(
+  Object.fromEntries(SKILL_IDS.map((id) => [id, false])),
+)
 
 /**
  * Secondary preferences that the same page owns.
@@ -103,12 +123,13 @@ function freezeSettings(value) {
     version: SCHEMA_VERSION,
     features: Object.freeze({ ...value.features }),
     preferences: Object.freeze({ ...value.preferences }),
+    skills: Object.freeze({ ...value.skills }),
   })
 }
 
 /** The all-default document (a fresh value on every call, never shared mutable state). */
 export function defaultSettings() {
-  return freezeSettings({ features: DEFAULT_FEATURES, preferences: DEFAULT_PREFERENCES })
+  return freezeSettings({ features: DEFAULT_FEATURES, preferences: DEFAULT_PREFERENCES, skills: DEFAULT_SKILLS })
 }
 
 /**
@@ -124,6 +145,7 @@ export function normalizeSettings(raw) {
   const source = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {}
   const featuresIn = source.features && typeof source.features === 'object' ? source.features : {}
   const preferencesIn = source.preferences && typeof source.preferences === 'object' ? source.preferences : {}
+  const skillsIn = source.skills && typeof source.skills === 'object' && !Array.isArray(source.skills) ? source.skills : {}
   const features = {}
   for (const key of FEATURE_KEYS) {
     features[key] = typeof featuresIn[key] === 'boolean' ? featuresIn[key] : DEFAULT_FEATURES[key]
@@ -139,7 +161,13 @@ export function normalizeSettings(raw) {
       preferences[key] = typeof preferencesIn[key] === 'boolean' ? preferencesIn[key] : DEFAULT_PREFERENCES[key]
     }
   }
-  return freezeSettings({ features, preferences })
+  // Only ids this build ships: a toggle left over from an older or newer build
+  // is dropped rather than honoured against a skill that no longer exists.
+  const skills = {}
+  for (const id of SKILL_IDS) {
+    skills[id] = typeof skillsIn[id] === 'boolean' ? skillsIn[id] : DEFAULT_SKILLS[id]
+  }
+  return freezeSettings({ features, preferences, skills })
 }
 
 /** path → { mtimeMs, size, value } */
@@ -226,6 +254,7 @@ export function saveSettings(patch, env = process.env) {
   const next = normalizeSettings({
     features: { ...current.features, ...(patch?.features ?? {}) },
     preferences: { ...current.preferences, ...(patch?.preferences ?? {}) },
+    skills: { ...current.skills, ...(patch?.skills ?? {}) },
   })
   const path = settingsPath(env)
   mkdirSync(dirname(path), { recursive: true })

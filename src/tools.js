@@ -319,9 +319,9 @@ const unityExecute = {
       assertRequestedStatus(requested, state.status)
 
       // A domain reload (or an editor restart) clears the editor's skill-assembly
-      // registry. Recompile the installed skills before a snippet that may call
-      // `Locus.Skills`; this is a no-op until the settings page activated them
-      // once for this project, and one cheap request afterwards.
+      // registry, and a project that just switched a skill on has nothing
+      // compiled yet. `ensureSkillActivation` compiles the switched-on packages
+      // here: the first snippet pays for it, later ones do one cheap request.
       await ensureSkillActivation(client, projectRoot).catch(() => {})
 
       const owner = `dsh-${process.pid}-${randomUUID()}`

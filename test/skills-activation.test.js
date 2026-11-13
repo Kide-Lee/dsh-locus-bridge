@@ -1,8 +1,9 @@
 // Activation memory for the executable Unity skills.
 //
 // The compile itself happens inside the editor, so what can be tested here is
-// the part this plugin owns: a stable content hash, the per-project store, and
-// the difference between "active", "stale" and "the editor was closed".
+// the part this plugin owns: a stable content hash, the per-project store, the
+// difference between "active", "stale" and "the editor was closed", and the rule
+// that a switched-on skill compiles itself on first use.
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
@@ -19,12 +20,17 @@ import {
   skillSourceHash,
 } from '../src/skills/activation.js'
 import { UNITY_SKILLS } from '../src/skills/catalog.js'
-import { HOME_ENV } from '../src/settings.js'
+import { HOME_ENV, saveSettings } from '../src/settings.js'
 
 function home(t) {
   const dir = mkdtempSync(join(tmpdir(), 'locus-skill-activation-'))
   t.after(() => rmSync(dir, { recursive: true, force: true }))
   return { dir, env: { [HOME_ENV]: dir } }
+}
+
+/** Switch skills on in this throwaway home; all executable ids by default. */
+function enable(env, ids = UNITY_SKILLS.map((skill) => skill.id)) {
+  saveSettings({ skills: Object.fromEntries(ids.map((id) => [id, true])) }, env)
 }
 
 test('the two executable skills have stable, distinct source hashes', () => {
@@ -69,6 +75,17 @@ test('recorded activation reads back as active, and a changed hash reads as stal
   )
 })
 
+test('activation state can be narrowed to the switched-on skills', (t) => {
+  const { env } = home(t)
+  const project = 'E:/game'
+  recordActivation(project, UNITY_SKILLS.map((skill) => ({ id: skill.id, sourceHash: skillSourceHash(skill), state: 'compiled' })), env)
+  assert.deepEqual(
+    activationState(project, env, { ids: ['ui-toolkit'] }).map((entry) => entry.id),
+    ['ui-toolkit'],
+    'a disabled skill has no state worth showing',
+  )
+})
+
 test('an unavailable editor never overwrites a remembered activation', (t) => {
   const { env } = home(t)
   const project = 'E:/game'
@@ -78,7 +95,7 @@ test('an unavailable editor never overwrites a remembered activation', (t) => {
     [{ id: uiToolkit.id, sourceHash: skillSourceHash(uiToolkit), state: 'compiled', assemblyId: 'asm-ui' }],
     env,
   )
-  // This is what `activateSkillPackages` returns when no editor is listening.
+  // A report that says nothing about the last successful compile.
   recordActivation(project, [{ id: uiToolkit.id, sourceHash: 'whatever', state: 'unavailable' }], env)
   const state = activationState(project, env).find((entry) => entry.id === 'ui-toolkit')
   assert.equal(state.state, 'active', 'closing the editor does not un-compile an assembly')
@@ -131,17 +148,45 @@ const COMPILED = () =>
     assemblyId: `asm-${skill.id}`,
   }))
 
-test('a project that never activated anything pays no round trip', async (t) => {
+test('nothing switched on pays no round trip', async (t) => {
   const { env } = home(t)
   const editor = fakeEditor()
   const outcome = await ensureSkillActivation(editor, 'E:/never', { env })
   assert.equal(outcome.state, 'skipped')
-  assert.equal(editor.calls.length, 0, 'no reload probe for a project without skills')
+  assert.equal(editor.calls.length, 0, 'no reload probe while every skill is off')
+})
+
+test('the first snippet compiles a switched-on skill with no prior record', async (t) => {
+  const { env } = home(t)
+  const project = 'E:/game'
+  enable(env)
+  const editor = fakeEditor({ generation: 'gen-1' })
+  const outcome = await ensureSkillActivation(editor, project, { env })
+  assert.equal(outcome.state, 'reactivated')
+  assert.equal(editor.calls.filter((call) => call.type === 'compile_skill_package').length, 2)
+  assert.deepEqual(
+    activationState(project, env).map((entry) => entry.state),
+    ['active', 'active'],
+  )
+})
+
+test('only the switched-on packages are compiled', async (t) => {
+  const { env } = home(t)
+  const project = 'E:/game'
+  enable(env, ['ui-toolkit'])
+  const editor = fakeEditor({ generation: 'gen-1' })
+  const outcome = await ensureSkillActivation(editor, project, { env })
+  assert.equal(outcome.state, 'reactivated')
+  const compiled = editor.calls
+    .filter((call) => call.type === 'compile_skill_package')
+    .map((call) => JSON.parse(call.message).packageId)
+  assert.deepEqual(compiled, ['ui-toolkit'])
 })
 
 test('the same domain generation means no compile', async (t) => {
   const { env } = home(t)
   const project = 'E:/game'
+  enable(env)
   recordActivation(project, COMPILED(), env, { generation: 'gen-1' })
   const editor = fakeEditor({ generation: 'gen-1' })
   const outcome = await ensureSkillActivation(editor, project, { env })
@@ -152,6 +197,7 @@ test('the same domain generation means no compile', async (t) => {
 test('a new domain recompiles the skills without any user action', async (t) => {
   const { env } = home(t)
   const project = 'E:/game'
+  enable(env)
   recordActivation(project, COMPILED(), env, { generation: 'gen-1' })
   const editor = fakeEditor({ generation: 'gen-2' })
   const outcome = await ensureSkillActivation(editor, project, { env })
@@ -169,6 +215,7 @@ test('a new domain recompiles the skills without any user action', async (t) => 
 test('changed sources recompile even in the same domain', async (t) => {
   const { env } = home(t)
   const project = 'E:/game'
+  enable(env)
   // A stored hash that no longer matches the bundled sources is "stale" and
   // must not wait for a reload.
   recordActivation(project, [{ id: 'ui-toolkit', sourceHash: 'old', state: 'compiled' }], env, { generation: 'gen-1' })
@@ -180,6 +227,7 @@ test('changed sources recompile even in the same domain', async (t) => {
 test('a failed compile is not retried on every snippet', async (t) => {
   const { env } = home(t)
   const project = 'E:/game'
+  enable(env, ['ui-toolkit'])
   const uiToolkit = UNITY_SKILLS.find((skill) => skill.id === 'ui-toolkit')
   recordActivation(
     project,
@@ -189,6 +237,6 @@ test('a failed compile is not retried on every snippet', async (t) => {
   )
   const editor = fakeEditor({ generation: 'gen-1' })
   const outcome = await ensureSkillActivation(editor, project, { env })
-  assert.equal(outcome.state, 'unchanged', 'the cooldown absorbs the retry')
+  assert.equal(outcome.state, 'cooling_down', 'the cooldown absorbs the retry')
   assert.equal(editor.calls.filter((call) => call.type === 'compile_skill_package').length, 0)
 })

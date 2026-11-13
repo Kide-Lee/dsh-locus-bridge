@@ -14,8 +14,10 @@ import { tmpdir } from 'node:os'
 import {
   DEFAULT_FEATURES,
   DEFAULT_PREFERENCES,
+  DEFAULT_SKILLS,
   FEATURE_KEYS,
   HOME_ENV,
+  SKILL_IDS,
   bridgeHome,
   defaultSettings,
   normalizeSettings,
@@ -34,7 +36,7 @@ function home(t) {
   return { [HOME_ENV]: dir }
 }
 
-test('every plane is on by default, and the frame cache with it', () => {
+test('the tool planes are on by default and every skill starts off', () => {
   assert.deepEqual({ ...DEFAULT_FEATURES }, { unity: true, csharp: true, preview: true })
   assert.equal(DEFAULT_PREFERENCES.frameCache, true)
   assert.deepEqual(FEATURE_KEYS, ['unity', 'csharp', 'preview'])
@@ -42,6 +44,34 @@ test('every plane is on by default, and the frame cache with it', () => {
     { ...defaultSettings().features },
     { unity: true, csharp: true, preview: true },
   )
+  assert.deepEqual(SKILL_IDS, ['debugger', 'profiler', 'graphics-debugger', 'ui-toolkit', 'view'])
+  assert.deepEqual(
+    { ...DEFAULT_SKILLS },
+    { debugger: false, profiler: false, 'graphics-debugger': false, 'ui-toolkit': false, view: false },
+  )
+  assert.deepEqual({ ...defaultSettings().skills }, { ...DEFAULT_SKILLS })
+})
+
+test('a skill switch round-trips and leaves its siblings alone', (t) => {
+  const env = home(t)
+  const saved = saveSettings({ skills: { debugger: true } }, env)
+  assert.equal(saved.skills.debugger, true)
+  assert.equal(saved.skills.profiler, false, 'a merge must not flip the siblings')
+  const onDisk = JSON.parse(readFileSync(settingsPath(env), 'utf8'))
+  assert.equal(onDisk.skills.debugger, true)
+
+  saveSettings({ skills: { 'ui-toolkit': true } }, env)
+  const both = readSettings(env).skills
+  assert.equal(both.debugger, true, 'the earlier choice survives the next write')
+  assert.equal(both['ui-toolkit'], true)
+})
+
+test('a skill id this build does not ship is dropped, not honoured', () => {
+  const settings = normalizeSettings({ skills: { debugger: true, 'no-such-skill': true, profiler: 'yes' } })
+  assert.equal(settings.skills.debugger, true)
+  assert.equal(settings.skills.profiler, false, 'a non-boolean falls back to the default')
+  assert.equal('no-such-skill' in settings.skills, false)
+  assert.deepEqual(Object.keys(settings.skills), [...SKILL_IDS])
 })
 
 test('a missing document is the first-run state, not an error', (t) => {
