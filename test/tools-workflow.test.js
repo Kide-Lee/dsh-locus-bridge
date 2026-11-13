@@ -9,9 +9,22 @@ import { __resetPoolForTest, __setClientForTest, shutdownPool } from '../src/cli
 import { resolvePipeName } from '../src/pipe-name.js'
 import { toolDefinitions } from '../src/tools.js'
 import { sceneSetCode } from '../src/scene-set.js'
+import { HOME_ENV } from '../src/settings.js'
 import { startFakeBroker } from './fake-broker.js'
 
 const tools = Object.fromEntries(toolDefinitions.map((definition) => [definition.name, definition]))
+
+// `unity_execute` now checks the skill activation generation before running a
+// snippet. Point that store at a throwaway home so a developer machine that has
+// activated skills never influences these fixtures (or gets written to).
+const BRIDGE_HOME = mkdtempSync(join(tmpdir(), 'locus-workflow-home-'))
+const PREVIOUS_BRIDGE_HOME = process.env[HOME_ENV]
+process.env[HOME_ENV] = BRIDGE_HOME
+process.on('exit', () => {
+  rmSync(BRIDGE_HOME, { recursive: true, force: true })
+  if (PREVIOUS_BRIDGE_HOME === undefined) delete process.env[HOME_ENV]
+  else process.env[HOME_ENV] = PREVIOUS_BRIDGE_HOME
+})
 
 // Project resolution validates `Assets/` + `ProjectSettings/`, so the fixture is
 // a real tree rather than a string that happens to look like a path.

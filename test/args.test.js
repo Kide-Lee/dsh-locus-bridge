@@ -232,45 +232,50 @@ test('a Windows-style path is treated as absolute, not joined to the cwd', () =>
   )
 })
 
-// ── Sessions started below the project ─────────────────────────────────────
-// An agent is often run from `src/`, `docs/`, or even inside the project's own
-// `Assets/`; the project its repository drives must still be found without the
-// caller having to name it.
+// ── Only the Session directory and below it ─────────────────────────────────
+// The search is deliberately downwards-only: a project in a parent directory, or
+// beside an ancestor, is not this Session's project. The Settings page's
+// workspace scan follows the same rule, so there is one answer everywhere.
 
-test('a cwd inside the project resolves back to the project', () => {
+test('a cwd inside the project does not walk up to it', () => {
   const root = sandbox(['unity-test'])
   try {
     const inside = join(root, 'unity-test', 'Assets')
     mkdirSync(inside, { recursive: true })
-    assert.equal(resolveProjectRoot(undefined, ctx(inside)), resolve(join(root, 'unity-test')))
-  } finally {
-    rmSync(root, { recursive: true, force: true })
-  }
-})
-
-test('a cwd in a sibling directory resolves the project beside its ancestor', () => {
-  const root = sandbox(['unity-test'], ['src/deep/nested', 'docs'])
-  try {
-    assert.equal(resolveProjectRoot(undefined, ctx(join(root, 'src', 'deep', 'nested'))), resolve(join(root, 'unity-test')))
-    assert.equal(resolveProjectRoot(undefined, ctx(join(root, 'docs'))), resolve(join(root, 'unity-test')))
-  } finally {
-    rmSync(root, { recursive: true, force: true })
-  }
-})
-
-test('the ancestor search stops at the repository root', () => {
-  // A project in a *parent* repository must not be adopted by a nested one: the
-  // search stops below the nearest `.git`.
-  const outer = sandbox(['OuterGame'], ['repo/src'])
-  try {
-    const repo = join(outer, 'repo')
-    mkdirSync(join(repo, '.git'), { recursive: true })
     assert.throws(
-      () => resolveProjectRoot(undefined, ctx(join(repo, 'src'))),
+      () => resolveProjectRoot(undefined, ctx(inside)),
       /pass project_path/,
-      'the search must not escape the repository to find OuterGame',
+      'a directory below a project is not allowed to adopt it',
     )
   } finally {
-    rmSync(outer, { recursive: true, force: true })
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('a project beside an ancestor is never adopted', () => {
+  // The shape that used to be resolved: `repo/src/deep` found `unity-test`
+  // beside `repo`. It must now fail, and a Session at the repository root must
+  // not see it either — the sibling is outside every candidate root.
+  const root = sandbox(['unity-test'], ['repo/src/deep', 'repo/docs'])
+  try {
+    assert.throws(() => resolveProjectRoot(undefined, ctx(join(root, 'repo', 'src', 'deep'))), /pass project_path/)
+    assert.throws(() => resolveProjectRoot(undefined, ctx(join(root, 'repo', 'docs'))), /pass project_path/)
+    assert.throws(() => resolveProjectRoot(undefined, ctx(join(root, 'repo'))), /pass project_path/)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('a repository cwd still finds a project nested below it, at any allowed depth', () => {
+  // The downwards direction is what a monorepo with `game/unity-test` relies on,
+  // so removing the upward search must not remove this.
+  const root = sandbox([], ['repo/src'])
+  try {
+    const project = join(root, 'repo', 'game', 'unity-test')
+    mkdirSync(join(project, 'Assets'), { recursive: true })
+    mkdirSync(join(project, 'ProjectSettings'), { recursive: true })
+    assert.equal(resolveProjectRoot(undefined, ctx(join(root, 'repo'))), resolve(project))
+  } finally {
+    rmSync(root, { recursive: true, force: true })
   }
 })

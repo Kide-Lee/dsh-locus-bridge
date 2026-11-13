@@ -3,17 +3,22 @@
 // Precedence (highest first):
 //   1. an explicit `project_path` argument;
 //   2. the Session cwd when it is a Unity project;
-//   3. the shallowest Unity project found within `PROJECT_SEARCH_DEPTH` levels,
-//      which covers a repository whose project sits in a subdirectory;
+//   3. the shallowest Unity project found within `PROJECT_SEARCH_DEPTH` levels
+//      below the Session cwd, which covers a repository whose project sits in a
+//      subdirectory;
 //   4. an error that lists the candidates.
+//
+// The search never walks up: a project beside an ancestor is not "the project
+// this Session is about". Only the directory itself and its descendants count,
+// which is also the rule the Settings page's workspace scan follows.
 //
 // There is deliberately no recorded-project file: workspace instructions
 // (AGENTS.md and friends) already tell the model which project a repository
 // drives, and an explicit `project_path` is how that choice becomes concrete.
 // A second, machine-readable copy would only be able to contradict the prose.
 
-import { existsSync, readdirSync, statSync } from 'node:fs'
-import { dirname, isAbsolute, join, resolve } from 'node:path'
+import { readdirSync, statSync } from 'node:fs'
+import { isAbsolute, join, resolve } from 'node:path'
 
 /** Windows drive / UNC paths are absolute even when the host is Linux or macOS. */
 export function isAbsoluteProjectPath(value) {
@@ -126,12 +131,14 @@ function subdirectories(dir) {
  *   1. explicit `project_path`;
  *   2. the Session cwd when it already is a Unity project;
  *   3. the shallowest Unity project within `PROJECT_SEARCH_DEPTH` levels below
- *      the cwd, then below each ancestor up to the repository root — covering a
- *      session that starts inside `src/` or inside the project itself;
+ *      the cwd — covering a repository whose project sits in a subdirectory;
  *   4. an error naming the candidates / asking for `project_path`.
  *
- * Every branch validates before returning, so a wrong path fails here instead of
- * deriving a project key that silently matches no broker socket.
+ * There is no upward search: a Session started inside `src/` does not adopt a
+ * project from a parent directory, and a project sitting beside an ancestor is
+ * never treated as this Session's project. Every branch validates before
+ * returning, so a wrong path fails here instead of deriving a project key that
+ * silently matches no broker socket.
  */
 export function resolveProjectRoot(projectPath, ctx = {}) {
   const cwd = sessionCwd(ctx) ?? process.cwd()
@@ -161,36 +168,13 @@ export function resolveProjectRoot(projectPath, ctx = {}) {
         `(${nearest.map((candidate) => candidate.path).join(', ')}); pass project_path to choose one.`,
     )
   }
-  // Nothing below the cwd: a session started inside a subdirectory of the
-  // repository (`src/`, or the project's own `Assets/`) should still find the
-  // project its repository drives, so look below each ancestor in turn.
-  for (const ancestor of ancestors(cwd)) {
-    const up = findUnityProjects(ancestor, { maxDepth: 1 })
-    if (up.length === 1) return up[0].path
-    if (up.length > 1) break
-  }
-
+  // Nothing below the cwd: the Session directory is the boundary. Walking up to
+  // an ancestor (or a directory beside it) is deliberately not supported — that
+  // is how a repository with several checkouts used to adopt the wrong project.
   throw new Error(
     `The working directory ${cwd} is not a Unity project and has none within ${PROJECT_SEARCH_DEPTH} levels ` +
-      'below it or beside its ancestors; pass project_path (the folder containing Assets/ and ProjectSettings/).',
+      'below it; pass project_path (the folder containing Assets/ and ProjectSettings/).',
   )
-}
-
-/**
- * Parent directories of `dir`, nearest first, stopping below the repository root
- * (the directory holding `.git`) so a search never escapes the project.
- */
-function ancestors(dir) {
-  const chain = []
-  let current = resolve(dir)
-  for (;;) {
-    const parent = dirname(current)
-    if (parent === current) break
-    chain.push(parent)
-    if (existsSync(join(parent, '.git'))) break
-    current = parent
-  }
-  return chain
 }
 
 /**

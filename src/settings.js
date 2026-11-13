@@ -48,8 +48,22 @@ export const DEFAULT_FEATURES = Object.freeze({ unity: true, csharp: true, previ
  * preview frame is persisted under `Library/Locus/asset-preview-cache` (a
  * directory inside the user's Unity project), so a project that must not grow
  * files from a browser session needs a way to say so.
+ *
+ * `workspacePath` is the DSH workspace the settings page searches for Unity
+ * projects. It is stored as a string (an absolute directory path) rather than a
+ * boolean, and it is the one preference whose value the Host can use to narrow
+ * its filesystem probes: no workspace selected means "keep using the Session's
+ * own workspace", which is the behaviour every earlier version had.
+ *
+ * `unityProject` is the project root the page's Unity project picker selected.
+ * It is remembered so reopening the page keeps the same project instead of
+ * jumping back to whichever project the scan happened to list first; a project
+ * that disappears simply falls back to the automatic choice.
  */
-export const DEFAULT_PREFERENCES = Object.freeze({ frameCache: true })
+export const DEFAULT_PREFERENCES = Object.freeze({ frameCache: true, workspacePath: '', unityProject: '' })
+
+/** Preferences whose value is a string; every other preference is a boolean. */
+export const STRING_PREFERENCE_KEYS = Object.freeze(['workspacePath', 'unityProject'])
 
 /** The keys `preferences` may carry; the route rejects anything else. */
 export const PREFERENCE_KEYS = Object.freeze(Object.keys(DEFAULT_PREFERENCES))
@@ -116,7 +130,14 @@ export function normalizeSettings(raw) {
   }
   const preferences = {}
   for (const key of Object.keys(DEFAULT_PREFERENCES)) {
-    preferences[key] = typeof preferencesIn[key] === 'boolean' ? preferencesIn[key] : DEFAULT_PREFERENCES[key]
+    if (STRING_PREFERENCE_KEYS.includes(key)) {
+      // A path is the only string-valued preference. A hand-edited number or
+      // object must fall back to the default instead of being stringified into
+      // a path that would later scan the wrong directory.
+      preferences[key] = typeof preferencesIn[key] === 'string' ? preferencesIn[key].trim() : DEFAULT_PREFERENCES[key]
+    } else {
+      preferences[key] = typeof preferencesIn[key] === 'boolean' ? preferencesIn[key] : DEFAULT_PREFERENCES[key]
+    }
   }
   return freezeSettings({ features, preferences })
 }

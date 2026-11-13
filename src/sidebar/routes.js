@@ -12,6 +12,8 @@
 //   GET  status        connection + editor state for a Session's project
 //   GET  settings      this plugin's feature switches and their effective state
 //   POST settings      merge a switch patch and apply it to the live Host
+//   GET  workspaces    the DSH workspaces a settings page may scan
+//   POST skills/install  write the bundled domain skills into one workspace
 //   GET  asset         the property tree for one asset (no body)
 //   POST asset/read    the same tree for one node of an already-open asset
 //   POST asset/write   one SerializedProperty write (in-memory + dirty)
@@ -26,16 +28,18 @@
 // project-relative `Assets/…` path, the Session names the project, and
 // `paths.js` refuses everything else.
 
-import { readFileSync, statSync } from 'node:fs'
-import { join, relative, resolve, sep } from 'node:path'
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import { dirname, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { resolveProjectRoot } from '../args.js'
+import { resolveProjectRoot, isUnityProject } from '../args.js'
 import { LocusError } from '../locus-client.js'
 import { BROKER_ERRORS, isReloading } from '../protocol.js'
 import { describeProject, listProjectCandidates } from '../projects.js'
 import { installPackage, writeMarker, editorIsRunning } from '../setup.js'
-import { FEATURE_KEYS, PREFERENCE_KEYS, readSettings, resolveFeatures, saveSettings, settingsPath } from '../settings.js'
+import { FEATURE_KEYS, PREFERENCE_KEYS, STRING_PREFERENCE_KEYS, readSettings, resolveFeatures, saveSettings, settingsPath } from '../settings.js'
+import { DOMAIN_SKILLS, readDomainSkill } from '../skills/catalog.js'
+import { activateSkillPackages, activationState, recordActivation } from '../skills/activation.js'
 import { readFrameCache, sourceMtimeMs, writeFrameCache } from './frame-cache.js'
 import {
   normalizeAssetPath,
@@ -80,7 +84,7 @@ const PROJECT_CACHE_MS = 5_000
  * `ctx.inject(['webServer'], …)` so a desktop Host without a web surface simply
  * never runs this.
  */
-export function registerAssetRoutes(webCtx, { env = process.env, onFeaturesChanged = null } = {}) {
+export function registerAssetRoutes(webCtx, { env = process.env, onFeaturesChanged = null, activateSkills = activateSkillPackages } = {}) {
   const png = new PngCache()
   const projectCache = new Map()
   const fences = {
@@ -109,12 +113,35 @@ export function registerAssetRoutes(webCtx, { env = process.env, onFeaturesChang
   }
 
   /**
+   * The workspace the Settings page selected, when it still names a directory.
+   *
+   * Read by both scanning routes: the page is not the only caller, and a
+   * selected workspace must narrow the Host's probes even for a request that
+   * does not repeat the path. A stored path that no longer exists is ignored
+   * rather than failing the scan — the page can then re-pick one.
+   */
+  const selectedWorkspace = () => {
+    const value = readSettings(env).preferences.workspacePath
+    const path = typeof value === 'string' ? value.trim() : ''
+    if (!path) return ''
+    try {
+      return statSync(path).isDirectory() ? path : ''
+    } catch {
+      return ''
+    }
+  }
+
+  /**
    * Directories the project list scans.
    *
-   * `?roots=` wins so the page can browse anywhere the user pointed it; a
-   * `sessionId` falls back to that Session's workspace, which is the set the
-   * conversation is actually about. Neither form accepts a path from the page
-   * without it naming a real directory: `listProjectCandidates` skips the rest.
+   * `?roots=` wins so the page can pass the workspace it selected; then the
+   * workspace stored in this plugin's settings, so a page that forgets the
+   * parameter still scans what the user chose; a `sessionId` falls back to that
+   * Session's workspace. Only the final fallback — no Session and no selection
+   * — uses the Host's registered workspaces.
+   *
+   * Every root is scanned downwards only (`listProjectCandidates`), so no
+   * ancestor or sibling directory can ever contribute a Unity project.
    */
   const projectRootsFor = (url) => {
     const explicit = (url.searchParams.get('roots') ?? '')
@@ -122,6 +149,8 @@ export function registerAssetRoutes(webCtx, { env = process.env, onFeaturesChang
       .map((part) => part.trim())
       .filter(Boolean)
     if (explicit.length > 0) return explicit
+    const configured = selectedWorkspace()
+    if (configured) return [configured]
     const sessionId = url.searchParams.get('sessionId') ?? ''
     if (sessionId) {
       const record = projectOf(sessionId)
@@ -311,8 +340,12 @@ export function registerAssetRoutes(webCtx, { env = process.env, onFeaturesChang
         if (req.method !== 'POST') return methodNotAllowed(res)
         try {
           const body = await readJsonBody(req)
-          if (!isSwitchPatch(body)) {
-            throw new HttpError(400, `features and preferences may only carry the keys ${FEATURE_KEYS.join(', ')} and booleans.`)
+          if (!isSettingsPatch(body)) {
+            throw new HttpError(
+              400,
+              `features may only carry ${FEATURE_KEYS.join(', ')} and booleans; preferences may only carry ` +
+                `${PREFERENCE_KEYS.join(', ')} (${STRING_PREFERENCE_KEYS.join(', ')} as a path string, the rest as booleans).`,
+            )
           }
           const saved = saveSettings({ features: body.features, preferences: body.preferences }, env)
           // The Host tool set follows the same notification the tools register
@@ -330,6 +363,196 @@ export function registerAssetRoutes(webCtx, { env = process.env, onFeaturesChang
             preferences: { ...saved.preferences },
             locked: { csharp: saved.features.csharp && !resolveFeatures(saved, env).csharp },
             path: settingsPathFor(env),
+          })
+        } catch (error) {
+          respondError(res, error)
+        }
+      },
+    },
+    {
+      // The DSH workspaces this page may scan.
+      //
+      // It is the Host's own registry, not a directory browser: the page offers
+      // exactly the workspaces the user already created in DSH, and the `path`
+      // it gets back is what it hands to the projects and skills routes.
+      kind: 'exact',
+      path: `${ROUTE_PREFIX}/workspaces`,
+      handler: async (req, res) => {
+        if (!fence(req)) return sendJson(res, 403, { ok: false, error: { code: 'forbidden', message: 'forbidden' } })
+        if (req.method !== 'GET') return methodNotAllowed(res)
+        try {
+          const registry = webCtx.get('workspaceRegistry')
+          const workspaces = (registry?.list?.() ?? [])
+            .map((workspace) => ({
+              id: String(workspace?.id ?? ''),
+              path: typeof workspace?.path === 'string' ? workspace.path : '',
+              title: typeof workspace?.title === 'string' ? workspace.title : '',
+            }))
+            .filter((workspace) => workspace.path.length > 0)
+          sendJson(res, 200, {
+            ok: true,
+            workspaces,
+            selected: readSettings(env).preferences.workspacePath ?? '',
+          })
+        } catch (error) {
+          respondError(res, error)
+        }
+      },
+    },
+    {
+      // Write the bundled domain skills into one selected workspace.
+      //
+      // "Download" here means copying text this plugin already ships: the five
+      // Unity domain skills that have no DSH equivalent. They land in the DSH
+      // project skill root (`.dsh/skills/<name>/SKILL.md`), so DSH's own skill
+      // provider discovers them on its next lookup; this plugin never registers
+      // them itself, and never writes a skill body it did not ship.
+      //
+      // The project root is resolved the way DSH resolves it: the nearest
+      // ancestor holding `.git`, falling back to the workspace itself. That is
+      // a skill-location rule, not a Unity-project search — the Unity project a
+      // Session talks to still comes only from the workspace and below it.
+      kind: 'exact',
+      path: `${ROUTE_PREFIX}/skills/install`,
+      handler: async (req, res) => {
+        if (!fence(req)) return sendJson(res, 403, { ok: false, error: { code: 'forbidden', message: 'forbidden' } })
+        if (req.method !== 'POST') return methodNotAllowed(res)
+        try {
+          const body = await readJsonBody(req)
+          const workspace = registeredWorkspacePath(webCtx, body.workspacePath)
+          if (!workspace) {
+            throw new HttpError(400, 'workspacePath must name one of the DSH workspaces this Host has registered.')
+          }
+          const projectRoot = dshProjectRoot(workspace)
+          const skillsDir = join(projectRoot, '.dsh', 'skills')
+          // One row per skill on the page, so the route writes one when asked:
+          // an omitted `skillId` keeps the old "write all of them" behaviour.
+          const requested = typeof body.skillId === 'string' ? body.skillId.trim() : ''
+          const targets = requested ? DOMAIN_SKILLS.filter((skill) => skill.id === requested) : DOMAIN_SKILLS
+          if (targets.length === 0) throw new HttpError(400, `Unknown skill: ${requested}`)
+          const written = []
+          const unchanged = []
+          for (const skill of targets) {
+            const content = readDomainSkill(skill.id)
+            const directory = join(skillsDir, skill.id)
+            const file = join(directory, 'SKILL.md')
+            let existing = null
+            try {
+              existing = readFileSync(file, 'utf8')
+            } catch {
+              existing = null
+            }
+            if (existing === content) {
+              unchanged.push(skill.id)
+              continue
+            }
+            mkdirSync(directory, { recursive: true })
+            writeFileSync(file, content, 'utf8')
+            written.push(skill.id)
+          }
+          sendJson(res, 200, {
+            ok: true,
+            workspace,
+            projectRoot,
+            skillsDir,
+            written,
+            unchanged,
+          })
+        } catch (error) {
+          respondError(res, error)
+        }
+      },
+    },
+    {
+      // The activation state of the executable skills for one workspace.
+      //
+      // Read-only: it reports what the plugin remembers compiling, the project
+      // the workspace resolves to, and which packages carry C# at all. It never
+      // opens a connection to the editor, so a closed editor still renders.
+      kind: 'exact',
+      path: `${ROUTE_PREFIX}/skills/state`,
+      handler: async (req, res) => {
+        if (!fence(req)) return sendJson(res, 403, { ok: false, error: { code: 'forbidden', message: 'forbidden' } })
+        if (req.method !== 'GET') return methodNotAllowed(res)
+        try {
+          const url = urlOf(req)
+          const requested = url.searchParams.get('workspacePath') ?? ''
+          const workspace = requested ? registeredWorkspacePath(webCtx, requested) : ''
+          // No workspace is a legitimate state for this page: it still has to
+          // list the skills, just with every download button disabled. A path
+          // that was supplied but is not registered is still a refusal.
+          if (requested && !workspace) {
+            throw new HttpError(400, 'workspacePath must name one of the DSH workspaces this Host has registered.')
+          }
+          const { root, candidates } = workspace
+            ? unityProjectForWorkspace(workspace, url.searchParams.get('projectRoot') ?? '')
+            : { root: null, candidates: [] }
+          const skillsDir = workspace ? join(dshProjectRoot(workspace), '.dsh', 'skills') : null
+          sendJson(res, 200, {
+            ok: true,
+            workspace,
+            projectRoot: root,
+            candidates,
+            skillsDir,
+            packages: DOMAIN_SKILLS.map((skill) => ({
+              id: skill.id,
+              title: skill.title,
+              hint: skill.hint,
+              executable: skill.unity !== undefined,
+              entryTypes: skill.unity?.entryTypes ?? [],
+              partial: skill.unity?.partial ?? null,
+              downloaded: skillsDir !== null && skillIsDownloaded(skillsDir, skill),
+            })),
+            states: root ? activationState(root, env) : [],
+          })
+        } catch (error) {
+          respondError(res, error)
+        }
+      },
+    },
+    {
+      // Compile the executable skills into one project's editor.
+      //
+      // The bridge does the compiling (it ships `compile_skill_package`); this
+      // route only decides which project and remembers the outcome. A missing or
+      // ambiguous project is reported in the payload rather than as a failure of
+      // the whole request — the documentation half may already be written.
+      kind: 'exact',
+      path: `${ROUTE_PREFIX}/skills/activate`,
+      handler: async (req, res) => {
+        if (!fence(req)) return sendJson(res, 403, { ok: false, error: { code: 'forbidden', message: 'forbidden' } })
+        if (req.method !== 'POST') return methodNotAllowed(res)
+        try {
+          const body = await readJsonBody(req)
+          const workspace = registeredWorkspacePath(webCtx, body.workspacePath)
+          if (!workspace) {
+            throw new HttpError(400, 'workspacePath must name one of the DSH workspaces this Host has registered.')
+          }
+          const { root, candidates } = unityProjectForWorkspace(workspace, body.projectRoot)
+          if (!root) {
+            sendJson(res, 200, {
+              ok: true,
+              workspace,
+              projectRoot: null,
+              candidates,
+              packages: [],
+              states: [],
+              message:
+                candidates.length > 1
+                  ? `The workspace holds ${candidates.length} Unity projects; activate one explicitly.`
+                  : 'No Unity project was found in the workspace.',
+            })
+            return
+          }
+          const outcome = await activateSkills(root)
+          recordActivation(root, outcome.packages, env, { generation: outcome.generation })
+          sendJson(res, 200, {
+            ok: true,
+            workspace,
+            projectRoot: root,
+            candidates: [],
+            packages: outcome.packages,
+            states: activationState(root, env),
           })
         } catch (error) {
           respondError(res, error)
@@ -910,8 +1133,96 @@ async function readSubtree(root, path, encoded) {
   return { root: read, target: read?.target ?? null }
 }
 
-/** Path of one field's value in a settings patch; only booleans are writable. */
-function isSwitchPatch(body) {
+/**
+ * Whether the plugin's own copy of one skill is already on disk, byte for byte.
+ *
+ * Content, not mere existence: a file the user edited reads as "not downloaded"
+ * so the button offers to restore the shipped version instead of claiming the
+ * skill is current.
+ */
+function skillIsDownloaded(skillsDir, skill) {
+  try {
+    return readFileSync(join(skillsDir, skill.id, 'SKILL.md'), 'utf8') === readDomainSkill(skill.id)
+  } catch {
+    return false
+  }
+}
+
+/**
+ * The Unity project a workspace's executable skills belong to.
+ *
+ * An explicit `projectRoot` is honoured only when it is a real Unity project
+ * inside the selected workspace. Otherwise the workspace is scanned downwards
+ * (never upwards, matching every other project search here) and a single hit
+ * wins. Several hits are returned as candidates instead of picking one:
+ * compiling into the wrong project would load assemblies into another editor.
+ */
+function unityProjectForWorkspace(workspace, requestedRoot) {
+  if (requestedRoot) {
+    const base = resolve(String(workspace))
+    const root = resolve(String(requestedRoot))
+    const inside = root === base || root.startsWith(`${base}${sep}`)
+    if (!inside || !isUnityProject(root)) {
+      throw new HttpError(400, `projectRoot must be a Unity project inside ${workspace}.`)
+    }
+    return { root, candidates: [] }
+  }
+  const candidates = listProjectCandidates([workspace])
+  return { root: candidates.length === 1 ? candidates[0] : null, candidates }
+}
+
+/**
+ * The registered workspace a request names, or ''.
+ *
+ * The page may only hand back a path the Host's registry already owns, so a
+ * skills install can never copy files into an arbitrary directory. Comparison
+ * normalizes separators and, on Windows, case: the registry keeps realpaths and
+ * the page echoes them, but a hand-edited settings document may not.
+ */
+function registeredWorkspacePath(webCtx, rawPath) {
+  const requested = typeof rawPath === 'string' ? rawPath.trim() : ''
+  if (!requested) return ''
+  let workspaces = []
+  try {
+    workspaces = webCtx.get('workspaceRegistry')?.list?.() ?? []
+  } catch {
+    return ''
+  }
+  const wanted = workspaceKey(requested)
+  const match = workspaces.find((workspace) => workspaceKey(workspace?.path ?? '') === wanted)
+  return match && typeof match.path === 'string' ? match.path : ''
+}
+
+function workspaceKey(value) {
+  const text = String(value ?? '').trim()
+  if (!text) return ''
+  const normalized = resolve(text).replaceAll('\\', '/').replace(/\/+$/, '')
+  return process.platform === 'win32' ? normalized.toLowerCase() : normalized
+}
+
+/**
+ * The DSH project root for a workspace: the nearest ancestor holding `.git`.
+ *
+ * This mirrors `@deepseek-ai/dsh-skill-filesystem`'s `findProjectRoot`; without
+ * it a skill written under a workspace that sits inside a repository would land
+ * somewhere DSH never scans. It is unrelated to the Unity-project search, which
+ * is deliberately downwards-only.
+ */
+function dshProjectRoot(start) {
+  const origin = resolve(String(start))
+  let current = origin
+  for (;;) {
+    // `.git` is a directory in a normal checkout and a file in a worktree or
+    // submodule; both mark the project root.
+    if (existsSync(join(current, '.git'))) return current
+    const parent = dirname(current)
+    if (parent === current) return origin
+    current = parent
+  }
+}
+
+/** Whether a settings patch names only known keys, with values of their stored type. */
+function isSettingsPatch(body) {
   if (!body || typeof body !== 'object' || Array.isArray(body)) return false
   for (const key of Object.keys(body)) {
     if (key !== 'features' && key !== 'preferences') return false
@@ -920,8 +1231,15 @@ function isSwitchPatch(body) {
   for (const section of sections) {
     if (section === undefined) continue
     if (!section || typeof section !== 'object' || Array.isArray(section)) return false
-    for (const value of Object.values(section)) {
-      if (typeof value !== 'boolean') return false
+  }
+  for (const [key, value] of Object.entries(body.features ?? {})) {
+    if (typeof value !== 'boolean') return false
+  }
+  for (const [key, value] of Object.entries(body.preferences ?? {})) {
+    if (STRING_PREFERENCE_KEYS.includes(key)) {
+      if (typeof value !== 'string') return false
+    } else if (typeof value !== 'boolean') {
+      return false
     }
   }
   // A patch that only names keys outside the known set would silently do

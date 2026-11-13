@@ -44,6 +44,7 @@ import { formatSetup, inspectSetup } from './setup.js'
 import { clampExecuteTimeout, EDITOR_STATUS_DISCONNECTED, EXECUTE_IDLE_LIMIT_MS } from './protocol.js'
 import { beginUndoCheckpoint, endUndoCheckpoint, recordWrite } from './undo.js'
 import { recompile, readReloadState, assertRecompileableStatus } from './recompile.js'
+import { ensureSkillActivation } from './skills/activation.js'
 import { formatSceneTree, parseTree, readRequest, searchRequest, searchSceneObjects } from './scene.js'
 import {
   BATCH_LIMIT,
@@ -316,6 +317,12 @@ const unityExecute = {
       const state = await readEditorStatus(client)
       if (!state.connected) return failure(`Unity Editor not connected${state.error ? `: ${state.error}` : ''}.`)
       assertRequestedStatus(requested, state.status)
+
+      // A domain reload (or an editor restart) clears the editor's skill-assembly
+      // registry. Recompile the installed skills before a snippet that may call
+      // `Locus.Skills`; this is a no-op until the settings page activated them
+      // once for this project, and one cheap request afterwards.
+      await ensureSkillActivation(client, projectRoot).catch(() => {})
 
       const owner = `dsh-${process.pid}-${randomUUID()}`
       const session = args.readonly === true ? null : await openEditSession(target, owner)

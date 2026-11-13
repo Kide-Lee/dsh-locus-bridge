@@ -101,14 +101,26 @@ test('non-boolean and unknown switches are not coerced', () => {
   // silently switch one off. The default is the only honest answer.
   const settings = normalizeSettings({
     features: { unity: 'off', csharp: 0, preview: false, nonsense: true },
-    preferences: { frameCache: 'no', other: 1 },
+    preferences: { frameCache: 'no', workspacePath: 42, other: 1 },
   })
   assert.equal(settings.features.unity, true)
   assert.equal(settings.features.csharp, true)
   assert.equal(settings.features.preview, false)
   assert.equal('nonsense' in settings.features, false)
   assert.equal(settings.preferences.frameCache, true)
-  assert.deepEqual(Object.keys(settings.preferences), ['frameCache'])
+  // A path is the one string-valued preference; a number must fall back to the
+  // default rather than being stringified into a directory that would be probed.
+  assert.equal(settings.preferences.workspacePath, '')
+  assert.equal(settings.preferences.unityProject, '')
+  assert.deepEqual(Object.keys(settings.preferences), ['frameCache', 'workspacePath', 'unityProject'])
+})
+
+test('a workspace path round-trips and survives a hand-edited sibling', (t) => {
+  const env = home(t)
+  saveSettings({ preferences: { workspacePath: 'E:\\proj' } }, env)
+  assert.equal(readSettings(env).preferences.workspacePath, 'E:\\proj')
+  saveSettings({ features: { unity: false } }, env)
+  assert.equal(readSettings(env).preferences.workspacePath, 'E:\\proj', 'a feature write keeps the selection')
 })
 
 test('a patch cannot invent a switch key', (t) => {
