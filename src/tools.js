@@ -10,6 +10,7 @@
 // Tool set:
 //   unity_status        connection + editor state
 //   unity_execute       arbitrary C# snippet (the escape hatch)
+//   unity_run_states    C# state machine driven across Editor frames
 //   unity_play_mode     Play/Edit mode convergence
 //   unity_console_log   Console entries
 //   unity_recompile     compile + domain reload + convergence
@@ -38,6 +39,11 @@ import {
   readEditorStatus,
 } from './execute.js'
 import { formatStatus } from './format.js'
+import {
+  RUN_STATES_REQUEST_TIMEOUT_MS,
+  buildRunStatesRequest,
+  rewriteRunStatesOutput,
+} from './run-states.js'
 import { LocusError } from './locus-client.js'
 import { playModeMessage, setPlayMode } from './play-mode.js'
 import { formatSetup, inspectSetup } from './setup.js'
@@ -253,7 +259,8 @@ const unityExecute = {
     '`await ctx.WaitSeconds(0.1)`. Do not call `ExecuteAsync(...)` yourself: the bridge already wraps this body in it, ' +
     'and a nested `ExecuteAsync(async (ctx, ct) => …)` call fails with CS7036. Use ctx.WaitFrame()/WaitFrames/' +
     'WaitSeconds to yield between frames. Nested functions are not ' +
-    'at the top level: call them with ().\n\n' +
+    'at the top level: call them with (). Use `return null;` for an early return — a bare `return;` is ' +
+    'CS0126 because the body returns Task<object>.\n\n' +
     `Timing: code between awaits holds Unity's main thread and freezes the Editor until it returns or awaits. Locus ` +
     `stops a snippet after ${EXECUTE_IDLE_LIMIT_MS / 1000}s with no print/printJson/ctx.Progress output, including ` +
     'inside one long await; split long work into chunks that print or call ctx.Progress, and long waits into shorter ' +
@@ -275,7 +282,8 @@ const unityExecute = {
       type: 'boolean',
       description:
         'Whether the code only observes state. Use true only when it does not change Unity objects, assets, scenes, ' +
-        'project settings, editor state, or files.',
+        'project settings, editor state, project files, or other filesystem content. Temporary objects (an ' +
+        'instantiated prefab, a temporary Camera or Canvas) count as writes even when nothing is saved.',
     },
     request_editor_status: {
       type: 'string',
@@ -356,6 +364,135 @@ const unityExecute = {
         return { output: 'Execution cancelled by the caller; Unity snippet stopped.', cancelled: true, maxMainThreadBlockedMs: 0 }
       }
       return failure(asToolError(error).message)
+    }
+  },
+}
+
+// ─── unity_run_states ───────────────────────────────────────────────────────
+
+const unityRunStates = {
+  name: 'unity_run_states',
+  description:
+    'Run a C# state machine across Unity Editor frames for runtime debugging or inspection.\n\n' +
+    'request_editor_status selects the required state; the live editor must already match it (use ' +
+    'unity_play_mode first). Runs have no idle-output watchdog (unlike unity_execute), but the native ' +
+    "broker's 10-minute request deadline still applies, so keep long observations shorter than that. " +
+    'Only one run_states session can run at a time; a second call fails until the first finishes.\n\n' +
+    "Each state has variables created once per run and shared by that state's start/update/end. start runs " +
+    'on entry, update once per awake frame, and end before leaving. Returning from update already yields a ' +
+    'frame. Keep main-thread snippets short; avoid blocking waits and polling loops.\n\n' +
+    'Context:\n' +
+    '- ctx.Print(value) records findings. ctx.Done(message) or Done() succeeds; ctx.Fail(message) fails.\n' +
+    '- ctx.Goto(name) changes state. ctx.Sleep(frames) ends the tick and skips that many future update ' +
+    'ticks; use it for intentional throttling.\n' +
+    '- ctx.Global<T>(key, initialValue) returns a shared handle with Value; initialization happens only ' +
+    'for a missing key. The key-only overload uses default(T). SetGlobal/GetGlobal<T>/HasGlobal/' +
+    'RemoveGlobal manage shared values; Set/Get<T>/Has/Remove are aliases.\n' +
+    '- ctx.PromptUser(token, message) and ClearPrompt(token) show/clear non-blocking hints; verify user ' +
+    'actions through Unity state.\n' +
+    '- StateName, TotalFrames, ElapsedFramesInState, TotalSeconds, and ElapsedSecondsInState expose timing.\n' +
+    '- ctx.Profiler provides metric discovery, bounded CPU/GPU/memory/subsystem sampling, baseline comparison, ' +
+    'frame hierarchy reads and memory snapshots; see the profiler skill for capture details.\n\n' +
+    'Print output up to 100000 estimated tokens is returned inline. Larger output up to 1000000 estimated tokens ' +
+    'is saved under Library/Locus/RunStates and reported as result_file; larger output is not saved. ' +
+    'Private/internal access needs the Locus compile server, so this bridge uses the editor\'s in-process ' +
+    `Roslyn compiler and does not expose enable_non_public_access. ${CONNECTION_DESCRIPTION}`,
+  parameters: {
+    project_path: PROJECT_PATH,
+    request_editor_status: {
+      type: 'string',
+      enum: ['editing', 'playing', 'playing_paused'],
+      description: 'Required Unity Editor state; must match the live status before the run starts.',
+      required: true,
+    },
+    initial_state: {
+      type: 'string',
+      description: 'Name of the first state to enter.',
+      required: true,
+    },
+    states: {
+      type: 'array',
+      description: 'One or more C# states. Names must be unique; initial_state must name one of them.',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          name: {
+            type: 'string',
+            description: 'Unique state name.',
+          },
+          variables: {
+            type: 'string',
+            description:
+              "Optional C# local declarations shared by this state's start, update, and end snippets. " +
+              'Other states cannot read these locals. This snippet has no ctx parameter.',
+          },
+          start: {
+            type: 'string',
+            description: 'Optional C# code executed when entering this state.',
+          },
+          update: {
+            type: 'string',
+            description: 'C# code executed every Unity frame while this state is awake.',
+          },
+          end: {
+            type: 'string',
+            description: 'Optional C# code executed before leaving this state or finishing.',
+          },
+        },
+      },
+      required: true,
+    },
+  },
+  output: {
+    schema: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        text: { type: 'string' },
+      },
+    },
+    render: (_args, value) => [{ type: 'text', text: value.text }],
+  },
+  async execute(args, exec) {
+    const projectRoot = resolveProjectRoot(args.project_path, exec)
+    const target = describeTarget({ projectRoot })
+    let payload
+    try {
+      payload = buildRunStatesRequest(args)
+    } catch (error) {
+      return textFailure(error.message)
+    }
+
+    try {
+      const client = await getClient(target)
+      const state = await readEditorStatus(client)
+      if (!state.connected) {
+        return textFailure(`Unity Editor not connected${state.error ? `: ${state.error}` : ''}.`)
+      }
+      assertRequestedStatus(payload.request_editor_status, state.status)
+
+      // `ctx.Profiler` lives in the skill assemblies, exactly as it does for
+      // unity_execute; compile them on first use rather than failing the run.
+      await ensureSkillActivation(client, projectRoot).catch(() => {})
+
+      // Upstream does not wrap run_states in an edit session: this is an
+      // observation harness, and holding DisallowAutoRefresh for a long run
+      // would stall asset imports for its whole duration.
+      const envelope = await client.request('run_states', JSON.stringify(payload), {
+        timeoutMs: RUN_STATES_REQUEST_TIMEOUT_MS,
+      })
+      const body = (envelope.ok ? envelope.message : envelope.error) ?? ''
+      let text
+      try {
+        text = await rewriteRunStatesOutput(projectRoot, body)
+      } catch (error) {
+        return textFailure(error.message)
+      }
+      if (!envelope.ok) return textFailure(text)
+      return { text }
+    } catch (error) {
+      return textFailure(asToolError(error).message)
     }
   },
 }
@@ -1609,6 +1746,7 @@ function formatSceneSetResult(output) {
 export const toolDefinitions = [
   unityStatus,
   unityExecute,
+  unityRunStates,
   unityPlayMode,
   unityConsoleLog,
   unityRecompile,

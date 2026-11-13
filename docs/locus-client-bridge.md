@@ -81,7 +81,7 @@ Locus 不是「Unity 做服务端、桌面做客户端」的普通前后端：
 
 ### 2.6 其他好用的 C# 命令（按需接入）
 
-`get_console_text` / `unity_get_console_log`（`{level|levels, limit}` → 合并后的 Console 条目）、`exit_play_mode`、`set_editor_status`、`import_assets`（`\n` 分隔路径）、`begin_edit_session` / `end_edit_session`（owner 字符串，抑制 Auto Refresh，避免磁盘改动在编辑中途触发导入/编译）、`search_scene_objects`、`property_tree_read`（`{target, maxDepth, maxArrayItems}`）及其 write/apply/discover、`asset_api`（含 array_insert/remove/move/resize 等）、`read_yaml` / `search_yaml`、`capture_viewport` / `capture_spatial_snapshot`、`asset_thumbnail`、`hot_reload_*`（Locus 热更，涉及 Detour，不建议首版）、`run_states`（逐帧反射采样）。
+`get_console_text` / `unity_get_console_log`（`{level|levels, limit}` → 合并后的 Console 条目）、`exit_play_mode`、`set_editor_status`、`import_assets`（`\n` 分隔路径）、`begin_edit_session` / `end_edit_session`（owner 字符串，抑制 Auto Refresh，避免磁盘改动在编辑中途触发导入/编译）、`search_scene_objects`、`property_tree_read`（`{target, maxDepth, maxArrayItems}`）及其 write/apply/discover、`asset_api`（含 array_insert/remove/move/resize 等）、`read_yaml` / `search_yaml`、`capture_viewport` / `capture_spatial_snapshot`、`asset_thumbnail`、`hot_reload_*`（Locus 热更，涉及 Detour，不建议首版）、`run_states`（C# 状态机逐帧驱动）。
 
 ---
 
@@ -263,26 +263,30 @@ ctx.tools.register(defineTool({
 
 ## 9. 实现状态
 
-插件位于仓库根目录（`src/`、`test/`、`scripts/`，见 [`README.md`](../README.md)），共 7 个工具：
+插件位于仓库根目录（`src/`、`test/`、`scripts/`，见 [`README.md`](../README.md)），共 11 个工具：
 
 | 工具 | 状态 | 实现要点 |
 |---|---|---|
 | `unity_status` | 完成 | `status` + `bridge_capabilities` + `get_reload_state` |
 | `unity_execute` | 完成 | 状态闸门、edit session、`execute_code` + 250ms 进度轮询、`cancel_execute_code`、有界清理 |
+| `unity_run_states` | 完成 | 状态闸门、`run_states` 状态机；无空闲看门狗；输出 ≤100k token 内联、100k–1M 落盘 `Library/Locus/RunStates`、>1M 报错 |
 | `unity_play_mode` | 完成 | `set_editor_status` + 30s 收敛轮询 |
 | `unity_console_log` | 完成 | `unity_get_console_log` |
 | `unity_recompile` | 完成 | `request_recompile` → 断线 → 重连 → 轮询 `get_compile_result`；接管 `recompile_in_progress`、识别 `superseded`/`error` |
+| `unity_test` | 完成 | `unity_test_list` / `unity_test_start` → 250ms `unity_test_status` →（取消）`unity_test_cancel` |
 | `unity_asset` | 完成 | `asset_api` read / apply_batch（revision 守卫、值编码含对象引用）/ undo（反向批次）/ disk_reload |
+| `unity_asset_graph` | 完成 | 生成 `execute_code`，按 `.meta` GUID 比对序列化字段 |
+| `unity_capture` | 完成 | `capture_viewport` + `attachments.saveImage`（内联 `ImageBlock`） |
 | `unity_scene` | 完成 | `search_scene_objects`、`property_tree_read`、原子 set（生成 `execute_code`：解析 → Undo → 写属性 → 保存场景 → 打印 JSON） |
 
 验证：
-- 45 个测试（`node --test --test-concurrency=1 "test/*.test.js"`），假 broker 覆盖重连、接管编译、取消、超时、断线、资产修订守卫/undo、场景 set、edit session 顺序、Console 渲染。
+- 397 个测试（`node --test --test-concurrency=1 "test/*.test.js"`），假 broker 覆盖重连、接管编译、取消、超时、断线、资产修订守卫/undo、场景 set、edit session 顺序、Console 渲染、run_states 状态机与输出落盘。
 - 工具 schema 同时通过本仓库子集校验（`dump-tools.mjs`）与真实 DSH 的 `defineTool`/`validateArgs` 校验（`validate-dsh-tools.mjs`）。
 - `scripts/typecheck.mjs` 做跨模块 import/调用一致性检查（无 TypeScript）。
 
 仍待实机确认（Windows + Unity）：Win32 管道读写、worker 阻塞读循环、失焦心跳、真实 `request_recompile` 跨重载时序，用 `node scripts/live-smoke.mjs --project <项目>`（可加 `--recompile`）。
 
-未实现：Locus compile server 路径（`enable_non_public_access`、`execute_loaded` 的 sidecar 编译）、hot-reload 系命令、`run_states` 逐帧采样、`/view` 与知识系统。
+未实现：Locus compile server 路径（`enable_non_public_access`、`execute_loaded` 的 sidecar 编译）、hot-reload 系命令、`/view` 与知识系统。
 （`capture_viewport` 已实现为 `unity_capture`；C# 语义分析已实现，见下节。）
 
 ## C# 语义分析（独立于 broker）

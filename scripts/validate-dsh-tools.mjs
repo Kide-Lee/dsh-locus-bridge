@@ -74,6 +74,19 @@ function sampleArgs(name) {
         request_editor_status: 'editing',
         timeout: 600000,
       }
+    case 'unity_run_states':
+      return {
+        request_editor_status: 'editing',
+        initial_state: 'watch',
+        states: [
+          {
+            name: 'watch',
+            variables: 'int frames = 0;',
+            start: 'ctx.Print("entered");',
+            update: 'frames++; if (frames > 2) ctx.Done("done");',
+          },
+        ],
+      }
     case 'unity_play_mode':
       return { mode: 'edit' }
     case 'unity_console_log':

@@ -21,7 +21,7 @@ Use for slow frames, stutters, allocations, memory growth, rendering load, simul
 
 Keep sampling and presentation separate. Never read `GetSampleName` for every sample during recording: the strings generate `GC.Alloc` samples in the next frame and can amplify history indefinitely. Match Marker IDs instead. Stop recording before resolving names, building hierarchies, calculating summaries, printing or exporting. Discard measurements already contaminated by a sampler; rerun after warmup for a final baseline.
 
-All helpers are available through **`ctx.Profiler` in both `unity_execute` and `unity_run_states`**. Captures belong to the current call and are cleaned up on success, failure or cancellation. Save before returning. Use `readonly: false` when starting captures or writing artifacts; discovery and reading buffered frames can be read-only. Standalone/remote Player capture is outside this helper's scope.
+All helpers are available through **`ctx.Profiler` in both `unity_execute` and `unity_run_states`**. Captures belong to the current call and are cleaned up on success, failure or cancellation. Save before returning. On `unity_execute`, use `readonly: false` when starting captures or writing artifacts; discovery and reading buffered frames can be read-only. `unity_run_states` has no `readonly` switch — declare intent in the state code and keep observation runs free of writes where possible. Standalone/remote Player capture is outside this helper's scope.
 
 ## unity_execute
 

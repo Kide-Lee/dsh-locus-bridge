@@ -29,7 +29,7 @@ dsh-locus-bridge 是一个 **DeepSeek harness 插件**。它能让 DSH 直接扮
 dsh plugin --profile <profile> add github:Kide-Lee/dsh-locus-bridge
 ```
 
-重启 DSH 后，模型会看到 10 个以 `unity_` 开头的工具，外加 6 个 `code_*` C# 分析工具（可用
+重启 DSH 后，模型会看到 11 个以 `unity_` 开头的工具，外加 6 个 `code_*` C# 分析工具（可用
 `DSH_LOCUS_CSHARP=0` 关闭后者）。
 
 ## 工具
@@ -38,6 +38,7 @@ dsh plugin --profile <profile> add github:Kide-Lee/dsh-locus-bridge
 |---|---|---|
 | `unity_status` | 连接检查、编辑器状态（editing/playing/playing_paused）、打开的场景、capabilities、域重载状态；连不上时自动诊断，缺插件时给出安装命令 | `status` / `bridge_capabilities` / `get_reload_state` |
 | `unity_execute` | 在 Unity 主线程编译并执行 C# 方法体（`print`/`printJson`/`ctx.Progress`/`ctx.WaitFrame`），逃生口 | `status` → `begin_edit_session` → `execute_code` + 250ms `execute_code_progress` →（取消）`cancel_execute_code` → `end_edit_session` |
+| `unity_run_states` | 用 C# 状态机跨帧驱动 Unity（`start`/`update`/`end`），长观察没有 30 秒空闲看门狗；输出 ≤100k token 内联，100k–1M 落盘 `Library/Locus/RunStates`，更大报错 | `status` → `run_states` |
 | `unity_play_mode` | 切换到 Play/Edit 模式并等待生效 | `status` → `set_editor_status` → 轮询 `status` |
 | `unity_console_log` | 读取 Unity Console（按级别合并去重） | `unity_get_console_log` |
 | `unity_recompile` | 编译 + 域重载 + 跨断线等待收敛；`editor_status` 必填且须与实况一致；`sync: none/targeted/full` 控制资产导入 | `request_recompile` → 断线 → 重连 → 轮询 `get_compile_result` |

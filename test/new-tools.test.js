@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -16,6 +16,7 @@ import {
   parseTestSnapshot,
 } from '../src/test-runner.js'
 import { buildCaptureRequest, parseCapture } from '../src/capture.js'
+import { rewriteRunStatesOutput } from '../src/run-states.js'
 import { readAssetGuid, projectRelative, assertSearchableAsset } from '../src/asset-graph.js'
 import {
   batchBody,
@@ -581,6 +582,7 @@ test('every declared output property is allowed by its own schema', () => {
   const returns = {
     unity_status: { text: '', connected: false, status: '', scenes: [], pipe: '' },
     unity_execute: { output: '', cancelled: false, maxMainThreadBlockedMs: 0 },
+    unity_run_states: { text: '' },
     unity_play_mode: { text: '', status: '' },
     unity_console_log: { text: '' },
     unity_recompile: { text: '', status: '', operationId: '', elapsedMs: 0 },
@@ -604,4 +606,174 @@ test('every declared output property is allowed by its own schema', () => {
       assert.ok(declared.includes(key), `${definition.name} returns "${key}" but its schema does not declare it`)
     }
   }
+})
+
+
+// ── unity_run_states ────────────────────────────────────────────────────────
+
+const RUN_STATES_BODY = [
+  'status: ok',
+  'final_state: watch',
+  'frames: 12',
+  'duration_ms: 250',
+  'print_lines: 2',
+  'print_tokens_estimate: 4',
+  'prints:',
+  'hello',
+  'world',
+  '',
+].join('\n')
+
+function runStatesReply(socket, request, body, ok = true) {
+  socket.write(
+    JSON.stringify({ type: 'response', reply_to: request.id, ok, ...(ok ? { message: body } : { error: body }) }) +
+      '\n',
+  )
+  return true
+}
+
+test('unity_run_states sends the state machine and renders its result', async () => {
+  const seen = []
+  await withEditor(
+    async () => {
+      const result = await tools.unity_run_states.execute(
+        {
+          request_editor_status: 'editing',
+          initial_state: 'start',
+          states: [
+            {
+              name: 'start',
+              variables: 'int frames = 0;',
+              start: 'ctx.Print("entered");',
+              update: 'frames++; if (frames > 2) ctx.Done("done");',
+            },
+          ],
+        },
+        ctx(),
+      )
+      assert.equal(result.text, RUN_STATES_BODY)
+      const request = seen.find((entry) => entry.type === 'run_states')
+      assert.deepEqual(request.message, {
+        request_editor_status: 'editing',
+        initial_state: 'start',
+        states: [
+          {
+            name: 'start',
+            variables: 'int frames = 0;',
+            start: 'ctx.Print("entered");',
+            update: 'frames++; if (frames > 2) ctx.Done("done");',
+          },
+        ],
+      })
+      // run_states is an observation harness; upstream does not open an edit
+      // session for it, so neither do we.
+      assert.equal(seen.some((entry) => entry.type === 'begin_edit_session'), false)
+    },
+    {
+      onMessage: (request, _helpers, socket) => {
+        if (request.type === 'run_states') {
+          seen.push({ type: request.type, message: request.type === 'run_states' ? JSON.parse(request.message) : null })
+        }
+        if (request.type === 'run_states') return runStatesReply(socket, request, RUN_STATES_BODY)
+        return undefined
+      },
+    },
+  )
+})
+
+test('unity_run_states validates the state machine before connecting', async () => {
+  const cases = [
+    [{ request_editor_status: 'editing', initial_state: 'a', states: [] }, /at least one state/],
+    [{ request_editor_status: 'editing', initial_state: 'a', states: [{ name: 'b', update: 'x' }] }, /not one of the declared states/],
+    [{ request_editor_status: 'editing', initial_state: 'a', states: [{ name: 'a', update: '' }] }, /states\[0\]\.update/],
+    [
+      {
+        request_editor_status: 'editing',
+        initial_state: 'a',
+        states: [
+          { name: 'a', update: 'x' },
+          { name: 'a', update: 'y' },
+        ],
+      },
+      /Duplicate state name/,
+    ],
+  ]
+  for (const [args, pattern] of cases) {
+    const result = await tools.unity_run_states.execute(args, ctx())
+    assert.match(result.text, pattern)
+  }
+})
+
+test('unity_run_states refuses a mismatched editor state before sending', async () => {
+  const seen = []
+  await withEditor(
+    async () => {
+      const result = await tools.unity_run_states.execute(
+        { request_editor_status: 'playing', initial_state: 'a', states: [{ name: 'a', update: 'ctx.Done();' }] },
+        ctx(),
+      )
+      assert.match(result.text, /^Error: Unity Editor status is "editing"/)
+      assert.equal(seen.some((entry) => entry.type === 'run_states'), false)
+    },
+    {
+      onMessage: (request) => {
+        seen.push(request)
+        return undefined
+      },
+    },
+  )
+})
+
+test('unity_run_states surfaces an error result as tool text', async () => {
+  const body = 'status: error\nfinal_state: a\nframes: 1\nduration_ms: 2\nmessage: boom\n'
+  await withEditor(
+    async () => {
+      const result = await tools.unity_run_states.execute(
+        { request_editor_status: 'editing', initial_state: 'a', states: [{ name: 'a', update: 'ctx.Fail("boom");' }] },
+        ctx(),
+      )
+      assert.match(result.text, /^Error: status: error/)
+      assert.match(result.text, /message: boom/)
+    },
+    {
+      onMessage: (request, _helpers, socket) =>
+        request.type === 'run_states' ? runStatesReply(socket, request, body, false) : undefined,
+    },
+  )
+})
+
+test('run_states large output is saved and summarized', async () => {
+  const body = [
+    'status: ok',
+    'final_state: a',
+    'frames: 1',
+    'duration_ms: 2',
+    'print_lines: 1',
+    'print_tokens_estimate: 100001',
+    'prints:',
+    'x',
+    '',
+  ].join('\n')
+  const summary = await rewriteRunStatesOutput(PROJECT, body)
+  assert.match(summary, /result_file: /)
+  assert.match(summary, /print_output: too large/)
+  assert.doesNotMatch(summary, /^x$/m)
+  const file = summary.match(/^result_file: (.*)$/m)[1]
+  assert.equal(readFileSync(file, 'utf8'), body)
+})
+
+test('run_states reads size fields only from the header', async () => {
+  const body = [
+    'status: ok',
+    'print_tokens_estimate: 4',
+    'prints:',
+    'print_tokens_estimate: 100001',
+    '',
+  ].join('\n')
+  assert.equal(await rewriteRunStatesOutput(PROJECT, body), body)
+})
+
+test('run_states past the hard limit is refused, not silently truncated', async () => {
+  const body = 'status: ok\nprint_lines: 400000\nprint_tokens_estimate: 1000001\nprint_output: too large\n'
+  await assert.rejects(() => rewriteRunStatesOutput(PROJECT, body), /hard limit of 1000000/)
 })

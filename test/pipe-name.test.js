@@ -119,6 +119,7 @@ test('every tool definition fits the DSH schema subset', () => {
     [
       'unity_status',
       'unity_execute',
+      'unity_run_states',
       'unity_play_mode',
       'unity_console_log',
       'unity_recompile',

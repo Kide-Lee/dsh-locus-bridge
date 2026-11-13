@@ -50,7 +50,7 @@ You can also install straight from GitHub:
 dsh plugin --profile <profile> add github:Kide-Lee/dsh-locus-bridge
 ```
 
-After restarting DSH, the model sees 10 tools whose names start with `unity_`, plus 6 `code_*` C# analysis tools (disable the latter with
+After restarting DSH, the model sees 11 tools whose names start with `unity_`, plus 6 `code_*` C# analysis tools (disable the latter with
 `DSH_LOCUS_CSHARP=0`).
 
 ### Editor prerequisites
@@ -136,6 +136,7 @@ unpacked directory to keep it outside the plugin directory.
 |---|---|---|
 | `unity_status` | Connection check, editor state (editing/playing/playing_paused), open scenes, capabilities, domain reload state; diagnoses a missing package/broker/marker automatically, and prints the install command when the package is absent | `status` / `bridge_capabilities` / `get_reload_state` |
 | `unity_execute` | Compile and execute a C# method body on the Unity main thread (`print`/`printJson`/`ctx.Progress`/`ctx.WaitFrame`), the escape hatch | `status` → `begin_edit_session` → `execute_code` + 250ms `execute_code_progress` → (cancel) `cancel_execute_code` → `end_edit_session` |
+| `unity_run_states` | Drive Unity across frames with a C# state machine (`start`/`update`/`end`) and no 30-second idle watchdog for long observations; output up to 100k tokens is inline, 100k–1M is saved under `Library/Locus/RunStates`, and larger output is refused | `status` → `run_states` |
 | `unity_play_mode` | Switch to Play/Edit mode and wait for it to take effect | `status` → `set_editor_status` → poll `status` |
 | `unity_console_log` | Read the Unity Console (merged and deduplicated by level) | `unity_get_console_log` |
 | `unity_recompile` | Compile + domain reload + wait across the disconnect for convergence; `editor_status` is required and must match the live state; `sync: none/targeted/full` controls asset import | `request_recompile` → disconnect → reconnect → poll `get_compile_result` |
@@ -283,7 +284,7 @@ DSH's Settings has a **Unity bridge** page (`settings.section`, id `dsh-locus-br
 
 | Switch | What turning it off does |
 |---|---|
-| **Unity control** | The ten `unity_*` tools leave the model's tool list (the Host unregisters them; they are not merely hidden) |
+| **Unity control** | The eleven `unity_*` tools leave the model's tool list (the Host unregisters them; they are not merely hidden) |
 | **C# analysis** | The six `code_*` tools leave, and any Roslyn language-server processes already started are closed |
 | **File preview** | The right-Sidebar Unity asset tab is no longer registered, and every Unity-backed `/locus/api` route answers `feature_disabled` |
 
