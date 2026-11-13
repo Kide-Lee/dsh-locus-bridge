@@ -203,6 +203,50 @@ const zh = Object.freeze({
   projectInstallBlocked: '编辑器正开着这个工程，占着插件的程序集文件。请先关闭编辑器再安装。',
   projectInstallDone: '插件已装入。请重新打开 Unity 编辑器，原生桥会在启动时拉起。',
   projectInstallNoPayload: '这个构建没有内置 Locus 插件包，无法自动安装。',
+  settingsWorkspaceGroup: '工作区',
+  settingsWorkspace: '工作区',
+  settingsWorkspaceHint: '选择需要设置的 DSH 工作区',
+  settingsWorkspaceNone: '使用当前会话的工作区',
+  settingsWorkspaceUnavailable: '这个 Host 没有可读取的 DSH 工作区列表。',
+  settingsWorkspaceLoadFailed: '读取工作区失败：{message}',
+  settingsProject: 'Unity 工程',
+  settingsProjectNone: '没有找到 Unity 工程',
+  settingsPlugin: 'Locus 插件',
+  settingsPluginInstalled: '已安装',
+  settingsPluginMissing: '没有插件',
+  settingsPluginOffline: '未打开 Unity',
+  settingsPluginConnectionFailed: '连接失败',
+  settingsPluginConnected: '已连接',
+  settingsPluginInstall: '安装',
+  settingsPluginInstalling: '安装中…',
+  skillsGroup: '领域技能',
+  skillsIntro: '把本插件内置的 Unity 领域技能写入所选工作区的 .dsh/skills：调试器、性能分析、图形诊断、UI Toolkit、Locus View。只保留 DSH 没有对应物的领域知识；写入的是 Markdown 参考，Locus 专有的可执行程序集不包含在内。',
+  skillsInstall: '下载到工作区',
+  skillsInstalling: '写入中…',
+  skillsInstalled: '已写入 {written} 个技能，{unchanged} 个已是最新。',
+  skillsInstalledPath: '位置：{path}',
+  skillsNoWorkspace: '先在上面选择一个工作区。',
+  skillsDownload: '下载',
+  skillsDownloading: '下载中…',
+  skillsDownloaded: '已下载',
+  skillsAlreadyDownloaded: '文件已是最新，无需重写。',
+  skillsInstallFailed: '写入失败：{message}',
+  skillsStateActive: '已激活',
+  skillsStateInactive: '未激活',
+  skillsStateStale: '需重新激活',
+  skillsStateError: '激活失败',
+  skillsActivate: '激活 C# 能力',
+  skillsActivating: '激活中…',
+  skillsProjectRoot: 'Unity 工程：{path}',
+  skillsNoProject: '工作区里没有找到 Unity 工程：文档已写入，但 C# 能力无法激活。',
+  skillsManyProjects: '工作区里有多个 Unity 工程，无法确定激活哪一个。',
+  skillsActivated: '编译 {compiled} 个、复用缓存 {cached} 个技能程序集。',
+  skillsActivationDone: '{id}：{state}',
+  skillsActivationFailed: '{id}：{message}',
+  skillsActivationCompiled: '已编译',
+  skillsActivationCached: '复用缓存',
+  skillsActivationUnavailable: '编辑器未连接',
+  skillsActivationError: '失败',
 })
 
 /** English copy; must carry exactly the same keys as {@link zh}. */
@@ -305,6 +349,50 @@ const en = Object.freeze({
   projectInstallBlocked: 'The editor has this project open and holds the package assemblies. Close the editor before installing.',
   projectInstallDone: 'The plugin is in place. Reopen the Unity Editor; the native bridge starts on launch.',
   projectInstallNoPayload: 'This build carries no bundled Locus package, so it cannot install.',
+  settingsWorkspaceGroup: 'Workspace',
+  settingsWorkspace: 'Workspace',
+  settingsWorkspaceHint: 'Choose the DSH workspace this page configures',
+  settingsWorkspaceNone: 'Use the current Session workspace',
+  settingsWorkspaceUnavailable: 'This Host exposes no readable DSH workspace list.',
+  settingsWorkspaceLoadFailed: 'Could not read the workspaces: {message}',
+  settingsProject: 'Unity project',
+  settingsProjectNone: 'No Unity project found',
+  settingsPlugin: 'Locus plugin',
+  settingsPluginInstalled: 'Installed',
+  settingsPluginMissing: 'Not installed',
+  settingsPluginOffline: 'Unity not open',
+  settingsPluginConnectionFailed: 'Connection failed',
+  settingsPluginConnected: 'Connected',
+  settingsPluginInstall: 'Install',
+  settingsPluginInstalling: 'Installing…',
+  skillsGroup: 'Domain skills',
+  skillsIntro: 'Write the Unity domain skills this plugin ships into the selected workspace’s .dsh/skills: debugger, profiler, graphics diagnostics, UI Toolkit and Locus View. Only the domain knowledge with no DSH equivalent is kept; what is written is Markdown reference — Locus-only executable assemblies are not included.',
+  skillsInstall: 'Download into workspace',
+  skillsInstalling: 'Writing…',
+  skillsInstalled: 'Wrote {written} skill(s); {unchanged} already current.',
+  skillsInstalledPath: 'At {path}',
+  skillsNoWorkspace: 'Select a workspace above first.',
+  skillsDownload: 'Download',
+  skillsDownloading: 'Downloading…',
+  skillsDownloaded: 'Downloaded',
+  skillsAlreadyDownloaded: 'The file is already current.',
+  skillsInstallFailed: 'Could not write the skills: {message}',
+  skillsStateActive: 'Active',
+  skillsStateInactive: 'Not active',
+  skillsStateStale: 'Reactivate',
+  skillsStateError: 'Activation failed',
+  skillsActivate: 'Activate C# capabilities',
+  skillsActivating: 'Activating…',
+  skillsProjectRoot: 'Unity project: {path}',
+  skillsNoProject: 'No Unity project was found in this workspace: the docs were written, but the C# capabilities cannot be activated.',
+  skillsManyProjects: 'This workspace holds several Unity projects, so there is no single project to activate.',
+  skillsActivated: 'Compiled {compiled} and reused {cached} cached skill assemblies.',
+  skillsActivationDone: '{id}: {state}',
+  skillsActivationFailed: '{id}: {message}',
+  skillsActivationCompiled: 'compiled',
+  skillsActivationCached: 'cached',
+  skillsActivationUnavailable: 'editor not connected',
+  skillsActivationError: 'failed',
 })
 
 /** The attached DSH locale service, or null (browser-language fallback). */
@@ -1732,6 +1820,277 @@ export function createLocusAssetPlugin(require) {
   }
 
   /**
+   * A host-style select: a filled trigger plus a floating option list.
+   *
+   * The native `<select>` popup is drawn by the platform (a blue system
+   * highlight), which is exactly the part that made this page look unlike the
+   * rest of Settings. This is the host's own shape — same trigger geometry,
+   * a layered menu with a check on the current option — without importing the
+   * primitives package (it is not part of the shipped runtime).
+   */
+  function SelectMenu({ id, value, options, disabled, onChange, className }) {
+    const [open, setOpen] = useState(false)
+    const wrapRef = useRef(null)
+    const selected = options.find((option) => option.value === value)
+
+    useEffect(() => {
+      if (!open) return undefined
+      const onPointerDown = (event) => {
+        const node = wrapRef.current
+        if (node && event.target instanceof Node && !node.contains(event.target)) setOpen(false)
+      }
+      const onKeyDown = (event) => {
+        if (event.key === 'Escape') setOpen(false)
+      }
+      document.addEventListener('mousedown', onPointerDown, true)
+      document.addEventListener('keydown', onKeyDown, true)
+      return () => {
+        document.removeEventListener('mousedown', onPointerDown, true)
+        document.removeEventListener('keydown', onKeyDown, true)
+      }
+    }, [open])
+
+    return h(
+      'div',
+      { className: `locus-select ${className ?? ''}`.trim(), ref: wrapRef },
+      h(
+        'button',
+        {
+          type: 'button',
+          id,
+          className: 'locus-select-trigger',
+          disabled,
+          'aria-haspopup': 'listbox',
+          'aria-expanded': open ? 'true' : 'false',
+          onClick: () => setOpen((current) => !current),
+        },
+        h('span', { className: 'locus-select-value' }, selected ? selected.label : ''),
+        h('span', { className: 'locus-select-chevron', 'aria-hidden': 'true' }),
+      ),
+      open
+        ? h(
+            'div',
+            { className: 'locus-select-menu', role: 'menu' },
+            h('div', { className: 'locus-select-material', 'aria-hidden': 'true' }),
+            h(
+              'div',
+              { className: 'locus-select-list', role: 'presentation' },
+              options.map((option) =>
+                h(
+                  'button',
+                  {
+                    type: 'button',
+                    key: option.value,
+                    role: 'menuitem',
+                    'data-label': option.label,
+                    'aria-selected': option.value === value ? 'true' : 'false',
+                    className: 'locus-select-option',
+                    onClick: () => {
+                      setOpen(false)
+                      if (option.value !== value) onChange(option.value)
+                    },
+                  },
+                  h('span', { className: 'locus-select-option-label' }, option.label),
+                  option.value === value
+                    ? h(
+                        'svg',
+                        {
+                          className: 'locus-select-check',
+                          viewBox: '0 0 16 16',
+                          width: 14,
+                          height: 14,
+                          'aria-hidden': 'true',
+                        },
+                        h('path', {
+                          d: 'M3.5 8.5l3 3 6-7',
+                          fill: 'none',
+                          stroke: 'currentColor',
+                          'stroke-width': 1.5,
+                          'stroke-linecap': 'round',
+                          'stroke-linejoin': 'round',
+                        }),
+                      )
+                    : null,
+                ),
+              ),
+            ),
+          )
+        : null,
+    )
+  }
+
+  /**
+   * The workspace picker: the DSH workspaces this page may scan.
+   *
+   * The list is loaded by the page and handed in, so the section headings can
+   * name the selected workspace without a second request. The value is the
+   * workspace's canonical path, which is also what the projects and skills
+   * routes accept.
+   */
+  function WorkspaceRow({ value, busy, onChange, workspaces, error }) {
+    const options = workspaces ?? []
+    // A stored path that is no longer registered must not render as a selection
+    // the Host would ignore; it reads as "nothing selected" instead.
+    const known = value ? options.some((workspace) => workspace.path === value) : false
+    return h(
+      'div',
+      { className: 'locus-settings-row' },
+      h(
+        'div',
+        { className: 'locus-settings-row-text' },
+        h('label', { className: 'locus-settings-row-label', htmlFor: 'locus-workspace-select' }, t('settingsWorkspace')),
+        h('div', { className: 'locus-settings-row-hint' }, t('settingsWorkspaceHint')),
+        error
+          ? h(
+              'div',
+              { className: 'locus-settings-row-error' },
+              t('settingsWorkspaceLoadFailed', { message: String(error.message ?? error) }),
+            )
+          : null,
+        workspaces !== null && options.length === 0 && !error
+          ? h('div', { className: 'locus-settings-row-hint' }, t('settingsWorkspaceUnavailable'))
+          : null,
+      ),
+      h(
+        'div',
+        { className: 'locus-settings-row-control locus-settings-select-control' },
+        h(SelectMenu, {
+          id: 'locus-workspace-select',
+          value: known ? value : '',
+          disabled: busy || workspaces === null,
+          onChange,
+          options: [
+            { value: '', label: t('settingsWorkspaceNone') },
+            ...options.map((workspace) => ({
+              value: workspace.path,
+              // Only the workspace's own name: the path and the projects inside
+              // it are not this picker's business.
+              label:
+                workspace.title || workspace.path.split(/[\\/]/).filter(Boolean).pop() || workspace.path,
+            })),
+          ],
+        }),
+      ),
+    )
+  }
+
+  /**
+   * The "domain skills" panel: write the bundled Unity knowledge into a
+   * workspace's DSH skill root.
+   *
+   * The button is the only action, and it is disabled until a workspace is
+   * selected: the routes refuse an unregistered path, so offering the click
+   * would only produce an error the page could have predicted.
+   */
+  function SkillsPanel({ workspace }) {
+    const [info, setInfo] = useState(null)
+    const [error, setError] = useState(null)
+    const [busy, setBusy] = useState('')
+    const [notice, setNotice] = useState(null)
+
+    const load = useCallback(async () => {
+      try {
+        // Without a workspace the Host still lists the skills (every button is
+        // disabled); that keeps the page's shape stable while the user picks
+        // one from the dropdown above.
+        const payload = await callApi('skills/state', { params: workspace ? { workspacePath: workspace } : {} })
+        setInfo(payload)
+        setError(null)
+      } catch (failure) {
+        setInfo(null)
+        setError(failure)
+      }
+    }, [workspace])
+
+    useEffect(() => {
+      void load()
+    }, [load])
+
+    const download = useCallback(async (skill) => {
+      setBusy(skill.id)
+      setNotice(null)
+      try {
+        const payload = await callApi('skills/install', {
+          method: 'POST',
+          body: { workspacePath: workspace, skillId: skill.id },
+        })
+        // Two of the five carry C#: writing their docs also compiles them into
+        // the editor. A failed compile is reported separately; the document is
+        // already on disk and must not read as a failed download.
+        if (skill.executable) {
+          try {
+            await callApi('skills/activate', { method: 'POST', body: { workspacePath: workspace } })
+          } catch (failure) {
+            setNotice({ kind: 'error', text: t('skillsInstallFailed', { message: String(failure?.message ?? failure) }) })
+          }
+        }
+        if ((payload.written ?? []).length === 0) {
+          setNotice({ kind: 'ok', text: t('skillsAlreadyDownloaded') })
+        }
+        await load()
+      } catch (failure) {
+        setNotice({ kind: 'error', text: t('skillsInstallFailed', { message: String(failure?.message ?? failure) }) })
+      } finally {
+        setBusy('')
+      }
+    }, [workspace, load])
+
+    const packages = info?.packages ?? []
+    const rows = packages.map((skill) =>
+      h(
+        'div',
+        { className: 'locus-settings-row', key: skill.id },
+        h(
+          'div',
+          { className: 'locus-settings-row-text' },
+          h('div', { className: 'locus-settings-row-label' }, skill.title),
+          skill.hint ? h('div', { className: 'locus-settings-row-hint' }, skill.hint) : null,
+        ),
+        h(
+          'div',
+          { className: 'locus-settings-row-control' },
+          skill.downloaded
+            ? h('span', { className: 'locus-skill-state is-downloaded' }, t('skillsDownloaded'))
+            : h(
+                'button',
+                {
+                  type: 'button',
+                  className: 'locus-asset-btn',
+                  disabled: busy !== '' || !workspace,
+                  onClick: () => void download(skill),
+                },
+                busy === skill.id ? t('skillsDownloading') : t('skillsDownload'),
+              ),
+        ),
+      ),
+    )
+
+    return h(
+      'div',
+      { className: 'locus-settings-block' },
+      rows,
+      error
+        ? h(
+            'div',
+            { className: 'locus-asset-error' },
+            h('div', { className: 'locus-asset-error-line' }, String(error.message ?? error)),
+          )
+        : null,
+      !workspace ? h('div', { className: 'locus-settings-note' }, t('skillsNoWorkspace')) : null,
+      notice
+        ? h(
+            'div',
+            {
+              className: notice.kind === 'ok' ? 'locus-project-notice' : 'locus-project-notice is-error',
+              role: notice.kind === 'ok' ? 'status' : 'alert',
+            },
+            notice.text,
+          )
+        : null,
+    )
+  }
+
+  /**
    * The "Unity projects" panel: one row per project, with its bridge state.
    *
    * Three states, and the wording matters as much as the colour:
@@ -1746,34 +2105,49 @@ export function createLocusAssetPlugin(require) {
    * editor: the Host refuses that case and this page explains why instead of
    * hiding the refusal.
    */
-  function ProjectsPanel({ roots, sessionId }) {
+  function ProjectRow({ roots, sessionId, workspace, savedProject, onSelect }) {
     const [state, setState] = useState({ loading: true, projects: [], error: null })
-    const [installing, setInstalling] = useState('')
+    const [installing, setInstalling] = useState(false)
     const [notice, setNotice] = useState(null)
 
     const scan = useCallback(async () => {
       setState((current) => ({ ...current, loading: true }))
       try {
-        // No session and no roots: the Host falls back to its registered
-        // workspaces, which is the only honest source a Settings page has (it
-        // belongs to no Session).
-        const params = roots && roots.length > 0 ? { roots: roots.join(',') } : { sessionId }
+        // A selected workspace is the page's own answer to "where do I look",
+        // and it outranks the Session's workspace list: the Settings page
+        // belongs to no Session. Without a selection the panel keeps the
+        // earlier behaviour (Session roots, then the Host's registered
+        // workspaces) — never an ancestor or sibling directory.
+        const params = workspace
+          ? { roots: workspace }
+          : roots && roots.length > 0
+            ? { roots: roots.join(',') }
+            : { sessionId }
         const payload = await callApi('projects', { params })
         setState({ loading: false, projects: payload.projects ?? [], error: null })
       } catch (failure) {
         setState({ loading: false, projects: [], error: failure })
       }
-    }, [roots, sessionId])
+    }, [roots, sessionId, workspace])
 
     useEffect(() => {
       void scan()
     }, [scan])
 
-    const install = useCallback(async (projectRoot) => {
-      setInstalling(projectRoot)
+    const projects = state.projects
+    // The stored choice wins while it still exists; otherwise the first scanned
+    // project is shown without rewriting the setting, so switching workspaces
+    // back and forth does not churn the document.
+    const selected = projects.find((project) => project.projectRoot === savedProject) ?? projects[0] ?? null
+    const packageReady =
+      selected?.package?.installed === true && (selected.package.missingAssemblies ?? []).length === 0
+
+    const install = useCallback(async () => {
+      if (!selected) return
+      setInstalling(true)
       setNotice(null)
       try {
-        const payload = await callApi('projects/install', { method: 'POST', body: { projectRoot } })
+        const payload = await callApi('projects/install', { method: 'POST', body: { projectRoot: selected.projectRoot } })
         setNotice({ kind: 'ok', text: payload.next || t('projectInstallDone') })
         await scan()
       } catch (failure) {
@@ -1782,76 +2156,84 @@ export function createLocusAssetPlugin(require) {
         const blocked = failure?.message && /holds the package assemblies|editor/i.test(JSON.stringify(failure.message))
         setNotice({ kind: 'error', text: blocked ? t('projectInstallBlocked') : String(failure?.message ?? failure) })
       } finally {
-        setInstalling('')
+        setInstalling(false)
       }
-    }, [scan])
+    }, [selected, scan])
 
-    const badge = (project) => {
-      if (project.state === 'connected') return { className: 'is-connected', text: t('projectsStateConnected') }
-      if (project.state === 'plugin_missing') return { className: 'is-missing', text: t('projectsStateMissing') }
-      return { className: 'is-offline', text: t('projectsStateNotConnected') }
-    }
-
-    /** Why a project is not connected, in the order a reader would ask. */
-    const reason = (project) => {
-      if (project.state === 'connected') {
-        return project.package?.version ? t('projectHintVersion', { version: project.package.version }) : null
-      }
-      if (project.state === 'plugin_missing') {
-        if (project.payloadAvailable === false) return t('projectInstallNoPayload')
-        return project.blockers?.includes('package_incomplete')
-          ? (project.package?.missingAssemblies ?? []).join(', ')
-          : null
-      }
-      if (project.markerPresent !== true) return t('projectHintMarkerMissing')
-      return project.editorRunning ? t('projectHintOpenNoBridge') : t('projectHintClosed')
-    }
-
-    const rows = state.projects.map((project) =>
-      h(
-        'div',
-        { className: 'locus-project-row', key: project.projectRoot, 'data-locus-project': project.state },
-        h(
-          'div',
-          { className: 'locus-project-main' },
-          h(
-            'div',
-            { className: 'locus-project-title' },
-            h('span', { className: 'locus-project-name' }, project.name ?? project.projectRoot),
-            h('span', { className: `locus-project-badge ${badge(project).className}` }, badge(project).text),
-          ),
-          h('div', { className: 'locus-project-path', title: project.projectRoot }, project.projectRoot),
-          reason(project) ? h('div', { className: 'locus-project-reason' }, reason(project)) : null,
-        ),
-        project.state === 'plugin_missing' && project.canInstall
-          ? h(
-              'button',
-              {
-                type: 'button',
-                className: 'locus-asset-btn locus-asset-btn-primary',
-                disabled: installing === project.projectRoot,
-                onClick: () => void install(project.projectRoot),
-              },
-              installing === project.projectRoot ? t('projectInstalling') : t('projectInstall'),
-            )
-          : null,
-      ),
-    )
+    const status = !selected
+      ? { className: 'is-missing', text: t('settingsProjectNone') }
+      : selected.state === 'connected'
+        ? { className: 'is-connected', text: t('settingsPluginConnected') }
+        : packageReady
+          ? selected.editorRunning === true
+            ? { className: 'is-missing', text: t('settingsPluginConnectionFailed') }
+            : { className: 'is-offline', text: t('settingsPluginOffline') }
+          : { className: 'is-missing', text: t('settingsPluginMissing') }
 
     return h(
       'div',
-      { className: 'locus-projects' },
+      { className: 'locus-settings-block' },
       h(
         'div',
-        { className: 'locus-projects-head' },
-        h('div', { className: 'locus-settings-group' }, t('projectsGroup')),
+        { className: 'locus-settings-row' },
         h(
-          'button',
-          { type: 'button', className: 'locus-asset-btn', disabled: state.loading, onClick: () => void scan() },
-          state.loading ? t('projectsScanning') : t('projectsRescan'),
+          'div',
+          { className: 'locus-settings-row-text' },
+          h('label', { className: 'locus-settings-row-label', htmlFor: 'locus-project-select' }, t('settingsProject')),
+          selected
+            ? h('div', { className: 'locus-settings-row-hint' }, selected.projectRoot)
+            : state.loading
+              ? null
+              : h('div', { className: 'locus-settings-row-hint' }, t('settingsProjectNone')),
+        ),
+        h(
+          'div',
+          { className: 'locus-settings-row-control locus-settings-select-control' },
+          h(SelectMenu, {
+            id: 'locus-project-select',
+            value: selected?.projectRoot ?? '',
+            disabled: state.loading || projects.length === 0,
+            onChange: onSelect,
+            options:
+              projects.length === 0
+                ? [{ value: '', label: state.loading ? t('projectsScanning') : t('settingsProjectNone') }]
+                : projects.map((project) => ({
+                    value: project.projectRoot,
+                    label: project.name || project.projectRoot,
+                  })),
+          }),
         ),
       ),
-      h('p', { className: 'locus-settings-intro' }, t('projectsIntro')),
+      h(
+        'div',
+        { className: 'locus-settings-row' },
+        h(
+          'div',
+          { className: 'locus-settings-row-text' },
+          h(
+            'div',
+            { className: 'locus-settings-row-label locus-plugin-label' },
+            h('span', null, t('settingsPlugin')),
+            h('span', { className: `locus-project-badge ${status.className}` }, status.text),
+          ),
+        ),
+        h(
+          'div',
+          { className: 'locus-settings-row-control' },
+          selected && !packageReady
+            ? h(
+                'button',
+                {
+                  type: 'button',
+                  className: 'locus-asset-btn locus-asset-btn-primary',
+                  disabled: installing || selected.canInstall === false,
+                  onClick: () => void install(),
+                },
+                installing ? t('settingsPluginInstalling') : t('settingsPluginInstall'),
+              )
+            : null,
+        ),
+      ),
       notice
         ? h(
             'div',
@@ -1869,11 +2251,6 @@ export function createLocusAssetPlugin(require) {
             h('div', { className: 'locus-asset-error-line' }, String(state.error.message ?? state.error)),
           )
         : null,
-      rows.length > 0
-        ? rows
-        : state.loading
-          ? null
-          : h('div', { className: 'locus-asset-empty' }, t('projectsEmpty')),
     )
   }
 
@@ -1909,6 +2286,26 @@ export function createLocusAssetPlugin(require) {
     useEffect(() => {
       void load()
     }, [load])
+
+    // The workspace list belongs to the page, not to one row: the skills
+    // heading names the selected workspace and the picker renders the same
+    // list, so loading it twice would be two routes for one fact.
+    const [workspaces, setWorkspaces] = useState(null)
+    const [workspacesError, setWorkspacesError] = useState(null)
+    useEffect(() => {
+      let cancelled = false
+      void (async () => {
+        try {
+          const payload = await callApi('workspaces')
+          if (!cancelled) setWorkspaces(payload.workspaces ?? [])
+        } catch (failure) {
+          if (!cancelled) setWorkspacesError(failure)
+        }
+      })()
+      return () => {
+        cancelled = true
+      }
+    }, [])
 
     const apply = useCallback(
       async (section, key, value) => {
@@ -1957,61 +2354,91 @@ export function createLocusAssetPlugin(require) {
     const features = state.features ?? {}
     const preferences = state.preferences ?? {}
     const effective = state.effective ?? features
+    // The selected workspace narrows both panels below; empty means "keep using
+    // the Session's own workspace". `savedProject` is the remembered Unity
+    // project; a project that disappeared falls back to the first scanned one
+    // without rewriting the setting.
+    const workspace = typeof preferences.workspacePath === 'string' ? preferences.workspacePath : ''
+    const savedProject = typeof preferences.unityProject === 'string' ? preferences.unityProject : ''
+    // The skills heading names the workspace the section writes into; the same
+    // name the picker shows, resolved once for both.
+    const workspaceOptions = workspaces ?? []
+    const currentWorkspace = workspace
+      ? workspaceOptions.find((entry) => entry.path === workspace)
+      : null
+    const workspaceLabel = workspace
+      ? currentWorkspace?.title || workspace.split(/[\\/]/).filter(Boolean).pop() || workspace
+      : t('settingsWorkspaceNone')
 
     return h(
       'div',
       { className: 'locus-settings-root' },
-      h('p', { className: 'locus-settings-intro' }, t('settingsIntro')),
-      h('div', { className: 'locus-settings-group' }, t('settingsFeatures')),
-      h(SwitchRow, {
-        id: 'unity',
-        label: t('settingsUnity'),
-        hint: t('settingsUnityHint'),
-        checked: features.unity,
-        busy: busy === 'features.unity',
-        onChange: (value) => void apply('features', 'unity', value),
-      }),
-      h(SwitchRow, {
-        id: 'csharp',
-        label: t('settingsCsharp'),
-        hint: locked.csharp ? t('settingsCsharpLocked') : t('settingsCsharpHint'),
-        checked: features.csharp,
-        disabled: locked.csharp === true && effective.csharp !== true,
-        busy: busy === 'features.csharp',
-        onChange: (value) => void apply('features', 'csharp', value),
-      }),
-      h(SwitchRow, {
-        id: 'preview',
-        label: t('settingsPreview'),
-        hint: t('settingsPreviewHint'),
-        checked: features.preview,
-        busy: busy === 'features.preview',
-        onChange: (value) => void apply('features', 'preview', value),
-      }),
-      h('div', { className: 'locus-settings-group' }, t('settingsPreferences')),
-      h(SwitchRow, {
-        id: 'frameCache',
-        label: t('settingsFrameCache'),
-        hint: t('settingsFrameCacheHint'),
-        checked: preferences.frameCache,
-        busy: busy === 'preferences.frameCache',
-        onChange: (value) => void apply('preferences', 'frameCache', value),
-      }),
+      h(
+        'section',
+        { className: 'locus-settings-card' },
+        h('div', { className: 'locus-settings-group' }, t('settingsWorkspaceGroup')),
+        h(WorkspaceRow, {
+          value: workspace,
+          busy: busy === 'preferences.workspacePath',
+          onChange: (value) => void apply('preferences', 'workspacePath', value),
+          workspaces,
+          error: workspacesError,
+        }),
+        h(ProjectRow, {
+          roots,
+          sessionId,
+          workspace,
+          savedProject,
+          onSelect: (value) => void apply('preferences', 'unityProject', value),
+        }),
+      ),
+      h(
+        'section',
+        { className: 'locus-settings-card' },
+        h(
+          'div',
+          { className: 'locus-settings-group locus-settings-group-meta-row' },
+          h('span', null, t('skillsGroup')),
+          h('span', { className: 'locus-settings-group-meta', title: workspaceLabel }, workspaceLabel),
+        ),
+        h(SkillsPanel, { workspace }),
+      ),
+      h(
+        'section',
+        { className: 'locus-settings-card' },
+        h('div', { className: 'locus-settings-group' }, t('settingsFeatures')),
+        h(SwitchRow, {
+          id: 'unity',
+          label: t('settingsUnity'),
+          hint: t('settingsUnityHint'),
+          checked: features.unity,
+          busy: busy === 'features.unity',
+          onChange: (value) => void apply('features', 'unity', value),
+        }),
+        h(SwitchRow, {
+          id: 'csharp',
+          label: t('settingsCsharp'),
+          hint: locked.csharp ? t('settingsCsharpLocked') : t('settingsCsharpHint'),
+          checked: features.csharp,
+          disabled: locked.csharp === true && effective.csharp !== true,
+          busy: busy === 'features.csharp',
+          onChange: (value) => void apply('features', 'csharp', value),
+        }),
+        h(SwitchRow, {
+          id: 'preview',
+          label: t('settingsPreview'),
+          hint: t('settingsPreviewHint'),
+          checked: features.preview,
+          busy: busy === 'features.preview',
+          onChange: (value) => void apply('features', 'preview', value),
+        }),
+      ),
       error && state
         ? h(
             'div',
             { className: 'locus-asset-error', 'data-locus-settings-error': error.code ?? 'error' },
             h('div', { className: 'locus-asset-error-title' }, t('settingsSaveFailed')),
             h('div', { className: 'locus-asset-error-line' }, String(error.message ?? error)),
-          )
-        : null,
-      h(ProjectsPanel, { roots, sessionId }),
-      state.path
-        ? h(
-            'div',
-            { className: 'locus-settings-path' },
-            h('span', { className: 'locus-settings-path-label' }, t('settingsPath')),
-            h('code', null, state.path),
           )
         : null,
     )
@@ -2602,20 +3029,85 @@ const STYLESHEET = `
    is a --dsw-alias-* token, so light and dark themes both come from the host.
    The only literal value is the thumb's white, which must stay lighter than
    the track in either theme. */
-.locus-settings-intro{margin:0 0 8px;font-size:12px;line-height:18px;color:var(--dsw-alias-label-secondary,inherit);max-width:66ch}
-.locus-settings-group{margin:16px 0 0;font-size:11px;font-weight:600;letter-spacing:.04em;text-transform:uppercase;color:var(--dsw-alias-label-tertiary,inherit)}
+.locus-settings-intro{margin:0;font-size:14px;line-height:22px;color:var(--dsw-alias-label-tertiary);max-width:66ch}
+.locus-settings-card{border:.5px solid var(--dsw-alias-settings-card-stroke,var(--dsw-alias-border-l2));background:var(--dsw-alias-settings-card-fill,transparent);border-radius:var(--dsw-radius-xl,12px);padding:0 16px;margin-top:12px}
+.locus-settings-root>.locus-settings-card:first-child{margin-top:0}
+.locus-settings-group{margin:12px 0 0;font-size:12px;font-weight:500;line-height:18px;color:var(--dsw-alias-label-secondary)}
+.locus-settings-group-meta-row{display:flex;align-items:baseline;justify-content:space-between;gap:12px}
+.locus-settings-group-meta{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;font-weight:400;color:var(--dsw-alias-label-tertiary)}
+.locus-settings-card .locus-settings-row:last-child{border-bottom:none}
 /* Row geometry is the host's: DeveloperToolsRow.module.css in
    @deepseek-ai/dsh-client-ui-settings-general is
    "border-bottom:.5px solid var(--dsw-alias-border-l2);justify-content:space-between;
-   align-items:center;gap:24px;padding:16px 0;display:flex", with a 14px/20px
-   title and a 12px/18px secondary-label description 4px below it.
-   Copying those numbers is what makes this page read as part of Settings
-   instead of as a page that merely sits inside it. */
-.locus-settings-row{display:flex;align-items:center;justify-content:space-between;gap:24px;padding:16px 0;border-bottom:.5px solid var(--dsw-alias-border-l2,rgba(128,128,128,.25))}
-.locus-settings-root{display:flex;flex-direction:column;gap:0;font-size:14px;line-height:20px;color:var(--dsw-alias-label-primary,inherit);padding:0}
-.locus-settings-row-text{display:flex;flex-direction:column;min-width:0}
-.locus-settings-row-label{color:var(--dsw-alias-label-primary,inherit);font-size:14px;line-height:20px}
-.locus-settings-row-hint{margin-top:4px;font-size:12px;line-height:18px;color:var(--dsw-alias-label-secondary,inherit);max-width:60ch}
+   align-items:center;gap:24px;padding:16px 0;display:flex", with a 14px/22px
+   title and a 12px/18px tertiary description 4px below it. Copying those
+   numbers is what makes this page read as part of Settings instead of as a
+   page that merely sits inside it. */
+.locus-settings-row{display:flex;align-items:center;justify-content:space-between;gap:24px;padding:16px 0;border-bottom:.5px solid var(--dsw-alias-border-l2)}
+.locus-settings-root{display:flex;flex-direction:column;gap:0;max-width:720px;font-size:14px;line-height:22px;color:var(--dsw-alias-label-primary);padding:0}
+.locus-settings-row-text{display:flex;flex-direction:column;flex:1;gap:4px;min-width:0;padding-right:48px}
+.locus-settings-row-label{color:var(--dsw-alias-label-primary);font-size:14px;font-weight:400;line-height:22px}
+.locus-settings-row-hint{color:var(--dsw-alias-label-tertiary);font-size:12px;font-weight:400;line-height:18px;max-width:60ch}
+.locus-settings-row-stack{flex-direction:column;align-items:stretch;gap:10px}
+.locus-settings-root>.locus-settings-row:last-child,
+.locus-settings-block>.locus-settings-row:last-child{border-bottom:none}
+.locus-settings-row-error{font-size:12px;line-height:18px;color:var(--dsw-alias-label-error)}
+/* The host's Menu primitive (ui-primitives Menu.module.css + MenuSurface):
+   a 4px-padded translucent card, 34px rows with a 14px trailing check, and a
+   40ms fade. An external client bundle cannot import the primitives package,
+   so these are its numbers, not an imitation of its look. */
+.locus-select{position:relative;display:inline-flex;max-width:100%;min-width:0}
+.locus-select-trigger{box-sizing:border-box;display:inline-flex;align-items:center;justify-content:space-between;gap:4px;height:36px;width:100%;min-width:0;padding:0 8px 0 12px;border:0;border-radius:var(--dsw-radius-md,6px);background-color:var(--dsw-alias-bg-module-platform);color:var(--dsw-alias-label-secondary);font:inherit;font-size:13px;font-weight:500;line-height:20px;cursor:pointer;text-align:left}
+@media (hover:hover){.locus-select-trigger:hover:not(:disabled){background-color:var(--dsw-alias-interactive-bg-hover)}}
+.locus-select-trigger:focus-visible{outline:none;box-shadow:0 0 0 2px var(--dsw-focus-ring-color,var(--dsw-alias-state-business-primary,var(--dsw-alias-brand-primary)))}
+.locus-select-trigger:disabled{opacity:.6;cursor:default}
+.locus-select-value{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.locus-select-chevron{display:inline-flex;flex:0 0 auto;width:5px;height:5px;border-right:1.5px solid var(--dsw-alias-label-caption,var(--dsw-alias-label-tertiary));border-bottom:1.5px solid var(--dsw-alias-label-caption,var(--dsw-alias-label-tertiary));transform:rotate(45deg) translateY(-1px);transition:transform 120ms ease}
+.locus-select-trigger[aria-expanded='true'] .locus-select-chevron{transform:rotate(225deg) translateY(1px)}
+.locus-select-menu{position:absolute;top:calc(100% + 4px);right:0;left:auto;z-index:100;box-sizing:border-box;isolation:isolate;min-width:min(144px,calc(100vw - 24px));max-width:min(360px,calc(100vw - 24px));max-height:calc(100dvh - 24px);padding:4px;display:flex;flex-direction:column;border-radius:var(--dsw-radius-lg,10px);box-shadow:var(--dsw-elevation-prominent);overflow:hidden;animation:locus-menu-in 40ms ease-out}
+.locus-select-material{position:absolute;inset:0;z-index:-1;border-radius:inherit;background:var(--dsw-alias-bg-layer-2);pointer-events:none}
+.locus-select-list{display:flex;flex-direction:column;min-height:0;max-height:calc(100dvh - 32px);overflow-y:auto}
+.locus-select-option{display:flex;align-items:center;gap:6px;width:100%;min-height:34px;padding:6px 8px;border:none;border-radius:var(--dsw-radius-md,6px);background:transparent;cursor:pointer;font:inherit;font-size:13px;line-height:20px;color:var(--dsw-alias-label-primary);text-align:left}
+@media (hover:hover){.locus-select-option:hover{background:var(--dsw-alias-interactive-bg-hover)}}
+.locus-select-option:focus-visible{background:var(--dsw-alias-interactive-bg-hover);outline:none}
+.locus-select-option-label{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.locus-select-check{flex:none;color:var(--dsw-alias-label-primary)}
+@keyframes locus-menu-in{from{opacity:0}to{opacity:1}}
+@media (prefers-reduced-motion:reduce){.locus-select-menu{animation-duration:0ms}}
+.locus-settings-block{display:flex;flex-direction:column}
+.locus-settings-row-control{display:flex;align-items:center;gap:12px;flex:0 0 auto;min-width:0}
+/* Both selectors share one width: the container owns it, the select fills it.
+   Declared after the generic control rule so this flex-basis cannot lose the
+   cascade (a later flex:0 0 auto would shrink the workspace picker to its
+   content). */
+.locus-settings-select-control{flex:0 0 140px;justify-content:flex-end}
+.locus-plugin-label{display:flex;align-items:center;gap:8px;min-width:0}
+.locus-plugin-state{font-size:12px;line-height:18px;color:var(--dsw-alias-label-tertiary)}
+.locus-plugin-state.is-installed{color:var(--dsw-alias-label-secondary)}
+.locus-skill-state{font-size:12px;line-height:18px;color:var(--dsw-alias-label-tertiary)}
+.locus-skill-state.is-downloaded{color:var(--dsw-alias-label-secondary)}
+/* Every button inside the settings page uses the same geometry and fill as the
+   host's selector, primary action or not: the host does not grow a filled
+   variant inside settings rows, and a mixed pair reads as two component kits. */
+.locus-settings-root .locus-asset-btn{box-sizing:border-box;height:36px;padding:0 14px;border:0;border-radius:var(--dsw-radius-md,6px);background-color:var(--dsw-alias-bg-module-platform);color:var(--dsw-alias-label-primary);font-size:14px;line-height:22px;cursor:pointer}
+@media (hover:hover){.locus-settings-root .locus-asset-btn:hover{background-color:var(--dsw-alias-interactive-bg-hover)}}
+.locus-settings-root .locus-asset-btn:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:2px}
+.locus-settings-root .locus-asset-btn:disabled{opacity:.6;cursor:default}
+/* The install action is the one primary button: same geometry as every other
+   button, filled with the host's brand colour so it reads as the action. */
+.locus-settings-root .locus-asset-btn-primary{background-color:var(--dsw-alias-brand-primary);color:var(--dsw-alias-label-primary-foreground)}
+@media (hover:hover){.locus-settings-root .locus-asset-btn-primary:hover{background-color:var(--dsw-alias-brand-primary)}}
+.locus-skills{margin-top:16px}
+.locus-skills-actions{display:flex;align-items:center;gap:12px;margin-top:8px;flex-wrap:wrap}
+.locus-skills-path{margin-top:6px;font-family:var(--ds-font-family-code,ui-monospace,monospace);font-size:11px;line-height:16px;opacity:.8;word-break:break-all}
+.locus-skills-list{margin-top:12px;display:flex;flex-direction:column;gap:0}
+.locus-skill-row{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;padding:10px 0;border-bottom:.5px solid var(--dsw-alias-border-l2,rgba(128,128,128,.25))}
+.locus-skill-main{display:flex;flex-direction:column;min-width:0;gap:2px}
+.locus-skill-title{display:flex;align-items:center;gap:8px;font-size:13px;line-height:18px}
+.locus-skill-name{color:var(--dsw-alias-label-primary,inherit)}
+.locus-skill-meta{margin-top:2px;font-size:11px;line-height:16px;color:var(--dsw-alias-label-tertiary,inherit);word-break:break-all}
+.locus-skill-meta.is-error{color:var(--dsw-alias-label-error,inherit)}
+.locus-skills-activation{margin-top:8px;display:flex;flex-direction:column;gap:2px}
 /* The switch is a copy of the host primitive (@deepseek-ai/dsh-client-ui-primitives
    Switch.module.css), not a look-alike: same 36×20 capsule, 2px padding, 10px
    radius, 16px thumb translating 16px over 120ms, and the track colour keyed
@@ -2676,8 +3168,8 @@ const STYLESHEET = `
 .locus-project-badge.is-missing{color:var(--dsw-alias-state-error-primary,#c33)}
 .locus-project-path{font-family:var(--ds-font-family-code,ui-monospace,monospace);font-size:11px;line-height:16px;color:var(--dsw-alias-label-tertiary,inherit);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .locus-project-reason{font-size:12px;line-height:18px;color:var(--dsw-alias-label-secondary,inherit)}
-.locus-project-notice{margin:8px 0;padding:8px;border-radius:var(--dsw-radius-md,8px);font-size:12px;line-height:18px;border:1px solid var(--dsw-alias-state-success-primary,#3a7);color:var(--dsw-alias-label-primary,inherit)}
-.locus-project-notice.is-error{border-color:var(--dsw-alias-state-error-primary,#c33)}
+.locus-project-notice{margin:8px 0 0;padding:0;font-size:12px;line-height:18px;color:var(--dsw-alias-state-success-primary)}
+.locus-project-notice.is-error{color:var(--dsw-alias-state-error-primary)}
 @media (max-width: ${PREVIEW_COLLAPSE_WIDTH}px){
  .locus-asset-preview-surface{height:140px}
  .locus-model-stage{height:220px}

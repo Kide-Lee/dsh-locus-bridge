@@ -11,13 +11,13 @@ import { SETTINGS_SECTION_ID } from '../src/client/plugin.js'
  * re-renders and whose `useEffect` never runs, which is enough to check what a
  * component *builds* — but not enough to check a page that fetches on mount and
  * renders from the answer. The settings page is exactly that shape, and its
- * projects panel is a *child* component, so a renderer that does not call
- * function components reports the page and silently omits the panel.
+ * child panels are components, so a renderer that does not call function
+ * components reports the page and silently omits them.
  *
  * Hook state is keyed by the component's position (`root.c.2`), which is what
- * React effectively uses for a list-free tree: the panel never reorders
- * without re-keying, so the keys stay stable across the rounds a load takes.
- * Effects fire once per position, since there are no dependency arrays here.
+ * React effectively uses for a list-free tree: the panels never reorder without
+ * re-keying, so the keys stay stable across the rounds a load takes. Effects
+ * fire once per position, since there are no dependency arrays here.
  */
 function createRuntime() {
   const state = new Map()
@@ -202,7 +202,7 @@ async function mountSettings(t, answers) {
   // the cursor inside the previous pass (the page would stay on "loading").
   const root = { type: section.component, props: { roots: ['E:/proj'], sessionId: 's1' }, children: [] }
 
-  const settle = async (rounds = 10) => {
+  const settle = async (rounds = 12) => {
     let text = ''
     for (let round = 0; round < rounds; round += 1) {
       const next = runtime.render(root, 'root')
@@ -214,16 +214,26 @@ async function mountSettings(t, answers) {
     return text
   }
 
-  return { runtime, root, settle, requests, section, document }
+  const buttons = () => runtime.elements(root).filter((element) => element.type === 'button')
+  const buttonWithText = (text) => buttons().find((element) => (element.children ?? []).join(' ').includes(text))
+  const triggerById = (id) => runtime.elements(root).find((element) => element.props?.id === id)
+
+  return { runtime, root, settle, requests, section, document, buttons, buttonWithText, triggerById }
 }
 
 const SETTINGS = {
   ok: true,
   features: { unity: true, csharp: true, preview: true },
   effective: { unity: true, csharp: true, preview: true },
-  preferences: { frameCache: true },
+  preferences: { frameCache: true, workspacePath: 'E:/proj', unityProject: 'E:/proj/Game' },
   locked: { csharp: false },
   path: 'C:/tmp/settings.json',
+}
+
+const WORKSPACES = {
+  ok: true,
+  workspaces: [{ id: 'w1', path: 'E:/proj', title: 'Proj' }],
+  selected: 'E:/proj',
 }
 
 const PROJECTS = {
@@ -231,34 +241,23 @@ const PROJECTS = {
   roots: ['E:/proj'],
   projects: [
     {
-      projectRoot: 'E:/proj/Live',
-      name: 'Live',
+      projectRoot: 'E:/proj/Game',
+      name: 'Game',
       state: 'connected',
       editorRunning: true,
       markerPresent: true,
-      package: { installed: true, version: '0.1.0' },
+      package: { installed: true, version: '0.9.3', missingAssemblies: [] },
       canInstall: false,
       payloadAvailable: true,
       blockers: [],
     },
     {
-      projectRoot: 'E:/proj/Open',
-      name: 'Open',
-      state: 'not_connected',
-      editorRunning: true,
-      markerPresent: true,
-      package: { installed: true },
-      canInstall: false,
-      payloadAvailable: true,
-      blockers: [],
-    },
-    {
-      projectRoot: 'E:/proj/Bare',
-      name: 'Bare',
+      projectRoot: 'E:/proj/Other',
+      name: 'Other',
       state: 'plugin_missing',
       editorRunning: false,
       markerPresent: false,
-      package: { installed: false },
+      package: { installed: false, missingAssemblies: [] },
       canInstall: true,
       payloadAvailable: true,
       blockers: ['package_missing'],
@@ -266,107 +265,254 @@ const PROJECTS = {
   ],
 }
 
-test('the settings page renders its Unity projects panel with all three states', async (t) => {
-  // The panel is a child component rendered from an async scan, so this is the
-  // test that a page reaching the user actually lists projects: a renderer that
-  // skipped function components would report the page and no rows at all.
-  const page = await mountSettings(t, { '/projects': PROJECTS, settings: SETTINGS })
-  const text = await page.settle()
+const SKILL_STATE = {
+  ok: true,
+  workspace: 'E:/proj',
+  projectRoot: 'E:/proj/Game',
+  candidates: [],
+  skillsDir: 'E:/proj/.dsh/skills',
+  packages: [
+    {
+      id: 'graphics-debugger',
+      title: 'Unity Graphics Debugger',
+      hint: 'Frame Debugger events and render targets, RenderDoc capture/replay.',
+      executable: true,
+      partial: 'RenderDoc needs Python.',
+      downloaded: false,
+    },
+    {
+      id: 'ui-toolkit',
+      title: 'UI Toolkit DevTools',
+      hint: 'UI Toolkit layout, style and interaction debugging.',
+      executable: true,
+      partial: null,
+      downloaded: true,
+    },
+    { id: 'debugger', title: 'Unity Debugger', hint: 'PlayerLoop/Tick positioning and paused inspection.', executable: false, partial: null, downloaded: false },
+    { id: 'profiler', title: 'Unity Profiler', hint: 'CPU/GPU/memory samples and baseline comparison.', executable: false, partial: null, downloaded: true },
+    { id: 'view', title: 'Locus View', hint: 'Vue panels, inspectors, tables and graph editors.', executable: false, partial: null, downloaded: false },
+  ],
+  states: [],
+}
 
-  assert.match(text, /locus-settings-root/, 'the page mounts')
-  assert.match(text, /locus-projects/, 'the projects panel renders')
-  assert.equal((text.match(/locus-project-row/g) ?? []).length, 3, 'one row per project')
-  // One badge per state, and the state is what the badge says.
-  assert.match(text, /locus-project-badge is-connected/)
-  assert.match(text, /locus-project-badge is-offline/)
-  assert.match(text, /locus-project-badge is-missing/)
-  // Every row prints its own project.
-  for (const project of PROJECTS.projects) assert.ok(text.includes(project.projectRoot), `${project.projectRoot} is listed`)
-  // The install button exists for the missing package and only there: the other
-  // two rows must not offer to reinstall a working bridge.
-  assert.equal((text.match(/安装插件/g) ?? []).length, 1, 'exactly one install button, on the plugin_missing row')
-  assert.match(text, /locus-settings-path/, 'the storage path footer renders')
-  // The scan asked the Host once, and it asked the projects route (not a guess
-  // at the filesystem from the page).
-  assert.equal(page.requests.filter((entry) => entry.url.includes('/projects')).length, 1)
-  assert.ok(page.requests.every((entry) => entry.url.includes('/locus/api/')), 'every request goes through the plugin routes')
-})
-
-test('the install button posts the project to the Host and reports what came back', async (t) => {
-  const answers = {
+function answersFor(overrides = {}) {
+  return {
+    '/workspaces': WORKSPACES,
     '/projects/install': {
       ok: true,
-      projectRoot: 'E:/proj/Bare',
+      projectRoot: 'E:/proj/Other',
       installed: true,
       marker: true,
       next: 'Reopen the Unity Editor: the bridge starts on launch once the marker is present.',
     },
     '/projects': PROJECTS,
-    settings: SETTINGS,
-  }
-  const page = await mountSettings(t, answers)
-  await page.settle()
-
-  // Press the button the page drew, rather than calling a handler the test
-  // would have to know the name of.
-  const button = page
-    .runtime
-    .elements(page.root)
-    .find((element) => element.type === 'button' && /安装插件/.test((element.children ?? []).join(' ')))
-  assert.ok(button, 'the install button is in the rendered tree')
-  button.props.onClick()
-  const text = await page.settle()
-
-  const install = page.requests.find((entry) => entry.url.includes('/projects/install'))
-  assert.ok(install, 'clicking install posts to the Host')
-  assert.equal(install.method, 'POST')
-  assert.deepEqual(JSON.parse(install.body), { projectRoot: 'E:/proj/Bare' })
-  // The Host's own sentence wins over the page's generic one: it names the next
-  // action, which the page cannot infer.
-  assert.match(text, /Reopen the Unity Editor/)
-  // The panel rescans after an install, so the badge reflects the new state.
-  assert.equal(page.requests.filter((entry) => entry.url.includes('/projects') && entry.method === 'GET').length, 2)
-})
-
-test('a refused install explains itself instead of looking like a broken button', async (t) => {
-  // `editor_running` is the case the Host refuses on purpose: the editor holds
-  // the package assemblies. The page must say that, not print a status code.
-  const page = await mountSettings(t, {
-    '/projects/install': {
-      status: 409,
-      error: { code: 'editor_running', message: 'The Unity Editor has this project open and holds the package assemblies.' },
+    '/skills/state': SKILL_STATE,
+    '/skills/activate': {
+      ok: true,
+      workspace: 'E:/proj',
+      projectRoot: 'E:/proj/Game',
+      packages: [{ id: 'graphics-debugger', state: 'compiled', assemblyId: 'asm-g' }],
+      states: [],
     },
-    '/projects': PROJECTS,
+    '/skills/install': { ok: true, workspace: 'E:/proj', skillsDir: 'E:/proj/.dsh/skills', written: ['graphics-debugger'], unchanged: [] },
     settings: SETTINGS,
-  })
-  await page.settle()
+    ...overrides,
+  }
+}
 
-  const button = page
-    .runtime
-    .elements(page.root)
-    .find((element) => element.type === 'button' && /安装插件/.test((element.children ?? []).join(' ')))
-  assert.ok(button)
-  button.props.onClick()
-  const text = await page.settle()
-
-  assert.match(text, /locus-project-notice is-error/)
-  assert.match(text, /先关闭编辑器/)
-  assert.doesNotMatch(text, /409/, 'a status code is not an explanation')
-})
-
-test('a failed project scan is reported, and the switches still work', async (t) => {
-  // The switches and the panel load independently: a projects failure must not
-  // blank the page, or a user whose workspace is unusual loses the switches too.
-  const page = await mountSettings(t, {
-    '/projects': { status: 500, error: { code: 'unity_error', message: 'the project scan blew up' } },
-    settings: SETTINGS,
-  })
+test('the page renders the three groups with one row per skill and no cache switch', async (t) => {
+  const page = await mountSettings(t, answersFor())
   const text = await page.settle()
 
   assert.match(text, /locus-settings-root/)
-  assert.match(text, /locus-settings-switch/, 'the switches still render')
-  assert.match(text, /the project scan blew up/, 'the scan failure is shown')
+  assert.match(text, /工作区/)
+  assert.match(text, /领域技能/)
+  assert.match(text, /功能/)
+  assert.equal((text.match(/locus-settings-card/g) ?? []).length, 3, 'each group is its own bordered card')
+  // Two host-style selects: the workspace and the Unity project.
+  assert.equal(
+    page.runtime
+      .elements(page.root)
+      .filter((element) => String(element.props?.className ?? '').includes('locus-select-trigger')).length,
+    2,
+  )
+  // The skills section names the workspace it writes into, right-aligned.
+  const skillsMeta = page.runtime
+    .elements(page.root)
+    .find((element) => element.props?.className === 'locus-settings-group-meta')
+  assert.ok(skillsMeta, 'the skills heading carries a workspace name')
+  assert.equal((skillsMeta.children ?? []).join(' ').trim(), 'Proj')
+  // Five skill rows, each either a Download button or the Downloaded label.
+  assert.match(text, /Unity Graphics Debugger/)
+  assert.match(text, /UI Toolkit DevTools/)
+  assert.match(text, /Unity Debugger/)
+  assert.match(text, /Unity Profiler/)
+  assert.match(text, /Locus View/)
+  // Every skill row carries its own one-line description, not just the one with
+  // an extra capability note.
+  assert.match(text, /Frame Debugger events/)
+  assert.match(text, /UI Toolkit layout/)
+  assert.match(text, /PlayerLoop\/Tick positioning/)
+  assert.match(text, /CPU\/GPU\/memory samples/)
+  assert.match(text, /Vue panels/)
+  assert.equal((text.match(/已下载/g) ?? []).length, 2, 'only the two downloaded skills read as downloaded')
+  assert.equal(
+    page.buttons().filter((button) => (button.children ?? []).join(' ').includes('下载')).length,
+    3,
+  )
+  // The cache preference lost its control but the three switches remain.
+  assert.doesNotMatch(text, /缓存/)
+  assert.equal(page.buttons().filter((button) => button.props.role === 'switch').length, 3)
   assert.doesNotMatch(text, /\[!/, 'nothing threw')
 })
 
+test('the Unity project picker lists scanned projects and remembers the choice', async (t) => {
+  const page = await mountSettings(t, answersFor())
+  const text = await page.settle()
 
+  const trigger = page.triggerById('locus-project-select')
+  assert.ok(trigger, 'the project picker renders')
+  assert.match(text, /Game/, 'the stored project label is on the trigger')
+
+  trigger.props.onClick()
+  await page.settle()
+  const menu = page.runtime.elements(page.root).filter((element) => element.props?.role === 'menuitem')
+  assert.ok(menu.some((option) => option.props?.['data-label'] === 'Game'))
+  assert.ok(menu.some((option) => option.props?.['data-label'] === 'Other'))
+
+  const other = menu.find((option) => option.props?.['data-label'] === 'Other')
+  other.props.onClick()
+  await page.settle()
+  const post = page.requests.find((entry) => entry.method === 'POST' && entry.url.includes('/settings'))
+  assert.deepEqual(JSON.parse(post.body), { preferences: { unityProject: 'E:/proj/Other' } })
+})
+
+test('an installed, connected plugin reads "Connected" as a capsule and offers no install button', async (t) => {
+  const page = await mountSettings(t, answersFor())
+  const text = await page.settle()
+
+  assert.match(text, /Locus 插件/)
+  assert.match(text, /locus-project-badge is-connected/)
+  assert.match(text, /已连接/)
+  // The capsule belongs beside the label, not in the right-hand control slot
+  // where the install button lives.
+  const label = page.runtime
+    .elements(page.root)
+    .find((element) => String(element.props?.className ?? '').includes('locus-plugin-label'))
+  assert.ok(label, 'the plugin label wraps the capsule')
+  assert.ok(
+    (label.children ?? []).some((child) => String(child?.props?.className ?? '').includes('locus-project-badge')),
+    'the capsule is inside the label',
+  )
+  assert.equal(page.buttonWithText('安装'), undefined, 'nothing to install for the selected project')
+})
+
+test('an installed plugin without an open editor reads "Unity not open"', async (t) => {
+  const projects = {
+    ok: true,
+    roots: ['E:/proj'],
+    projects: [
+      {
+        projectRoot: 'E:/proj/Game',
+        name: 'Game',
+        state: 'not_connected',
+        editorRunning: false,
+        markerPresent: true,
+        package: { installed: true, version: '0.9.3', missingAssemblies: [] },
+        canInstall: false,
+        payloadAvailable: true,
+        blockers: [],
+      },
+    ],
+  }
+  const page = await mountSettings(t, answersFor({ '/projects': projects }))
+  const text = await page.settle()
+
+  assert.match(text, /locus-project-badge is-offline/)
+  assert.match(text, /未打开 Unity/)
+})
+
+test('an editor that is open but unreachable reads "Connection failed"', async (t) => {
+  const projects = {
+    ok: true,
+    roots: ['E:/proj'],
+    projects: [
+      {
+        projectRoot: 'E:/proj/Game',
+        name: 'Game',
+        state: 'not_connected',
+        editorRunning: true,
+        markerPresent: false,
+        package: { installed: true, version: '0.9.3', missingAssemblies: [] },
+        canInstall: false,
+        payloadAvailable: true,
+        blockers: [],
+      },
+    ],
+  }
+  const page = await mountSettings(t, answersFor({ '/projects': projects }))
+  const text = await page.settle()
+
+  assert.match(text, /locus-project-badge is-missing/)
+  assert.match(text, /连接失败/)
+})
+
+test('a project without the plugin shows the install button and installs on click', async (t) => {
+  const settings = { ...SETTINGS, preferences: { ...SETTINGS.preferences, unityProject: 'E:/proj/Other' } }
+  const page = await mountSettings(t, answersFor({ settings }))
+  const text = await page.settle()
+
+  assert.match(text, /没有插件/)
+  const install = page.buttonWithText('安装')
+  assert.ok(install, 'the install button is offered')
+  install.props.onClick()
+  const after = await page.settle()
+
+  const post = page.requests.find((entry) => entry.url.includes('/projects/install'))
+  assert.ok(post, 'clicking install posts to the Host')
+  assert.deepEqual(JSON.parse(post.body), { projectRoot: 'E:/proj/Other' })
+  assert.match(after, /Reopen the Unity Editor/)
+})
+
+test('downloading one skill writes that skill and activates the executable ones', async (t) => {
+  const page = await mountSettings(t, answersFor())
+  await page.settle()
+
+  const download = page.buttonWithText('下载')
+  assert.ok(download, 'the first undownloaded skill offers Download')
+  download.props.onClick()
+  const text = await page.settle()
+
+  const post = page.requests.find((entry) => entry.url.includes('/skills/install'))
+  assert.ok(post, 'the download goes through the Host')
+  assert.deepEqual(JSON.parse(post.body), { workspacePath: 'E:/proj', skillId: 'graphics-debugger' })
+  assert.ok(
+    page.requests.some((entry) => entry.url.includes('/skills/activate') && entry.method === 'POST'),
+    'an executable skill is compiled after its docs are written',
+  )
+  assert.match(text, /已下载/)
+})
+
+test('without a workspace the skill buttons are disabled and the page says why', async (t) => {
+  const settings = { ...SETTINGS, preferences: { frameCache: true, workspacePath: '', unityProject: '' } }
+  const page = await mountSettings(t, answersFor({ settings }))
+  const text = await page.settle()
+
+  const download = page.buttonWithText('下载')
+  assert.ok(download)
+  assert.equal(download.props.disabled, true)
+  assert.match(text, /先在上面选择一个工作区/)
+})
+
+test('a failed project scan is reported, and the switches still work', async (t) => {
+  const page = await mountSettings(
+    t,
+    answersFor({ '/projects': { status: 500, error: { code: 'unity_error', message: 'the project scan blew up' } } }),
+  )
+  const text = await page.settle()
+
+  assert.match(text, /locus-settings-root/)
+  assert.match(text, /locus-settings-switch/)
+  assert.match(text, /the project scan blew up/)
+  assert.doesNotMatch(text, /\[!/, 'nothing threw')
+})
