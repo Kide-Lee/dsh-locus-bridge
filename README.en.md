@@ -273,19 +273,23 @@ translating it would mean inventing Unity's wording.
 
 ## Settings
 
-DSH's Settings has a **Unity bridge** page (`settings.section`, id `dsh-locus-bridge`) with one switch per
-feature plane plus one cache preference:
+DSH's Settings has a **Unity bridge** page (`settings.section`, id `dsh-locus-bridge`) with three groups:
+
+- **Workspace**: pick a workspace, pick a Unity project, see or install the Locus plugin;
+- **Domain skills**: download each Unity domain skill (the two with C# compile on download);
+- **Features**: three feature switches. A change takes effect immediately with no restart: the page `POST`s
+  to `/locus/api/settings`, the Host re-registers its tool set, and the `preview` plane makes the client
+  re-read the switch (on window focus) and register or dispose the tab type accordingly.
 
 | Switch | What turning it off does |
 |---|---|
 | **Unity control** | The ten `unity_*` tools leave the model's tool list (the Host unregisters them; they are not merely hidden) |
 | **C# analysis** | The six `code_*` tools leave, and any Roslyn language-server processes already started are closed |
 | **File preview** | The right-Sidebar Unity asset tab is no longer registered, and every Unity-backed `/locus/api` route answers `feature_disabled` |
-| **Cache preview frames in the project** | Rendered frames stop being written under `Library/Locus/asset-preview-cache`; the in-memory cache still answers |
 
-A change takes effect immediately with no restart: the page `POST`s to `/locus/api/settings`, the Host
-re-registers its tool set, and the `preview` plane makes the client re-read the switch (on window focus) and
-register or dispose the tab type accordingly.
+`preferences.frameCache` (cache preview frames inside the project) stays in `settings.json`, but the page no
+longer offers a switch for it: writing rendered frames into a project is a storage choice that belongs to asset
+browsing, not beside the feature planes.
 
 Design notes:
 
@@ -301,21 +305,30 @@ Design notes:
 - **Non-boolean values are not coerced.** `"off"` or `0` falls back to that key's default; guessing either way
   would silently keep a plane on or silently switch one off.
 
-### The Unity projects panel
+### Workspace
 
-The same page lists the Unity projects on this machine and whether the Locus bridge can reach each one. Every
-row is a real directory in one of three states:
+The **Workspace** picker lists the workspaces DSH has already registered (the Host's `workspaceRegistry`);
+choosing one stores its path in `preferences.workspacePath` and decides where the project scan looks and which
+workspace the domain skills are written to. With nothing selected the page falls back to the Session's own
+workspace.
 
-| State | Meaning | What the row offers |
-|---|---|---|
-| **Connected** | A broker answered on the endpoint that project derives | The package version |
-| **Not connected** | The package is installed but nothing answered | Splits "editor closed" from "editor open, bridge off", because those are fixed differently |
-| **Plugin missing** | The project has no Locus package, or an incomplete one | An **Install plugin** button |
+The search direction is only downward: **the workspace itself and its subdirectories**. The plugin no longer
+looks in ancestor directories or in siblings beside a workspace — with several checkouts in one repository, that
+search used to attach a Session to the wrong project.
 
-Where the list comes from: a three-level scan below the given roots (`?roots=` names them explicitly,
-`?sessionId=` takes that Session's project set, and with neither the Host falls back to its own registered
-workspaces — a Settings page belongs to no Session, so that is the only honest source). `Temp/UnityLockfile`
-says whether the editor is open; a probe of the endpoint is the only evidence of "connected".
+The **Unity project** picker lists the projects that scan found; the choice is stored in
+`preferences.unityProject` and reused next time, falling back to the first scanned project when it disappears.
+Below it, the **Locus plugin** row reports the selected project in a capsule with four states:
+
+| Capsule | Meaning |
+|---|---|
+| **Connected** | The package is installed and something answers on the broker endpoint |
+| **Unity not open** | The package is installed but the editor has not opened this project |
+| **Connection failed** | The editor is open but the native bridge never started (check `Library/Locus/NativeBridge.enabled`) |
+| **Not installed** | The project has no Locus package, or an incomplete one; the row offers **Install** |
+
+The Workspace, Domain skills and Features groups each sit in their own bordered card, and the row geometry
+matches the host Settings page.
 
 The install button is deliberately narrow:
 
@@ -323,16 +336,49 @@ The install button is deliberately narrow:
   tells you to reopen the editor.
 - **It refuses while the editor has the project open** (409 `editor_running`) — the editor holds the package
   assemblies. The page turns that refusal into a sentence rather than printing the status code.
-- **It only handles paths this list would show**, so the button never becomes an arbitrary directory copier.
+- **It only handles projects this scan would show**, so the button never becomes an arbitrary directory copier.
+
+`Temp/UnityLockfile` (is the editor open) and an endpoint probe (is anything listening) decide the connection
+state; "No plugin" is a filesystem fact, not a connection problem.
+
+### Domain skills
+
+Each row offers **Download** and writes one skill into the selected workspace's DSH skill
+root (`<project root>/.dsh/skills/<name>/SKILL.md`, where the project root follows DSH's rule: the nearest
+`.git`); the row reads "Downloaded" once the file matches the shipped version. The five documents with no
+DSH equivalent are kept:
+
+| Skill | Covers | Executable C# |
+|---|---|---|
+| `debugger` | PlayerLoop/Tick positioning, cross-frame conditions, paused inspection, native thread stacks | — |
+| `profiler` | CPU/GPU/memory/GC samples, baseline comparison, marker call paths | — |
+| `graphics-debugger` | Frame Debugger events and render targets, RenderDoc capture/replay | `FrameDebuggerApi`, `RenderDocCaptureApi` |
+| `ui-toolkit` | Unity 6.3+ UI Toolkit layout, style and interaction debugging | `UIToolkitApi` |
+| `view` | Locus View panels (Vue UI, inspector, table, graph editors) | — |
+
+Downloading either skill that carries C# also **activates** it: the shipped sources are handed to the editor's
+own `compile_skill_package` command, compiled into an assembly and kept active, so a later `unity_execute` can
+call them with `using Locus.Skills;`. With the editor closed the documentation is still written and the C#
+capability waits for the editor.
+
+Neither a domain reload nor a plugin upgrade needs a manual click: the next `unity_execute` reads the editor's
+`domain_generation`, recompiles silently when it moved (a cache hit makes it near-free), and a changed source
+hash triggers the same recompile. A failed compile is retried at most once a minute, so a package that cannot
+build never holds up every snippet.
+
+`RenderDocCaptureApi` only gets compiled and activated: an actual RenderDoc capture still needs the Python
+helpers and the `renderdoc` module that only the Locus desktop app carries, so only the Frame Debugger half of
+the graphics skill is complete here. Repeating the download is idempotent — files whose content already matches
+are not rewritten.
 
 ## Differences from the Locus desktop client
 
 - **The session working directory does not have to be the Unity project.** The plugin searches up to three
-  levels downward, breadth-first, and when that fails it searches beside each ancestor directory; an explicit
+  levels downward, breadth-first, and never upward or into a directory beside the workspace; an explicit
   `project_path` always takes precedence.
 - **No Locus desktop UI, knowledge base or skill system.** This plugin takes the "call into Unity from another
-  process" capability plus one right-Sidebar asset panel; the desktop app's main window, knowledge and skills
-  take no part.
+  process" capability, plus one right-Sidebar asset panel and five downloadable Unity domain skills; the desktop
+  app's main window, knowledge index, skill runtime and agent loop take no part.
 - **The broker supports multiple clients.** When the broker has the `broker_multi_client_v1` capability, DSH and
   the Locus desktop app can be connected to the same editor at the same time, and responses go back to the
   connection that issued the request.

@@ -53,6 +53,32 @@ statistics, and is adapted to run as a standalone ES-module bundle loaded by the
 DSH Sidebar instead of a Vue component. `lib/model-viewer.js` is its generated
 bundle; see the bundled third-party notices below for its MIT dependencies.
 
+### `src/skills/` — bundled Unity domain skills
+
+Five Markdown skill documents copied from upstream Locus and **modified only** in
+their YAML frontmatter: Locus' `summary`/`tools` fields are replaced by the
+`name`/`description` pair DSH's filesystem skill provider requires, and
+`metadata.portedFrom` / `metadata.upstream` record where each body came from. The
+bodies are otherwise verbatim:
+
+- `debugger/`, `profiler/` — from upstream `knowledge/skill/`;
+- `graphics-debugger/`, `ui-toolkit/`, `view/` — from upstream `skills/`.
+
+Two of them also carry their Unity C# capability sources **verbatim**:
+
+- `graphics-debugger/unity/Editor/` — `FrameDebuggerApi.cs`, `RenderDocCapture.cs`;
+- `ui-toolkit/unity/Editor/` — `UIToolkitApi.cs`, `UIToolkitDevTools.cs`.
+
+They are compiled at usage time by the connected editor's own
+`compile_skill_package` bridge command (which ships in `payload/locus_unity/`),
+so this plugin redistributes source, not binaries. The Python RenderDoc helpers
+(`scripts/locus_renderdoc.py`, `scripts/locus_texture_analysis.py`) and the Locus
+frontend runtime are **not** redistributed: the first needs RenderDoc and a
+Python sidecar this bridge does not provide, the second has no DSH counterpart.
+
+The remaining Locus knowledge documents are not shipped: they only duplicate
+DSH's own agent/skill/plugin surface, which DSH already provides.
+
 ### `src/sidebar/` and `src/client/` — Sidebar asset panel
 
 **Original work**, not a copy: the right-Sidebar panel and its HTTP routes were
