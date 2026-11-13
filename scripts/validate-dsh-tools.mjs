@@ -7,9 +7,11 @@
 
 import { createRequire } from 'node:module'
 import { pathToFileURL } from 'node:url'
+import { allToolDefinitions, registryDefinitions } from '../src/index.js'
 import { parameterSpecs } from '../src/tools.js'
-import { allToolDefinitions } from '../src/index.js'
+import { ASYNC_PARAMETER, BACKGROUND_TOOL_NAMES } from '../src/background.js'
 
+const compiledDefinitions = new Map(registryDefinitions().map((definition) => [definition.name, definition]))
 const toolDefinitions = allToolDefinitions()
 
 const require = createRequire(import.meta.url)
@@ -42,13 +44,19 @@ if (!dshTools) {
   console.log('dsh-tools not resolvable; run with DSH_TOOLS_PATH=/abs/path/to/dsh-tools/lib/index.js')
   process.exitCode = 2
 } else {
-  const { defineTool, validateArgs } = dshTools
+  const { defineTool, validateJsonSchemaValue } = dshTools
   let failures = 0
   for (const raw of toolDefinitions) {
     try {
-      const parameters = parameterSpecs(raw)
-      const definition = defineTool({ ...raw, parameters })
-      const violations = validateArgs(parameters, sampleArgs(definition.name))
+      const authored = parameterSpecs(raw)
+      if (BACKGROUND_TOOL_NAMES.has(raw.name)) authored.async = { ...ASYNC_PARAMETER }
+      const definition = defineTool({ ...raw, parameters: authored })
+      const compiled = compiledDefinitions.get(definition.name)
+      if (!compiled) throw new Error('definition is missing from registryDefinitions()')
+      if (BACKGROUND_TOOL_NAMES.has(definition.name) && !compiled.parameters.properties?.async) {
+        throw new Error('registry definition is missing the injected async parameter')
+      }
+      const violations = validateJsonSchemaValue(compiled.parameters, sampleArgs(definition.name), '')
       if (violations.length > 0) {
         failures += 1
         console.log(`${definition.name}: sample args rejected: ${violations.join('; ')}`)
@@ -73,6 +81,7 @@ function sampleArgs(name) {
         readonly: true,
         request_editor_status: 'editing',
         timeout: 600000,
+        async: 'notify',
       }
     case 'unity_run_states':
       return {
@@ -123,7 +132,7 @@ function sampleArgs(name) {
         operation: { op: 'set', value: '0,1,0' },
       }
     case 'unity_test':
-      return { action: 'run', mode: 'edit', groups: ['^Game\\.Tests'], timeout: 600000, result_detail: 'failures' }
+      return { action: 'run', mode: 'edit', groups: ['^Game\\.Tests'], timeout: 600000, result_detail: 'failures', async: 'async' }
     case 'unity_asset_graph':
       return {
         action: 'usages',

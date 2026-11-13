@@ -39,6 +39,7 @@ import {
   readEditorStatus,
 } from './execute.js'
 import { formatStatus } from './format.js'
+import { jobLabel, parseAsyncMode, startBackground } from './background.js'
 import {
   RUN_STATES_REQUEST_TIMEOUT_MS,
   buildRunStatesRequest,
@@ -310,6 +311,7 @@ const unityExecute = {
     render: (_args, value) => [{ type: 'text', text: value.output }],
   },
   async execute(args, exec) {
+    const mode = parseAsyncMode(args.async)
     const projectRoot = resolveProjectRoot(args.project_path, exec)
     const target = describeTarget({ projectRoot })
     let code
@@ -320,51 +322,68 @@ const unityExecute = {
     }
     const requested = args.request_editor_status
     const timeoutMs = clampExecuteTimeout(args.timeout)
-    try {
-      const client = await getClient(target)
-      const state = await readEditorStatus(client)
-      if (!state.connected) return failure(`Unity Editor not connected${state.error ? `: ${state.error}` : ''}.`)
-      assertRequestedStatus(requested, state.status)
 
-      // A domain reload (or an editor restart) clears the editor's skill-assembly
-      // registry, and a project that just switched a skill on has nothing
-      // compiled yet. `ensureSkillActivation` compiles the switched-on packages
-      // here: the first snippet pays for it, later ones do one cheap request.
-      await ensureSkillActivation(client, projectRoot).catch(() => {})
-
-      const owner = `dsh-${process.pid}-${randomUUID()}`
-      const session = args.readonly === true ? null : await openEditSession(target, owner)
+    const run = async (runExec) => {
       try {
-        let lastPublished = 0
-        const { output, progress } = await executeSnippet(client, {
-          code,
-          executionId: randomUUID(),
-          timeoutMs,
-          signal: exec.signal,
-          onProgress: (snapshot) => {
-            const blocked = blockedMs(snapshot)
-            if (blocked >= 5_000 && blocked - lastPublished >= 5_000) {
-              lastPublished = blocked
-              publish(`Unity main thread blocked ${(blocked / 1000).toFixed(1)}s`, exec)
-            } else if (snapshot?.title || snapshot?.info) {
-              publish(String(snapshot.info || snapshot.title), exec)
-            }
-          },
-        })
-        const trimmed = (output ?? '').trim()
-        let text = trimmed.length > 0 ? trimmed : 'Code executed successfully (no output).'
-        const note = longBlockNote(blockedMs(progress))
-        if (note) text += `\n\n${note}`
-        return { output: text, cancelled: false, maxMainThreadBlockedMs: blockedMs(progress) }
-      } finally {
-        await session?.release()
+        const client = await getClient(target)
+        const state = await readEditorStatus(client)
+        if (!state.connected) return failure(`Unity Editor not connected${state.error ? `: ${state.error}` : ''}.`)
+        assertRequestedStatus(requested, state.status)
+
+        // A domain reload (or an editor restart) clears the editor's skill-assembly
+        // registry, and a project that just switched a skill on has nothing
+        // compiled yet. `ensureSkillActivation` compiles the switched-on packages
+        // here: the first snippet pays for it, later ones do one cheap request.
+        await ensureSkillActivation(client, projectRoot).catch(() => {})
+
+        const owner = `dsh-${process.pid}-${randomUUID()}`
+        const session = args.readonly === true ? null : await openEditSession(target, owner)
+        try {
+          let lastPublished = 0
+          const { output, progress } = await executeSnippet(client, {
+            code,
+            executionId: randomUUID(),
+            timeoutMs,
+            signal: runExec.signal,
+            onProgress: (snapshot) => {
+              const blocked = blockedMs(snapshot)
+              if (blocked >= 5_000 && blocked - lastPublished >= 5_000) {
+                lastPublished = blocked
+                publish(`Unity main thread blocked ${(blocked / 1000).toFixed(1)}s`, runExec)
+              } else if (snapshot?.title || snapshot?.info) {
+                publish(String(snapshot.info || snapshot.title), runExec)
+              }
+            },
+          })
+          const trimmed = (output ?? '').trim()
+          let text = trimmed.length > 0 ? trimmed : 'Code executed successfully (no output).'
+          const note = longBlockNote(blockedMs(progress))
+          if (note) text += `\n\n${note}`
+          return { output: text, cancelled: false, maxMainThreadBlockedMs: blockedMs(progress) }
+        } finally {
+          await session?.release()
+        }
+      } catch (error) {
+        if (error?.message === UNITY_EXECUTE_CANCELLED || runExec.signal?.aborted) {
+          return { output: 'Execution cancelled by the caller; Unity snippet stopped.', cancelled: true, maxMainThreadBlockedMs: 0 }
+        }
+        return failure(asToolError(error).message)
       }
-    } catch (error) {
-      if (error?.message === UNITY_EXECUTE_CANCELLED || exec.signal?.aborted) {
-        return { output: 'Execution cancelled by the caller; Unity snippet stopped.', cancelled: true, maxMainThreadBlockedMs: 0 }
-      }
-      return failure(asToolError(error).message)
     }
+
+    if (mode === 'sync') return run(exec)
+
+    const started = startBackground({
+      jobs: host?.get?.('jobs'),
+      exec,
+      kind: 'unity_execute',
+      label: jobLabel('unity_execute', projectRoot),
+      mode,
+      run,
+      render: (value) => value?.output ?? '',
+      isFailure: (value) => typeof value?.output === 'string' && value.output.startsWith('Error: '),
+    })
+    return { output: started.text, cancelled: false, maxMainThreadBlockedMs: 0 }
   },
 }
 
@@ -1157,8 +1176,14 @@ const unityTest = {
     render: (_args, value) => [{ type: 'text', text: value.text }],
   },
   async execute(args, exec) {
-    const target = targetFor(args, exec)
     const action = String(args.action ?? '')
+    if (action !== 'list' && action !== 'run') {
+      throw new Error(`action must be one of ${TEST_ACTIONS.join(', ')}.`)
+    }
+    const mode = parseAsyncMode(args.async)
+    if (mode !== 'sync' && action !== 'run') {
+      throw new Error('async is only supported for action "run".')
+    }
     const filter = {
       mode: args.mode,
       assemblies: args.assemblies,
@@ -1166,53 +1191,69 @@ const unityTest = {
       groups: args.groups,
       categories: args.categories,
     }
-    try {
-      const client = await getClient(target)
-      if (action === 'list') {
-        const list = await listTests(client, { ...filter, maxResults: args.max_results })
-        return { text: formatTestList(list), status: 'listed', total: list.matched, passed: 0, failed: 0, skipped: 0 }
-      }
-      if (action === 'run') {
-        const timeoutMs = clampExecuteTimeout(args.timeout)
-        let lastPublish = 0
-        const snapshot = await runTests(
-          client,
-          { ...filter, maxResults: args.max_results, resultDetail: args.result_detail },
-          {
-            signal: exec.signal,
-            timeoutMs,
-            onUpdate: (update) => {
-              const now = Date.now()
-              if (now - lastPublish < 2_000) return
-              lastPublish = now
-              const progress = `Unity Test ${update.status}: ${update.passed} passed, ${update.failed} failed of ` +
-                `${update.total}` + (update.currentTest ? ` — ${update.currentTest}` : '')
-              publish(progress, exec)
-            },
-          },
-        )
-        return {
-          text: formatTestRun(snapshot, { resultDetail: args.result_detail ?? 'failures' }),
-          status: snapshot.status,
-          total: snapshot.total,
-          passed: snapshot.passed,
-          failed: snapshot.failed,
-          skipped: snapshot.skipped,
+
+    const run = async (runExec) => {
+      const target = targetFor(args, runExec)
+      try {
+        const client = await getClient(target)
+        if (action === 'list') {
+          const list = await listTests(client, { ...filter, maxResults: args.max_results })
+          return { text: formatTestList(list), status: 'listed', total: list.matched, passed: 0, failed: 0, skipped: 0 }
         }
+        if (action === 'run') {
+          const timeoutMs = clampExecuteTimeout(args.timeout)
+          let lastPublish = 0
+          const snapshot = await runTests(
+            client,
+            { ...filter, maxResults: args.max_results, resultDetail: args.result_detail },
+            {
+              signal: runExec.signal,
+              timeoutMs,
+              onUpdate: (update) => {
+                const now = Date.now()
+                if (now - lastPublish < 2_000) return
+                lastPublish = now
+                const progress = `Unity Test ${update.status}: ${update.passed} passed, ${update.failed} failed of ` +
+                  `${update.total}` + (update.currentTest ? ` — ${update.currentTest}` : '')
+                publish(progress, runExec)
+              },
+            },
+          )
+          return {
+            text: formatTestRun(snapshot, { resultDetail: args.result_detail ?? 'failures' }),
+            status: snapshot.status,
+            total: snapshot.total,
+            passed: snapshot.passed,
+            failed: snapshot.failed,
+            skipped: snapshot.skipped,
+          }
+        }
+      } catch (error) {
+        // A cancelled run carries the last snapshot: report the results it did
+        // reach instead of discarding them behind the cancellation message.
+        if (error?.message === UNITY_TEST_CANCELLED || runExec.signal?.aborted) {
+          const snapshot = error.snapshot
+          const text = snapshot
+            ? `Unity Test run cancelled.\n${formatTestRun(snapshot)}`
+            : 'Unity Test run cancelled.'
+          return { text, status: 'cancelled', total: snapshot?.total ?? 0, passed: snapshot?.passed ?? 0, failed: snapshot?.failed ?? 0, skipped: snapshot?.skipped ?? 0 }
+        }
+        throw asToolError(error)
       }
-      throw new Error(`action must be one of ${TEST_ACTIONS.join(', ')}.`)
-    } catch (error) {
-      // A cancelled run carries the last snapshot: report the results it did
-      // reach instead of discarding them behind the cancellation message.
-      if (error?.message === UNITY_TEST_CANCELLED || exec.signal?.aborted) {
-        const snapshot = error.snapshot
-        const text = snapshot
-          ? `Unity Test run cancelled.\n${formatTestRun(snapshot)}`
-          : 'Unity Test run cancelled.'
-        return { text, status: 'cancelled', total: snapshot?.total ?? 0, passed: snapshot?.passed ?? 0, failed: snapshot?.failed ?? 0, skipped: snapshot?.skipped ?? 0 }
-      }
-      throw asToolError(error)
     }
+
+    if (mode === 'sync') return run(exec)
+
+    const started = startBackground({
+      jobs: host?.get?.('jobs'),
+      exec,
+      kind: 'unity_test',
+      label: jobLabel('unity_test', action),
+      mode,
+      run,
+      render: (value) => value?.text ?? '',
+    })
+    return { text: started.text, status: 'background', total: 0, passed: 0, failed: 0, skipped: 0 }
   },
 }
 

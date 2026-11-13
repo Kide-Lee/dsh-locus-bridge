@@ -48,6 +48,8 @@ dsh plugin --profile <profile> add github:Kide-Lee/dsh-locus-bridge
 | `unity_capture` | 截取 Game / Scene / 编辑器窗口，图像直接随结果返回（`ImageBlock`），一次调用即可看见 | `capture_viewport` + `attachments.saveImage` |
 | `unity_scene` | 场景对象检索（`search` 按名称、`find` 按组件类型）、属性树读取、原子 `set`、单事务 `batch` 与 `undo` | `search_scene_objects` / `property_tree_read` / 生成的 `execute_code` |
 
+`unity_execute` 与 `unity_test action:"run"` 还接受宿主注入的 `async` 参数，语义与 Locus 一致：`sync`（默认）等待结果；`async` 立即返回 job id，不发送完成通知，用 `job_output` 读取；`notify` 立即返回，并在完成时自动投递结果。job 由 DSH 的 jobs 管理，`job_kill` 可以取消，生命周期限于当前 Session；后台只让 agent 继续，不绕开 Unity 主线程，也不解除 `unity_execute` 的 30 秒无输出限制和工具自身的 `timeout`。`unity_run_states` 按官方行为保持同步。
+
 ### C# 语义分析（可选，独立于 Unity 连接）
 
 这六个工具不走 broker：它们在本地起一个 Roslyn 语言服务器（`dotnet` 子进程），

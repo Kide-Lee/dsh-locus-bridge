@@ -268,20 +268,20 @@ ctx.tools.register(defineTool({
 | 工具 | 状态 | 实现要点 |
 |---|---|---|
 | `unity_status` | 完成 | `status` + `bridge_capabilities` + `get_reload_state` |
-| `unity_execute` | 完成 | 状态闸门、edit session、`execute_code` + 250ms 进度轮询、`cancel_execute_code`、有界清理 |
+| `unity_execute` | 完成 | 状态闸门、edit session、`execute_code` + 250ms 进度轮询、`cancel_execute_code`、有界清理；宿主注入 `async: sync/async/notify`（`async` 静默、`notify` 自动投递） |
 | `unity_run_states` | 完成 | 状态闸门、`run_states` 状态机；无空闲看门狗；输出 ≤100k token 内联、100k–1M 落盘 `Library/Locus/RunStates`、>1M 报错 |
 | `unity_play_mode` | 完成 | `set_editor_status` + 30s 收敛轮询 |
 | `unity_console_log` | 完成 | `unity_get_console_log` |
 | `unity_recompile` | 完成 | `request_recompile` → 断线 → 重连 → 轮询 `get_compile_result`；接管 `recompile_in_progress`、识别 `superseded`/`error` |
-| `unity_test` | 完成 | `unity_test_list` / `unity_test_start` → 250ms `unity_test_status` →（取消）`unity_test_cancel` |
+| `unity_test` | 完成 | `unity_test_list` / `unity_test_start` → 250ms `unity_test_status` →（取消）`unity_test_cancel`；`action:"run"` 支持宿主注入的 `async` |
 | `unity_asset` | 完成 | `asset_api` read / apply_batch（revision 守卫、值编码含对象引用）/ undo（反向批次）/ disk_reload |
 | `unity_asset_graph` | 完成 | 生成 `execute_code`，按 `.meta` GUID 比对序列化字段 |
 | `unity_capture` | 完成 | `capture_viewport` + `attachments.saveImage`（内联 `ImageBlock`） |
 | `unity_scene` | 完成 | `search_scene_objects`、`property_tree_read`、原子 set（生成 `execute_code`：解析 → Undo → 写属性 → 保存场景 → 打印 JSON） |
 
 验证：
-- 397 个测试（`node --test --test-concurrency=1 "test/*.test.js"`），假 broker 覆盖重连、接管编译、取消、超时、断线、资产修订守卫/undo、场景 set、edit session 顺序、Console 渲染、run_states 状态机与输出落盘。
-- 工具 schema 同时通过本仓库子集校验（`dump-tools.mjs`）与真实 DSH 的 `defineTool`/`validateArgs` 校验（`validate-dsh-tools.mjs`）。
+- 406 个测试（`node --test --test-concurrency=1 "test/*.test.js"`），假 broker 覆盖重连、接管编译、取消、超时、断线、资产修订守卫/undo、场景 set、edit session 顺序、Console 渲染、run_states 状态机与输出落盘、后台 job 的 `sync/async/notify` 与取消。
+- 工具 schema 同时通过本仓库子集校验（`dump-tools.mjs`）与真实 DSH 的 `defineTool` 与原始 JSON Schema 校验（`validate-dsh-tools.mjs`）。
 - `scripts/typecheck.mjs` 做跨模块 import/调用一致性检查（无 TypeScript）。
 
 仍待实机确认（Windows + Unity）：Win32 管道读写、worker 阻塞读循环、失焦心跳、真实 `request_recompile` 跨重载时序，用 `node scripts/live-smoke.mjs --project <项目>`（可加 `--recompile`）。

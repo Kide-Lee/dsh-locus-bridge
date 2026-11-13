@@ -25,6 +25,7 @@ import { registerAssetRoutes } from './sidebar/routes.js'
 import { onSettingsChanged, readSettings, resolveFeatures } from './settings.js'
 import { createDomainSkillProvider } from './skills/provider.js'
 import { toRegistryDefinition } from './schema.js'
+import { withAsyncParameter } from './background.js'
 
 export const name = 'dsh-locus-bridge'
 /**
@@ -88,7 +89,9 @@ export function allToolDefinitions(env = process.env) {
  * forwards `parameters` to the model as `input_schema` without compiling it.
  */
 export function registryDefinitions(env = process.env) {
-  return allToolDefinitions(env).map((raw) => toRegistryDefinition({ ...raw, parameters: parameterSpecs(raw) }))
+  return allToolDefinitions(env).map((raw) =>
+    withAsyncParameter(toRegistryDefinition({ ...raw, parameters: parameterSpecs(raw) })),
+  )
 }
 
 /**

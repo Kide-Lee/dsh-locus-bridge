@@ -146,6 +146,8 @@ unpacked directory to keep it outside the plugin directory.
 | `unity_capture` | Capture the Game / Scene view or an Editor window, with the image attached to the result (`ImageBlock`) — visible in one call | `capture_viewport` + `attachments.saveImage` |
 | `unity_scene` | Scene object search (by name, and `find` by component type), property tree read, atomic `set`, single-transaction `batch` and `undo` | `search_scene_objects` / `property_tree_read` / generated `execute_code` |
 
+`unity_execute` and `unity_test action:"run"` also accept a host-injected `async` argument with Locus's semantics: `sync` (the default) waits for the result; `async` returns a job id immediately, sends no completion notice, and leaves the result for `job_output`; `notify` returns immediately and has the completion delivered automatically. Jobs are owned by the DSH jobs service, can be cancelled with `job_kill`, and live only in this Session. Running in the background only frees the agent: the work still runs on Unity's main thread and keeps the 30-second no-output limit and the tool's own `timeout`. `unity_run_states` stays synchronous, matching upstream.
+
 ### C# semantic analysis (optional, independent of the Unity connection)
 
 These six tools do not touch the broker: they start a local Roslyn language server (`dotnet` child
