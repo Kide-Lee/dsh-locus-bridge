@@ -1,6 +1,6 @@
 {
   "name": "dsh-locus-bridge",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "DSH plugin acting as a Locus client for the Unity native broker (Win32 named pipe or Unix domain socket).",
   "license": "GPL-3.0-or-later",
   "type": "module",
@@ -20,6 +20,7 @@
     "cordis.patch.yml",
     "README.md",
     "README.en.md",
+    "CHANGELOG.md",
     "LICENSE",
     "NOTICE",
     "native/locus_unix_native/Cargo.toml",
@@ -33,6 +34,10 @@
   "engines": {
     "node": ">=22.12",
     "dsh": ">=0.2.1-alpha.2 <0.3.0-0"
+  },
+  "locus": {
+    "repository": "https://github.com/r1n7aro/Locus",
+    "version": "0.9.3"
   },
   "repository": {
     "type": "git",
@@ -64,6 +69,7 @@
     "test:native": "cargo test --release --manifest-path native/locus_unix_native/Cargo.toml",
     "sync:payload": "node scripts/sync-payload.mjs",
     "check:payload": "node scripts/sync-payload.mjs --check",
+    "pack:release": "node scripts/pack-release.mjs",
     "install:unity-package": "node scripts/install-unity-package.mjs",
     "test:csharp": "node scripts/live-csharp.mjs",
     "build:client": "node scripts/build-client.mjs",

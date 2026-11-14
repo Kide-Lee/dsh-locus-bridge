@@ -127,8 +127,8 @@ The Windows file is the upstream crate itself, unmodified, and its 44 exported s
 `locus_unity_native/exports.txt` name for name (Unity binds by those names across versions).
 
 Regenerate it with `npm run sync:payload` from a local Locus checkout (`--check` verifies without writing).
-The 15 MB tree stays out of the npm tarball and ships as a release asset; point `DSH_LOCUS_PAYLOAD_DIR` at the
-unpacked directory to keep it outside the plugin directory.
+The 15 MB tree stays out of the npm tarball but ships inside the release ZIP at `payload/locus_unity`; point
+`DSH_LOCUS_PAYLOAD_DIR` at an unpacked copy to keep it outside the plugin directory.
 
 ## Tools
 
@@ -402,6 +402,7 @@ npm install                # dev dependencies (three / esbuild, needed to build 
 npm test                   # no Unity or network needed
 npm run typecheck          # static check of import / export
 npm run validate           # tool definitions + static checks + both bundle freshness checks
+npm run pack:release       # release ZIP; checks latest Locus and latest DSH first
 npm run build:client       # generate lib/client.js from src/client/plugin.js (the Sidebar panel)
 npm run build:viewer       # generate lib/model-viewer.js from src/model-viewer/viewer.js (three.js viewer)
 npm run build:native       # the Linux/macOS broker (Rust)
@@ -410,6 +411,11 @@ npm run test:live:sidebar  # sidebar routes: real HTTP + real Unity, see scripts
 npm run test:live:render   # sidebar panel: every format through a render harness, see scripts/live-render.mjs
 npm run test:csharp        # C# analysis end-to-end against a real Roslyn server
 ```
+
+`npm run pack:release` produces exactly one artifact: an installable ZIP containing the Unity
+payload and installer. Before building it queries the latest Locus GitHub release and **stops** if it
+does not match `package.json` → `locus.version`; it also checks the latest published DSH version
+against `engines.dsh`, warning but continuing when it is incompatible or cannot be checked.
 
 The Sidebar client lives in `src/client/plugin.js` (plain ESM, so tests import it directly);
 `npm run build:client` wraps it into the `__ModuleLoader__` factory a DSH client bundle needs and writes

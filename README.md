@@ -165,7 +165,7 @@ DSH 设置里有一个 **Unity 桥接** 页（`settings.section`，id `dsh-locus
 
 | 开关 | 关掉之后 |
 |---|---|
-| **Unity 操纵** | 十个 `unity_*` 工具从模型的工具列表里消失（Host 侧注销，并非只在 UI 隐藏） |
+| **Unity 操纵** | 十一个 `unity_*` 工具从模型的工具列表里消失（Host 侧注销，并非只在 UI 隐藏） |
 | **C# 分析** | 六个 `code_*` 工具消失，并关闭已启动的 Roslyn 语言服务器进程 |
 | **文件预览** | 右栏 Unity 资产标签页不再注册；`/locus/api` 下访问 Unity 的路由一律返回 `feature_disabled` |
 
@@ -269,6 +269,7 @@ npm install                # 开发依赖（three / esbuild，构建模型查看
 npm test                   # 不需要 Unity、不需要网络
 npm run typecheck          # 静态检查 import / export
 npm run validate           # 工具定义 + 静态检查 + 两个 bundle 是否最新
+npm run pack:release       # 发布 ZIP；先检查 Locus 是否最新、最新 DSH 是否兼容
 npm run build:client       # 由 src/client/plugin.js 生成 lib/client.js（右栏面板）
 npm run build:viewer       # 由 src/model-viewer/viewer.js 生成 lib/model-viewer.js（three.js 查看器）
 npm run build:native       # Linux/macOS 的 broker（Rust）
@@ -277,6 +278,10 @@ npm run test:live:sidebar  # 右栏路由：真 HTTP + 真 Unity，见 scripts/l
 npm run test:live:render   # 右栏面板：在渲染壳里跑遍所有格式，见 scripts/live-render.mjs
 npm run test:csharp        # C# 分析：真实 Roslyn 服务器端到端，见 scripts/live-csharp.mjs
 ```
+
+`npm run pack:release` 只有一种产物：包含 Unity payload 与安装器的可安装 ZIP。打包前会查询
+GitHub 上 Locus 的最新 release；与 `package.json` → `locus.version` 不一致时**停止打包**。它还会
+查询 npm 上最新 DSH 版本并对照 `engines.dsh`；不兼容或查询失败时只警告，继续打包。
 
 右栏客户端在 `src/client/plugin.js`（普通 ESM，便于测试），`npm run build:client` 把它包成
 DSH 客户端 bundle 的 `__ModuleLoader__` 工厂写进 `lib/client.js`。改面板请改源文件再重新生成；

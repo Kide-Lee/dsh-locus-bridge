@@ -280,7 +280,7 @@ ctx.tools.register(defineTool({
 | `unity_scene` | 完成 | `search_scene_objects`、`property_tree_read`、原子 set（生成 `execute_code`：解析 → Undo → 写属性 → 保存场景 → 打印 JSON） |
 
 验证：
-- 406 个测试（`node --test --test-concurrency=1 "test/*.test.js"`），假 broker 覆盖重连、接管编译、取消、超时、断线、资产修订守卫/undo、场景 set、edit session 顺序、Console 渲染、run_states 状态机与输出落盘、后台 job 的 `sync/async/notify` 与取消。
+- 411 个测试（`node --test --test-concurrency=1 "test/*.test.js"`），假 broker 覆盖重连、接管编译、取消、超时、断线、资产修订守卫/undo、场景 set、edit session 顺序、Console 渲染、run_states 状态机与输出落盘、后台 job 的 `sync/async/notify` 与取消；发布检查覆盖 SemVer 范围、Locus 硬门禁与 DSH 兼容性判定。
 - 工具 schema 同时通过本仓库子集校验（`dump-tools.mjs`）与真实 DSH 的 `defineTool` 与原始 JSON Schema 校验（`validate-dsh-tools.mjs`）。
 - `scripts/typecheck.mjs` 做跨模块 import/调用一致性检查（无 TypeScript）。
 
