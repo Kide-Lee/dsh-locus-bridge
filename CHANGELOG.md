@@ -2,6 +2,22 @@
 
 本文件记录 dsh-locus-bridge 的版本变更。版本号遵循 SemVer，条目按用户可见的变化归纳。
 
+## [Unreleased]
+
+### 与 Locus 官方对齐：工具权限契约
+
+- `unity_execute` 的 `readonly` 恢复为**必填**（官方 schema 即如此），并删掉描述里不存在的「recording mode」说法：
+  只读调用跳过桥接的 edit session，写操作必须显式声明 `readonly: false`。
+- `unity_execute` / `unity_run_states` 补上 `enable_non_public_access`：`unity_execute` 默认 true、受设置页
+  「允许访问私有/内部成员」（全局半边）约束；`unity_run_states` 只接受 `false`，传 `true` 会明确报错而不是被忽略。
+- 所有工具的参数根改为闭合对象（`additionalProperties: false`，与官方一致）：拼错或误传的参数现在是参数错误，
+  不再被静默丢弃。受影响的正是 `readonly` / `enable_non_public_access` / `request_editor_status` 这类会改变
+  权限语义的参数。
+- `unity_asset` 的 `apply` / `undo` 与 `unity_scene` 的 `undo` 现在要求 `request_editor_status` 并与实时状态
+  比对——它们都会落盘/保存场景，不能再在任意编辑器状态下写入。`unity_asset` 新增 `request_editor_status` 参数。
+- `unity_asset` / `unity_scene` / `unity_test` 的 `action` 描述明确标出哪些动作会写（`apply`/`undo`、
+  `set`/`batch`/`undo`、`run`），替代官方把读写拆成不同工具时由工具名承载的那层语义。
+
 ## [1.0.0] - 2026-11-14
 
 首个稳定版本。DSH 作为 Locus 客户端，通过 Locus 原生 broker 操作 Unity 编辑器：Windows 使用命名管道，

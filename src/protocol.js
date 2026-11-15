@@ -91,6 +91,48 @@ export function executePayload(code, { executionId, timeoutMs } = {}) {
   return payload
 }
 
+// ─── enable_non_public_access ────────────────────────────────────────────────
+
+/**
+ * The namespace a snippet imports to reach assembly-internal members.
+ *
+ * Upstream's compile server emits the snippet assembly with an
+ * `IgnoresAccessChecksTo` allow-list (`NonPublicAccessProbeMode::SkipVerification`).
+ * This bridge cannot emit one, so the `using` is the part of the feature that
+ * still carries meaning: with it, a snippet names anything the project
+ * assemblies expose and a genuine cross-assembly internal reference fails with
+ * Roslyn's own CS0122 instead of a misleading success.
+ */
+export const NON_PUBLIC_ACCESS_NAMESPACE = '__LocusNonPublicAccess'
+
+/** Assemblies a snippet may address this way when the switch is on. */
+export const NON_PUBLIC_ACCESS_USER_ASSEMBLIES = ['Assembly-CSharp', 'Assembly-CSharp-Editor']
+
+/**
+ * Resolve upstream's `resolve_tool_non_public_access`: an omitted parameter
+ * means true, anything but a boolean is rejected, and the user's global switch
+ * always wins.
+ *
+ * @param value - the raw argument (`undefined` when the model omitted it).
+ * @param opts.globalEnabled - the global Hot Reload & Compile switch.
+ * @returns `true` only when both the call and the global switch ask for it.
+ */
+export function resolveNonPublicAccess(value, { globalEnabled = true } = {}) {
+  if (value !== undefined && typeof value !== 'boolean') {
+    throw new TypeError('enable_non_public_access must be a boolean when provided.')
+  }
+  const requested = value === undefined ? true : value
+  return Boolean(globalEnabled) && requested
+}
+
+/**
+ * Namespaces a non-public-access snippet has to import: one `using` per
+ * assembly the bridge can reach that way.
+ */
+export function nonPublicAccessPreamble() {
+  return NON_PUBLIC_ACCESS_USER_ASSEMBLIES.map((assembly) => `using ${NON_PUBLIC_ACCESS_NAMESPACE}.${assembly};`).join('\n')
+}
+
 /** Editor status values (`editing`, `playing`, `playing_paused`), plus `disconnected` for clients. */
 export const EDITOR_STATUSES = Object.freeze(['editing', 'playing', 'playing_paused'])
 export const EDITOR_STATUS_DISCONNECTED = 'disconnected'

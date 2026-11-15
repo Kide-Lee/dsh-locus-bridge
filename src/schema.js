@@ -156,6 +156,14 @@ export function compilePropertyMap(spec, path = 'parameters') {
  * Accepts either authored form:
  *   - an implicit property map (`{ code: {...} }`), or
  *   - an already object-rooted schema (`{ type: 'object', properties, required }`).
+ *
+ * The result is always a CLOSED object (`additionalProperties: false`), matching
+ * the upstream Locus tool parameters: a misspelt or misplaced argument is a hard
+ * argument error instead of being silently dropped, which matters most for the
+ * permission-shaped arguments (`readonly`, `enable_non_public_access`,
+ * `request_editor_status`) whose absence changes what the call is allowed to do.
+ * An authored root that explicitly asks for an open map is refused rather than
+ * quietly overridden.
  * @param spec - authored parameters.
  * @returns An object-rooted raw JSON Schema.
  */
@@ -163,12 +171,21 @@ export function compileParameterSpec(spec) {
   const node = spec ?? {}
   assertSchemaObject(node, 'parameters')
   if (node.type === 'object' && Object.hasOwn(node, 'properties')) {
+    if (Object.hasOwn(node, 'additionalProperties') && node.additionalProperties !== false) {
+      throw new TypeError('parameters.additionalProperties must be false: tool parameters are a closed object')
+    }
     const compiled = compileValueNode(node, 'parameters', false)
     delete compiled.required
+    compiled.additionalProperties = false
     return compiled
   }
   const map = compilePropertyMap(node, 'parameters')
-  return { type: 'object', properties: map.properties, ...(map.required ? { required: map.required } : {}) }
+  return {
+    type: 'object',
+    properties: map.properties,
+    ...(map.required ? { required: map.required } : {}),
+    additionalProperties: false,
+  }
 }
 
 /**

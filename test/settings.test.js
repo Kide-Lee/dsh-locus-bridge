@@ -142,7 +142,15 @@ test('non-boolean and unknown switches are not coerced', () => {
   // default rather than being stringified into a directory that would be probed.
   assert.equal(settings.preferences.workspacePath, '')
   assert.equal(settings.preferences.unityProject, '')
-  assert.deepEqual(Object.keys(settings.preferences), ['frameCache', 'workspacePath', 'unityProject'])
+  assert.deepEqual(Object.keys(settings.preferences), [
+    'frameCache',
+    'workspacePath',
+    'unityProject',
+    'nonPublicAccess',
+  ])
+  // The global half of `enable_non_public_access` defaults on, exactly as the
+  // upstream tool schema does, and a non-boolean falls back to it.
+  assert.equal(settings.preferences.nonPublicAccess, true)
 })
 
 test('a workspace path round-trips and survives a hand-edited sibling', (t) => {

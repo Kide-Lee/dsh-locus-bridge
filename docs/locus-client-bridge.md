@@ -154,7 +154,8 @@ DSH 的 `defineTool` 支持原样传入 `properties: Record<string, JsonSchemaNo
 2. `readonly=true` 表示「只观察」，DSH 侧应据此拒绝写类命令、跳过 edit session；`readonly=false` 时包 `begin_edit_session(owner)` … `end_edit_session(owner)`，owner 用 DSH session id（多客户端隔离由 Unity 的 owner 集合保证）。
 3. **C# 文件改动**不要走 `execute_code`（`execute_code` 说明里明确：`.cs` 改动/导入会触发域重载，把 snippet 干掉）→ 用 `write` 工具改文件 + `locus_recompile`。
 4. 30 秒静默限制写进工具 description，并提示 `ctx.Progress` / `WaitFrame` 分块法（DSH 可以用子 agent 但这里只是提示）。
-5. `enable_non_public_access`：DSH 没有 Locus compile server 时该参数只能置灰/忽略，并在 description 注明「in-Unity 编译不支持 private 成员直访」。若要完整支持，需要把 `locus_compile_server`（.NET sidecar，stdio 协议见 `StdioTransport.cs`）也接进来——工作量约等于半个客户端，不建议首版。
+5. `enable_non_public_access`：DSH 没有 Locus compile server 时该开关无法完整实现。**不能静默忽略**（那会让调用方以为拿到了放宽后的访问），落地方式为：`unity_execute` 接受该参数（默认 true，受设置页「允许访问私有/内部成员」这一全局半边约束，调用只能收窄不能放宽），为 true 时给 snippet 加上程序集 `using` 前缀，使内部引用以 Roslyn 自己的 CS0122 失败而不是假成功；`unity_run_states` 的 schema 只接受 `false`，传 `true` 直接报错说明原因。若要完整支持，需要把 `locus_compile_server`（.NET sidecar，stdio 协议见 `StdioTransport.cs`）也接进来——工作量约等于半个客户端，不建议首版。
+6. **写语义必须在 schema 里说明**：官方的读（`unity_yaml_read` / `unity_ref_search` / `unity_test_list` …）与写（`unity_execute` readonly=false、`unity_test_run`）是分开的工具；本桥把它们按资源合并成 `unity_asset` / `unity_scene` / `unity_test`，因此每个 `action` 的描述都要点明哪些是写，且写 action 必须给 `request_editor_status`（`unity_asset` 的 `apply`/`undo` 与 `unity_scene` 的 `set`/`batch`/`undo` 现在都会校验实时状态）。
 
 ### 4.5 生命周期
 

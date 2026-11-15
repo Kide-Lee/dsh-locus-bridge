@@ -181,6 +181,8 @@ const zh = Object.freeze({
   settingsPreferences: '其它',
   settingsFrameCache: '把预览帧缓存到工程里',
   settingsFrameCacheHint: '把渲染出的预览帧写到工程的 Library/Locus/asset-preview-cache。关闭后每次都要重新渲染，但工程目录不会因浏览而增长。',
+  settingsNonPublicAccess: '允许访问私有/内部成员',
+  settingsNonPublicAccessHint: '对应官方的全局 Hot Reload & Compile 开关，是 unity_execute 的 enable_non_public_access 的全局半边：调用可以收窄，不能越过这里放宽。关闭后即使调用把该参数设为 true 也不会生效。',
   settingsSaveFailed: '没有保存成功',
   settingsLoading: '读取设置…',
   settingsUnavailable: '无法读取设置：Host 没有挂载预览路由（可能不是 Web 端）。',
@@ -301,6 +303,8 @@ const en = Object.freeze({
   settingsPreferences: 'Other',
   settingsFrameCache: 'Cache preview frames inside the project',
   settingsFrameCacheHint: 'Writes rendered preview frames under the project’s Library/Locus/asset-preview-cache. Off re-renders every time, but browsing never grows the project directory.',
+  settingsNonPublicAccess: 'Allow access to private and internal members',
+  settingsNonPublicAccessHint: 'The global half of unity_execute’s enable_non_public_access, matching Locus’s global Hot Reload & Compile setting: a call may narrow it, never widen it past this. Off means a call asking for true has no effect.',
   settingsSaveFailed: 'Not saved',
   settingsLoading: 'Reading settings…',
   settingsUnavailable: 'Could not read settings: the Host has not mounted the preview routes (this may not be the Web client).',
@@ -2297,6 +2301,17 @@ export function createLocusAssetPlugin(require) {
           checked: features.preview,
           busy: busy === 'features.preview',
           onChange: (value) => void apply('features', 'preview', value),
+        }),
+        // The global half of unity_execute's enable_non_public_access. It reads as
+        // a feature next to the others because that is how it behaves: one switch
+        // that bounds what every call may ask for.
+        h(SwitchRow, {
+          id: 'nonPublicAccess',
+          label: t('settingsNonPublicAccess'),
+          hint: t('settingsNonPublicAccessHint'),
+          checked: preferences.nonPublicAccess !== false,
+          busy: busy === 'preferences.nonPublicAccess',
+          onChange: (value) => void apply('preferences', 'nonPublicAccess', value),
         }),
       ),
       h(

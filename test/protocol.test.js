@@ -9,7 +9,9 @@ import {
   executePayload,
   isNotExecuted,
   isReloading,
+  nonPublicAccessPreamble,
   parseStatusMessage,
+  resolveNonPublicAccess,
   splitCapabilities,
 } from '../src/protocol.js'
 
@@ -226,4 +228,23 @@ test('isBusyError waits out an unresponsive main thread instead of failing', asy
   for (const code of ['managed_reloading', 'recompile_result_operation_mismatch', 'error CS1002', '']) {
     assert.equal(isBusyError(code), false)
   }
+})
+
+test('resolveNonPublicAccess mirrors upstream: omitted is true, global switch always wins', () => {
+  // Upstream `resolve_tool_non_public_access_with_global` treats a missing
+  // argument as true and ANDs it with the global Hot Reload & Compile setting.
+  assert.equal(resolveNonPublicAccess(undefined), true)
+  assert.equal(resolveNonPublicAccess(true), true)
+  assert.equal(resolveNonPublicAccess(false), false)
+  assert.equal(resolveNonPublicAccess(undefined, { globalEnabled: false }), false)
+  assert.equal(resolveNonPublicAccess(true, { globalEnabled: false }), false)
+  // Anything but a boolean is an argument error rather than a guess.
+  assert.throws(() => resolveNonPublicAccess('true'), /must be a boolean when provided/)
+})
+
+test('nonPublicAccessPreamble imports each assembly the bridge can reach', () => {
+  assert.equal(
+    nonPublicAccessPreamble(),
+    'using __LocusNonPublicAccess.Assembly-CSharp;\nusing __LocusNonPublicAccess.Assembly-CSharp-Editor;',
+  )
 })

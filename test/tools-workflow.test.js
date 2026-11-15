@@ -263,6 +263,7 @@ test('unity_asset apply sends a revision-guarded batch in one edit session', asy
       const result = await tools.unity_asset.execute(
         {
           action: 'apply',
+          request_editor_status: 'editing',
           path: snapshot.path,
           snapshot,
           edits: [
@@ -300,6 +301,7 @@ test('unity_asset apply refuses a changed revision before sending', async () => 
         tools.unity_asset.execute(
           {
             action: 'apply',
+            request_editor_status: 'editing',
             snapshot: { revision: 'live:old', path: 'Assets/Config/Balance.asset', objects: [], fields: [] },
             expected_revision: 'live:new',
             edits: [{ operation: { op: 'set', object_id: '1', property_path: 'm_Name', value: 'x' } }],
@@ -347,6 +349,7 @@ test('unity_asset undo inverts the recorded operations', async () => {
       const apply = await tools.unity_asset.execute(
         {
           action: 'apply',
+          request_editor_status: 'editing',
           snapshot,
           edits: [
             { operation: { op: 'set', object_id: '1', property_path: 'maxHealth', value: 150 } },
@@ -356,7 +359,7 @@ test('unity_asset undo inverts the recorded operations', async () => {
         ctx(),
       )
       const token = JSON.parse(/Undo token .*: (\{.*\})/.exec(apply.text)[1])
-      const undo = await tools.unity_asset.execute({ action: 'undo', undo: token }, ctx())
+      const undo = await tools.unity_asset.execute({ action: 'undo', undo: token, request_editor_status: 'editing' }, ctx())
       assert.match(undo.text, /Undid 2 operation\(s\)/)
       const invert = batches.at(-1).entries[0].operations
       assert.deepEqual(invert[0], { op: 'set', object_id: '1', property_path: 'maxHealth', value_json: '100' })
@@ -429,6 +432,110 @@ test('unity_scene search / get / set run through the bridge', async () => {
     },
     { onMessage: recorder(requests) },
   )
+})
+
+test('unity_asset refuses to write without declaring the editor status', async () => {
+  // `apply`/`undo` save asset files and re-import them. Upstream's equivalent
+  // write path (unity_execute with readonly=false) requires
+  // request_editor_status, so the bridge's asset writer cannot be laxer.
+  const requests = []
+  await withEditor(
+    async () => {
+      await assert.rejects(
+        tools.unity_asset.execute(
+          {
+            action: 'apply',
+            path: 'Assets/Config/Balance.asset',
+            snapshot: { revision: 'live:r1', path: 'Assets/Config/Balance.asset', objects: [], fields: [] },
+            edits: [{ operation: { op: 'set', object_id: '1', property_path: 'maxHealth', value: 1 } }],
+          },
+          ctx(),
+        ),
+        /writes asset files, so request_editor_status is required/,
+      )
+      await assert.rejects(
+        tools.unity_asset.execute(
+          { action: 'undo', undo: { kind: 'asset', files: [{ path: 'Assets/x.asset' }] } },
+          ctx(),
+        ),
+        /writes asset files, so request_editor_status is required/,
+      )
+      // `read` and `reload` never write asset bytes, so neither needs the status.
+      const read = await tools.unity_asset.execute(
+        { action: 'read', path: 'Assets/Config/Balance.asset' },
+        ctx(),
+      )
+      assert.ok(read.text.length > 0)
+      assert.equal(requests.some((item) => item.type === 'begin_edit_session'), false)
+    },
+    { onMessage: recorder(requests) },
+  )
+})
+
+test('unity_asset refuses a write claimed in the wrong editor status', async () => {
+  const requests = []
+  await withEditor(
+    async () => {
+      await assert.rejects(
+        tools.unity_asset.execute(
+          {
+            action: 'apply',
+            request_editor_status: 'playing',
+            path: 'Assets/Config/Balance.asset',
+            snapshot: { revision: 'live:r1', path: 'Assets/Config/Balance.asset', objects: [], fields: [] },
+            edits: [{ operation: { op: 'set', object_id: '1', property_path: 'maxHealth', value: 1 } }],
+          },
+          ctx(),
+        ),
+        /Unity Editor status is "editing". This call requires "playing"/,
+      )
+      assert.equal(requests.some((item) => item.type === 'begin_edit_session'), false)
+    },
+    { onMessage: recorder(requests) },
+  )
+})
+
+test('unity_scene undo is gated on the editor status like the batch it reverts', async () => {
+  const requests = []
+  await withEditor(
+    async () => {
+      await assert.rejects(
+        tools.unity_scene.execute(
+          {
+            action: 'undo',
+            request_editor_status: 'playing',
+            undo: { writes: [{ scene_path: 'Assets/S.unity', object_path: 'A', property_path: 'm_X' }] },
+          },
+          ctx(),
+        ),
+        /Unity Editor status is "editing". This call requires "playing"/,
+      )
+      assert.equal(requests.some((item) => item.type === 'execute_code'), false)
+    },
+    { onMessage: recorder(requests) },
+  )
+})
+
+test('writing tools advertise which actions write and require the editor status', () => {
+  // Upstream keeps reads and writes on separate tools (`unity_yaml_read` etc. vs
+  // `unity_execute` with readonly=false). These callers merged them into one
+  // tool per resource, so the schema has to carry what the split used to say:
+  // which actions write, and which argument a write must supply.
+  const asset = tools.unity_asset.parameters
+  assert.match(asset.action.description, /`read` only observes/)
+  assert.match(asset.action.description, /`apply` and `undo` are WRITES/)
+  assert.equal(asset.request_editor_status.type, 'string')
+  assert.deepEqual(asset.request_editor_status.enum, ['editing', 'playing', 'playing_paused'])
+  assert.equal(Object.hasOwn(asset.request_editor_status, 'default'), false)
+  assert.equal(asset.request_editor_status.required, undefined)
+
+  const scene = tools.unity_scene.parameters
+  assert.match(scene.action.description, /`set`, `batch` and `undo` are WRITES/)
+  assert.match(scene.request_editor_status.description, /writing actions \(`set`, `batch`, `undo`\)/)
+
+  const testTool = tools.unity_test
+  assert.match(testTool.description, /`list` only observes/)
+  assert.match(testTool.description, /`run` is a WRITE-like action/)
 })
 
 test('unity_scene validates its arguments before touching the editor', async () => {
@@ -516,6 +623,20 @@ test('unity_recompile advertises editor_status as a required four-value enum', (
   const spec = tools.unity_recompile.parameters.editor_status
   assert.deepEqual(spec.enum, ['disconnected', 'editing', 'playing', 'playing_paused'])
   assert.equal(spec.required, true)
+})
+
+test('unity_execute advertises readonly as a required, defaultless declaration', () => {
+  // Upstream `unity_execute.json` lists `readonly` in `parameters.required`
+  // with no default: the caller has to say whether the snippet writes. The
+  // authored form must carry no `default`, or a model could omit the decision
+  // and have the schema answer it.
+  const spec = tools.unity_execute.parameters.readonly
+  assert.equal(spec.type, 'boolean')
+  assert.equal(spec.required, true)
+  assert.equal(Object.hasOwn(spec, 'default'), false)
+  assert.match(spec.description, /skip the bridge edit session/)
+  // The old wording described a "recording mode" that does not exist.
+  assert.doesNotMatch(tools.unity_execute.description, /recording mode/)
 })
 
 test('a recompile start-ack timeout reconciles the persisted state instead of failing', async () => {

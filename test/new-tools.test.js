@@ -704,6 +704,63 @@ test('unity_run_states validates the state machine before connecting', async () 
   }
 })
 
+test('unity_run_states refuses enable_non_public_access instead of silently ignoring it', async () => {
+  // Upstream's schema gives run_states the same default-true switch as
+  // unity_execute, because its compile server can relax internal access. This
+  // bridge compiles state bodies inside the editor, where that is impossible, so
+  // a `true` has to be an error — accepting it would promise access that cannot
+  // be granted.
+  const seen = []
+  await withEditor(
+    async () => {
+      const rejected = await tools.unity_run_states.execute(
+        {
+          request_editor_status: 'editing',
+          initial_state: 'a',
+          states: [{ name: 'a', update: 'ctx.Done();' }],
+          enable_non_public_access: true,
+        },
+        ctx(),
+      )
+      assert.match(rejected.text, /^Error: enable_non_public_access cannot be enabled for unity_run_states/)
+      assert.match(rejected.text, /IgnoresAccessChecksTo/)
+      assert.equal(seen.some((entry) => entry.type === 'run_states'), false)
+
+      const accepted = await tools.unity_run_states.execute(
+        {
+          request_editor_status: 'editing',
+          initial_state: 'a',
+          states: [{ name: 'a', update: 'ctx.Done();' }],
+          enable_non_public_access: false,
+        },
+        ctx(),
+      )
+      assert.equal(accepted.text, RUN_STATES_BODY)
+    },
+    {
+      onMessage: (request, _helpers, socket) => {
+        seen.push(request)
+        if (request.type === 'run_states') return runStatesReply(socket, request, RUN_STATES_BODY)
+        return undefined
+      },
+    },
+  )
+})
+
+test('unity_run_states advertises enable_non_public_access as false-only', () => {
+  const spec = tools.unity_run_states.parameters.enable_non_public_access
+  const branches = spec.oneOf ?? []
+  assert.equal(branches.length, 2)
+  assert.deepEqual(
+    branches.map((branch) => branch.const).sort(),
+    [false, true],
+  )
+  // Neither branch may be required, and there is no default: the switch stays
+  // optional exactly as upstream leaves it, only narrowed to what is supported.
+  assert.equal(Object.hasOwn(spec, 'default'), false)
+  assert.equal(spec.required, undefined)
+})
+
 test('unity_run_states refuses a mismatched editor state before sending', async () => {
   const seen = []
   await withEditor(

@@ -147,14 +147,20 @@ test('registry parameters are object-rooted schemas with authored requiredness',
     for (const [key, node] of Object.entries(definition.parameters.properties)) {
       assert.equal(node.required, undefined, `${definition.name}.${key} kept a field-level required`)
     }
-    // The root must be an open object: DSH rejects a closed root for parameters.
-    assert.equal(definition.parameters.additionalProperties, undefined)
+    // The root must be a CLOSED object, exactly as the upstream Locus tool
+    // parameters are: an unknown key (a typo, or `readonly` passed to a tool
+    // that does not take it) is an argument error instead of being dropped.
+    assert.equal(
+      definition.parameters.additionalProperties,
+      false,
+      `${definition.name} must close its parameter object`,
+    )
   }
   // Spot-check the tools whose requiredness the model depends on.
   const capture = registry.find((definition) => definition.name === 'unity_capture')
   assert.deepEqual([...capture.parameters.required].sort(), ['request_editor_status', 'target'])
   const execute = registry.find((definition) => definition.name === 'unity_execute')
-  assert.deepEqual([...execute.parameters.required].sort(), ['code', 'request_editor_status'])
+  assert.deepEqual([...execute.parameters.required].sort(), ['code', 'readonly', 'request_editor_status'])
 })
 
 test('an uncompiled definition is rejected by the schema check', () => {

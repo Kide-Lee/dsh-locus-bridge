@@ -97,7 +97,11 @@ export async function startFakeBroker({ onMessage, tcp = false, unix = false } =
         const synthetic = /printJson\(new Dictionary<string, object>/.test(message)
           ? JSON.stringify({ ok: true, scene: 'Assets/Scenes/Main.unity', objectPath: 'Root/Player', component: 'Transform', propertyPath: 'm_LocalPosition', operation: 'set', value: '0,1,0' })
           : null
-        const output = scan ?? synthetic ?? `ran: ${message.split('\n')[0]}`
+        // The bridge prefixes a snippet with the non-public-access `using` block
+        // when that switch is on. Echo the first CODE line, not the preamble, so
+        // fixtures keep asserting on what the caller actually asked to run.
+        const firstCodeLine = message.split('\n').find((line) => line.trim().length > 0 && !/^\s*using .*;?\s*$/.test(line))
+        const output = scan ?? synthetic ?? `ran: ${firstCodeLine ?? ''}`
         setTimeout(() => reply(socket, request, { ok: true, message: output }), 5)
         return
       }

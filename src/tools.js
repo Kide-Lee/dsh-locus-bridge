@@ -39,6 +39,7 @@ import {
   readEditorStatus,
 } from './execute.js'
 import { formatStatus } from './format.js'
+import { readSettings } from './settings.js'
 import { jobLabel, parseAsyncMode, startBackground } from './background.js'
 import {
   RUN_STATES_REQUEST_TIMEOUT_MS,
@@ -48,7 +49,14 @@ import {
 import { LocusError } from './locus-client.js'
 import { playModeMessage, setPlayMode } from './play-mode.js'
 import { formatSetup, inspectSetup } from './setup.js'
-import { clampExecuteTimeout, EDITOR_STATUS_DISCONNECTED, EXECUTE_IDLE_LIMIT_MS } from './protocol.js'
+import {
+  clampExecuteTimeout,
+  EDITOR_STATUS_DISCONNECTED,
+  EDITOR_STATUSES,
+  EXECUTE_IDLE_LIMIT_MS,
+  nonPublicAccessPreamble,
+  resolveNonPublicAccess,
+} from './protocol.js'
 import { beginUndoCheckpoint, endUndoCheckpoint, recordWrite } from './undo.js'
 import { recompile, readReloadState, assertRecompileableStatus } from './recompile.js'
 import { ensureSkillActivation } from './skills/activation.js'
@@ -139,6 +147,73 @@ export function explainAssetBlocker(message) {
     `${ASSET_EXTENSIONS.join(', ')}. ${extension} assets are refused even when the project is Force Text and the ` +
     'file is plain YAML. Use unity_execute (AssetDatabase / SerializedObject) for that asset type.'
   )
+}
+
+/**
+ * Gate a writing `unity_asset` action on the live editor status.
+ *
+ * `apply` and `undo` save asset files and re-import them, which is as much a
+ * write as `unity_scene set`; declaring the status makes the call state the
+ * editor state its write assumes instead of saving under whichever mode happens
+ * to be live. `read` and `reload` stay gated by nothing, exactly as before.
+ */
+async function assertWriteStatus(target, requested, action) {
+  const client = await getClient(target)
+  const state = await readEditorStatus(client)
+  if (!state.connected) throw new Error(`Unity Editor not connected${state.error ? `: ${state.error}` : ''}.`)
+  if (typeof requested !== 'string' || requested.trim().length === 0) {
+    throw new Error(
+      `action "${action}" writes asset files, so request_editor_status is required ` +
+        `(one of ${EDITOR_STATUSES.join(', ')}; currently "${state.status}").`,
+    )
+  }
+  assertRequestedStatus(requested, state.status)
+}
+
+/**
+ * Apply upstream's `enable_non_public_access` to a `unity_execute` snippet.
+ *
+ * Upstream hands the switch to its compile server, which emits the snippet
+ * assembly with `NonPublicAccessProbeMode::SkipVerification` — an
+ * `IgnoresAccessChecksTo` allow-list. This bridge compiles the snippet with
+ * Roslyn inside the editor and cannot emit that list, so the switch has to mean
+ * something honest here:
+ *
+ *   - omitted or `true`: keep the enumeration the global Hot Reload & Compile
+ *     setting asks for. The leading `using`s put the snippet on the same
+ *     footing as the compile server for the naming half of the feature (a type
+ *     or member another assembly exposes), so an assembly-internal reference
+ *     that Roslyn cannot verify fails with its own CS0122 error instead of a
+ *     misleading success.
+ *   - `false`: the caller asserts there is nothing to relax, which is exactly
+ *     what this bridge does anyway, so the snippet runs unprefixed.
+ * @param code - normalized snippet source.
+ * @param value - raw `enable_non_public_access` argument.
+ * @returns The snippet, with the preamble when the feature is requested.
+ */
+function applyNonPublicAccess(code, value) {
+  let enabled
+  try {
+    enabled = resolveNonPublicAccess(value, { globalEnabled: globalNonPublicAccessEnabled() })
+  } catch (error) {
+    throw new Error(error.message, { cause: error })
+  }
+  if (!enabled) return code
+  return `${nonPublicAccessPreamble()}\n${code}`
+}
+
+/**
+ * The global half of `enable_non_public_access`, read at call time so the
+ * settings page takes effect without a restart. A malformed settings file keeps
+ * the default (on) here: `readSettings` already reports it, and failing a
+ * snippet because a different preference was edited would be the wrong error.
+ */
+function globalNonPublicAccessEnabled() {
+  try {
+    return readSettings().preferences.nonPublicAccess !== false
+  } catch {
+    return true
+  }
 }
 
 function asToolError(error) {
@@ -268,7 +343,9 @@ const unityExecute = {
     'ctx.WaitSeconds loops. `timeout` bounds the whole call (1000..3600000 ms, default 600000).\n\n' +
     'Do NOT create or change .cs files from a snippet (a domain reload would kill it) — write the files with the ' +
     'write/edit tools and call unity_recompile. Prefer unity_asset/unity_scene for ordinary asset and scene edits. ' +
-    'Read-only calls may run in recording mode (readonly: true); writes should leave readonly false.\n\n' +
+    '`readonly` states what the snippet will do and must be decided on every call: true only observes state and ' +
+    'runs without the bridge edit session; anything that changes Unity state, assets or files must say false. ' +
+    'Declaring readonly: true for a snippet that writes is a misdeclaration nothing downstream can detect.\n\n' +
     `request_editor_status must match the live editor state; use unity_play_mode to change modes. ${CONNECTION_DESCRIPTION}`,
   parameters: {
     project_path: PROJECT_PATH,
@@ -284,7 +361,10 @@ const unityExecute = {
       description:
         'Whether the code only observes state. Use true only when it does not change Unity objects, assets, scenes, ' +
         'project settings, editor state, project files, or other filesystem content. Temporary objects (an ' +
-        'instantiated prefab, a temporary Camera or Canvas) count as writes even when nothing is saved.',
+        'instantiated prefab, a temporary Camera or Canvas) count as writes even when nothing is saved. Read-only ' +
+        'calls skip the bridge edit session, so they do not hold off asset imports while they run; writes must ' +
+        'leave readonly false.',
+      required: true,
     },
     request_editor_status: {
       type: 'string',
@@ -296,6 +376,16 @@ const unityExecute = {
       type: 'integer',
       description: 'Total run budget in milliseconds, clamped to 1000..3600000 (default 600000).',
       default: 600000,
+    },
+    enable_non_public_access: {
+      type: 'boolean',
+      default: true,
+      description:
+        'Allow this call to directly access private and internal types, APIs, and fields without reflection. ' +
+        'Defaults to true and is also governed by the global Hot Reload & Compile setting. This bridge compiles ' +
+        'snippets inside the Unity Editor with in-process Roslyn, which cannot emit the IgnoresAccessChecksTo ' +
+        'allow-list a private/internal reference needs: leaving it at the default reports exactly what is ' +
+        'unavailable, while false asserts the snippet stays on public members.',
     },
   },
   output: {
@@ -323,6 +413,13 @@ const unityExecute = {
     const requested = args.request_editor_status
     const timeoutMs = clampExecuteTimeout(args.timeout)
 
+    let codeWithAccess
+    try {
+      codeWithAccess = applyNonPublicAccess(code, args.enable_non_public_access)
+    } catch (error) {
+      return failure(error.message)
+    }
+
     const run = async (runExec) => {
       try {
         const client = await getClient(target)
@@ -341,7 +438,7 @@ const unityExecute = {
         try {
           let lastPublished = 0
           const { output, progress } = await executeSnippet(client, {
-            code,
+            code: codeWithAccess,
             executionId: randomUUID(),
             timeoutMs,
             signal: runExec.signal,
@@ -415,7 +512,8 @@ const unityRunStates = {
     'Print output up to 100000 estimated tokens is returned inline. Larger output up to 1000000 estimated tokens ' +
     'is saved under Library/Locus/RunStates and reported as result_file; larger output is not saved. ' +
     'Private/internal access needs the Locus compile server, so this bridge uses the editor\'s in-process ' +
-    `Roslyn compiler and does not expose enable_non_public_access. ${CONNECTION_DESCRIPTION}`,
+    `Roslyn compiler: enable_non_public_access is accepted for schema compatibility but only false is supported. ` +
+    `${CONNECTION_DESCRIPTION}`,
   parameters: {
     project_path: PROJECT_PATH,
     request_editor_status: {
@@ -461,6 +559,30 @@ const unityRunStates = {
         },
       },
       required: true,
+    },
+    // Upstream's schema gives run_states the same default-true switch as
+    // unity_execute, but the switch only works on the compile-server path and
+    // this bridge compiles every state body inside the editor. Rather than
+    // accept a `true` that would be ignored, the schema only admits `false`:
+    // the model has to make the same statement upstream makes it make, and the
+    // executor rejects a hand-written `true` with the reason.
+    enable_non_public_access: {
+      oneOf: [
+        {
+          type: 'boolean',
+          const: false,
+          description:
+            'State bodies may only touch public members. Required here: this bridge compiles state bodies inside ' +
+            'the Unity Editor, so private/internal access is unavailable for runs.',
+        },
+        {
+          type: 'boolean',
+          const: true,
+          description:
+            'Unsupported by this bridge: state bodies are compiled inside the Unity Editor, so there is no ' +
+            'compile server to relax internal member checks.',
+        },
+      ],
     },
   },
   output: {
@@ -785,8 +907,19 @@ const unityAsset = {
     action: {
       type: 'string',
       enum: ASSET_ACTIONS,
-      description: 'One of: read, apply, undo, reload.',
+      description:
+        'One of: read, apply, undo, reload. `read` only observes. `apply` and `undo` are WRITES: they save asset ' +
+        'files to disk and re-import them, so they must be given `request_editor_status` and say what the write ' +
+        'does (`operation`). `reload` writes nothing itself but re-imports files that already changed on disk.',
       required: true,
+    },
+    request_editor_status: {
+      type: 'string',
+      enum: ['editing', 'playing', 'playing_paused'],
+      description:
+        'Required Unity Editor status for the writing actions (`apply`, `undo`); must match the live status. ' +
+        'Ignored by `read` and `reload`. Asset edits normally belong in Edit Mode: an asset saved while the editor ' +
+        'is playing is re-imported under a camera that may not expect it.',
     },
     path: {
       type: 'string',
@@ -870,6 +1003,7 @@ const unityAsset = {
         return { text: formatAssetSnapshot(snapshot), revision: snapshot.revision, snapshot }
       }
       if (action === 'apply') {
+        await assertWriteStatus(target, args.request_editor_status, 'apply')
         const owner = activeEditOwner(target.pipe) ?? `dsh-${process.pid}-${randomUUID()}`
         const result = await withBarriers(exec, owner, target, () => applyAssetEdit(target, args, owner), 'unity_asset')
         // The undo token is the documented way to revert; return it as data so a
@@ -881,6 +1015,7 @@ const unityAsset = {
         if (!undo || !Array.isArray(undo.files) || undo.files.length === 0) {
           throw new Error('action "undo" requires the `undo` token an apply returned.')
         }
+        await assertWriteStatus(target, args.request_editor_status, 'undo')
         const owner = activeEditOwner(target.pipe) ?? `dsh-${process.pid}-${randomUUID()}`
         const result = await withBarriers(exec, owner, target, () => undoAssetEdit(target, undo, owner), 'unity_asset:undo')
         return { text: result, revision: '' }
@@ -1133,6 +1268,10 @@ const unityTest = {
     'by Unity itself.\n\n' +
     '`list` discovers test cases; `run` executes them and returns passed/failed/skipped counts plus the failed ' +
     "results' messages and stack traces. After changing or hot-reloading test code, call unity_recompile first.\n\n" +
+    '`list` only observes. `run` is a WRITE-like action: it executes arbitrary project test code, and that code can ' +
+    'create objects, write files or change assets and scenes (Unity may also enter Play Mode for PlayMode tests), so ' +
+    'it can change the project the same way unity_execute can. Run it when you mean to execute code, not merely to ' +
+    'inspect what tests exist.\n\n' +
     'Filter fields combine with AND, values inside one field with OR; omit what you do not need. Runs start from Edit ' +
     'Mode and Unity drives any Play Mode transition itself. A timeout or cancellation stops the run through Unity, so ' +
     'a lost caller never leaves a run holding the editor.\n\n' +
@@ -1475,7 +1614,10 @@ const unityScene = {
     action: {
       type: 'string',
       enum: SCENE_ACTIONS,
-      description: 'One of: search, get, set, find, batch, undo.',
+      description:
+        'One of: search, get, set, find, batch, undo. `search`, `get` and `find` only observe. `set`, `batch` and ' +
+        '`undo` are WRITES: they change scene objects, save the scene and are Undo-recorded, so they must be given ' +
+        '`request_editor_status` and the editor must already be in that state.',
       required: true,
     },
     query: { type: 'string', description: 'Search text: object name or path fragment (`search`).' },
@@ -1508,7 +1650,10 @@ const unityScene = {
     request_editor_status: {
       type: 'string',
       enum: ['editing', 'playing', 'playing_paused'],
-      description: 'Required Unity Editor status for `set` (defaults to editing). Edits usually belong in Edit Mode.',
+      description:
+        'Required Unity Editor status for the writing actions (`set`, `batch`, `undo`); must match the live status. ' +
+        'Defaults to editing because scene edits usually belong in Edit Mode, but the call still has to say which ' +
+        'state it is writing in. Ignored by `search`, `get` and `find`.',
       default: 'editing',
     },
     operation: {
@@ -1664,6 +1809,13 @@ const unityScene = {
         if (!token || !Array.isArray(token.writes) || token.writes.length === 0) {
           throw new Error('action "undo" requires the `undo` token a `batch` returned.')
         }
+        // Restoring fields saves the scene exactly like the `batch` it reverts,
+        // so it is gated the same way instead of writing under any live mode.
+        const status = args.request_editor_status ?? 'editing'
+        const client = await getClient(target)
+        const state = await readEditorStatus(client)
+        if (!state.connected) throw new Error(`Unity Editor not connected${state.error ? `: ${state.error}` : ''}.`)
+        assertRequestedStatus(status, state.status)
         const owner = activeEditOwner(target.pipe) ?? `dsh-${process.pid}-${randomUUID()}`
         const session = await openEditSession(target, owner)
         try {

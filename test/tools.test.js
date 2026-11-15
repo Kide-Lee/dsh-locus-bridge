@@ -108,6 +108,51 @@ test('unity_execute rejects an empty snippet and a bogus requested status', asyn
   })
 })
 
+test('unity_execute applies enable_non_public_access: preamble when on, verbatim when off', async () => {
+  // Upstream's compile server turns this switch into an IgnoresAccessChecksTo
+  // allow-list. This bridge cannot emit one, so the honest mapping is the
+  // assembly `using` block the compile-server path also relies on: with the
+  // switch on the snippet can name anything the assemblies expose, and with it
+  // off the snippet is sent exactly as written.
+  const codes = []
+  await withFakeClient(
+    async () => {
+      await tools.unity_execute.execute(
+        { code: 'print(1);', request_editor_status: 'editing', readonly: true },
+        execContext(),
+      )
+      await tools.unity_execute.execute(
+        { code: 'print(2);', request_editor_status: 'editing', readonly: true, enable_non_public_access: false },
+        execContext(),
+      )
+      // Default is true, matching upstream.
+      await tools.unity_execute.execute(
+        { code: 'print(3);', request_editor_status: 'editing', readonly: true, enable_non_public_access: true },
+        execContext(),
+      )
+      assert.match(codes[0], /^using __LocusNonPublicAccess\.Assembly-CSharp;\nusing __LocusNonPublicAccess\.Assembly-CSharp-Editor;\nprint\(1\);/)
+      assert.match(codes[1], /^print\(2\);/)
+      assert.match(codes[2], /^using __LocusNonPublicAccess\.Assembly-CSharp;/)
+    },
+    {
+      onMessage: (request) => {
+        if (request.type === 'execute_code') codes.push(request.message)
+        return undefined
+      },
+    },
+  )
+})
+
+test('unity_execute rejects a non-boolean enable_non_public_access', async () => {
+  await withFakeClient(async () => {
+    const result = await tools.unity_execute.execute(
+      { code: 'print(1);', request_editor_status: 'editing', readonly: true, enable_non_public_access: 'yes' },
+      execContext(),
+    )
+    assert.match(result.output, /^Error: enable_non_public_access must be a boolean when provided/)
+  })
+})
+
 test('unity_play_mode returns the matching-mode wording', async () => {
   await withFakeClient(async () => {
     const result = await tools.unity_play_mode.execute({ mode: 'edit' }, execContext())

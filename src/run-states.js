@@ -49,6 +49,18 @@ function optionalString(value, field) {
  * editor's `RunStatesRequest` wording.
  */
 export function buildRunStatesRequest(args = {}) {
+  // Upstream resolves this switch before compiling the state bodies. Here the
+  // switch cannot be honoured at all (state bodies are compiled by the editor's
+  // in-process Roslyn, which cannot relax internal access), so a request for it
+  // is refused instead of being dropped on the floor.
+  if (args.enable_non_public_access === true) {
+    throw new Error(
+      'enable_non_public_access cannot be enabled for unity_run_states on this bridge: state bodies are compiled ' +
+        'inside the Unity Editor with in-process Roslyn, which cannot emit the IgnoresAccessChecksTo allow-list ' +
+        'that private/internal member access needs (upstream uses its Locus compile server for that). Leave it ' +
+        'false and use public members in state bodies.',
+    )
+  }
   const status = requiredString(args.request_editor_status, 'request_editor_status').trim()
   if (!EDITOR_STATUSES.includes(status)) {
     throw new Error(

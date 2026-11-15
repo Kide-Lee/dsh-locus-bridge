@@ -79,8 +79,18 @@ export const DEFAULT_SKILLS = Object.freeze(
  * It is remembered so reopening the page keeps the same project instead of
  * jumping back to whichever project the scan happened to list first; a project
  * that disappears simply falls back to the automatic choice.
+ *
+ * `nonPublicAccess` is the global half of upstream's `enable_non_public_access`
+ * ("also governed by the global Hot Reload & Compile setting"). It follows the
+ * same rule as upstream: a call may narrow the switch, never widen it past the
+ * user's preference.
  */
-export const DEFAULT_PREFERENCES = Object.freeze({ frameCache: true, workspacePath: '', unityProject: '' })
+export const DEFAULT_PREFERENCES = Object.freeze({
+  frameCache: true,
+  workspacePath: '',
+  unityProject: '',
+  nonPublicAccess: true,
+})
 
 /** Preferences whose value is a string; every other preference is a boolean. */
 export const STRING_PREFERENCE_KEYS = Object.freeze(['workspacePath', 'unityProject'])
