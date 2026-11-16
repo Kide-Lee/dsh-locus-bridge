@@ -2,179 +2,36 @@
 
 本文件记录 dsh-locus-bridge 的版本变更。版本号遵循 SemVer，条目按用户可见的变化归纳。
 
-## [Unreleased]
-
-### 对齐官方：常驻编译服务、真热补丁、持久化资产库、实时值、进度与取消
-
-这一轮把 1.1.0 里「能做但没做」的几项补上，并把「做不到」的四条重新核实了一遍——其中三条
-其实做得到（常驻进程、第二遍 Roslyn、SQLite 落盘），于是照做。
-
-#### 变化
-
-- **`code_analysis` 删除**：官方的 `code_*` 只有五个查询工具，语言服务器资产在首次使用时自动下载
-  （桌面端 `assets::ensure_assets`），没有对外暴露的生命周期工具。本插件改成同一条路——查询路径在
-  拉起服务器前调用 `installAssets()`，下载一次后复用；`code_*` 的说明随之改为「首次查询会下载」。
-
-- **热补丁应用改走 payload 原生消息**：`unity_hot_reload` 的 apply / status / dispose 直接发 payload
-  自带的消息——`hot_patch_loaded` 应用补丁、`hot_patch_dispose` 摘除、`hot_reload_probe` 在打补丁前
-  自检 detour 引擎——与 Locus 桌面端走的是同一条路。此前的结论「payload 的处理器是 private，调不到」
-  是错的：`private` 只是 C# 可见性，扩展消息走的也是同一个 `HandleMessageAsync` 的 `default:` 分支，
-  native broker 不做消息白名单。随之而来的三处行为变化：整批补丁原子生效（任一处失败即回滚，不再
-  逐方法 skip）；`domain_generation` 取自 `get_reload_state`，旧域编译的补丁被 payload 直接拒绝；
-  请求补上 `param_type_names`（payload 靠它解析重载）。detour 台账在 `src/hotreload.js` 中按 payload
-  的 `MethodKey` / `DetourKey` 规则维护。
-- **插件不再在 Unity 里安装任何代码**：实时值改走 payload 自带的 `read_yaml`；prefab 覆盖按官方
-  `detail: "prefab_overrides"` 的语义解析磁盘 YAML 的 `m_Modifications`（工具本身删除，用
-  `unity_yaml_read`）。编辑器阶段快照整条能力移除（payload 没有对应的编辑器状态，官方健康诊断也
-  只看原生栈与 CPU），原生 `dsh_health` 的 `tiers` 只剩 CPU 与存活两档，`unity_status` 不再返回 `phase`。
-- **`unity_hot_reload` 输出新增 `patches` 与 `patchError`**：`patches` 列出真正落地的补丁程序集
-  （id、文件、方法数），`patchError` 说明补丁为什么没打上（无编译服务、detour 引擎不可用）。
-
-#### 新增能力
-
-- **常驻编译服务**：`pinSidecar` / `unpinSidecar` / `readResidency`。常驻是**租约**（默认 8 小时，
-  `Library/Locus/compile-sidecar.json` 记录 pid 与心跳），不是永不退出：插件进程被换掉时没人续租，
-  进程自己退出，不会留下孤儿。编译服务另外新增 `compile/params`、`analyze/hotDiff`、
-  `compile/hotPatch` 三个 RPC。
-- **热补丁真编译**：`unity_hot_reload` 不再只是分类。它用编译服务做签名级 diff（`analyze/hotDiff`），
-  生成补丁程序集（`compile/hotPatch`），再交给编辑器侧 detour 应用；`dry_run` 仍然只分类。
-  分类规则与上游一致：只有方法/构造/访问器/字段初始化器体变了才算 hot，改签名、加减成员、改基类
-  一律 cold——错误的 hot 比要求重编译更糟。
-- **持久化资产库**：`Library/Locus/asset-index.db`（`node:sqlite`，WAL）。表结构覆盖文件戳、资产、
-  对象（`!u!<classId>` + FileID + 脚本 GUID）与引用边（`fileID` + `guid`）。重扫只 stat 变化文件；
-  只读查询用只读连接打开，避免第二个进程碰 WAL。`unity_asset_graph` 的反查改查这张表，大工程
-  不再逐文件读全文。
-- **YAML 实时值（`source: "live"`）**：`unity_yaml_read` 与 `unity_yaml_search` 带 object 选择器时，
-  改读编辑器内存里的未保存修改。实现是 payload 自带的 `read_yaml`，文本原样透传——与官方
-  `unity_yaml_read` 的 live 路径同一条。降级路径明确：`auto` 拿不到实时值就回退磁盘并说明原因，
-  `live` 直接报错。
-- **离线文档导入的进度 / 取消 / 删除**：`action` 新增 `cancel`、`delete`；导入过程中每 200 页
-  报告一次进度，`status` 在另一通调用里能看到「在下载/在转换/被取消」，取消后不会留下永远不动
-  的进度条。
-- **后台钩子跨平台**：Windows 仍走 dbghelp 符号；Unix 改用「导出符号 → 模式扫描」两条路径，
-  且**只在唯一命中且符号名相邻时**才打补丁，否则如实报 unsupported 并给原因（Linux 编辑器里
-  那 6 字节签名出现 1066 次，拒绝猜测是唯一正确的行为）。
-
-#### 修复（全部由真机验证抓出）
-
-- **`unity_offline_docs` 在 DSH 里不可能成功**：导入器要求注入 `fetch`，工具却从未传入，任何
-  运行时都报 `no fetch implementation available`。现在显式使用 `globalThis.fetch`。
-- **取消后状态永远停在 importing**：取消文件在场时 `docsImportState` 仍报「在跑」，界面会卡在
-  一根不动的进度条上。现在取消文件在场即 `running: false`。
-- **每个文档页标题重复两遍**：正文自带的 `<h1>` 与写入时的 `# title` 叠在一起，26660 个页面全部如此。
-- **补丁程序集三处不匹配**：方法表是 camelCase 而编辑器 DTO 是 snake_case、补丁类型在
-  `Locus.DshHotPatch` 命名空间下而查找时没有前缀、补丁类名被截短成类型短名——三者任意一处不修，
-  热补丁都会「编译成功但一条也没挂上」。
-- **空补丁**：`ProjectFacts` 用类型短名造方法键、`PatchCompiler` 用全名比对，永不相等。
-- **引擎引用缺失**：工程 `Library/ScriptAssemblies` 里没有引擎模块，补丁编译因此找不到
-  `System.Object` 与 `UnityEngine`；现在按 `ProjectVersion.txt` 去编辑器安装目录补齐（144 个引用）。
-- **`node:sqlite` 在 ESM 下不可用**：`require` 未定义被静默吞掉，索引一直悄悄降级；改为
-  `installBuiltinLoader` 注入。
-- **资产库 schema 不重建**：`user_version = 0` 的旧库不会被丢弃，读到的可能是旧表。
-- **`type` 为 undefined 时写库报错**：`node:sqlite` 不接受 undefined 绑定，整批写入被吞成
-  「不可用」。
-
-#### 修复（新增工具的验收回归）
-
-- **`unity_hot_reload` 对 Allman 风格的方法体一律漏判**（严重）：分类器逐行扫描时要求开括号与签名
-  同行，工程里最常见的「签名一行、`{` 下一行」写法因此得到空方法表，工具还会输出
-  `nothing to classify: no edited scripts were given`——把「没识别出方法」说成「没给文件」。
-  现在等待下一行的 `{` 作为方法体起点，并在应答里新增逐文件结论 `files[]`（`state` / `reason` /
-  `method_count`），`hot[]` 只承载可 detour 方法，文件级 hot 不再消失；`unity_recompile mode:"auto"`
-  也据此把「热但无可补方法」判为 hot 而不是白白编译一次。
-- **`unity_yaml_search` 的 `scanned` 恒为 0**：实现返回 `files`，工具层却读 `result.scanned`。
-- **`unity_yaml_search` 的 `match_fields` 描述与实现不符**：描述示例是字段名（`m_Name`），实际只接受
-  `path`/`field_name`/`field_value`/`type`/`all`；描述改为官方语义，按字段名过滤请用 `field_value`。
-- **`unity_yaml_search` 的 `source:"live"` 无 `scope` 时崩溃**：全工程搜索本应走磁盘，却把空路径
-  传进 live 读取并抛 `a path is required`。
-- **`unity_asset_search` 的非法 `guid` 被静默忽略**：`guid:"ZZZ"` 会返回全库资产；现在明确报错，
-  `limit` 也改为越界报错而不是悄悄夹紧。
-- **`unity_yaml_read` 对不存在的路径先报「文件不存在」**：空内容与「文件不存在」必须可区分。
-- **`unity_lock` 与官方契约对齐**：`reason` 在 acquire 时必填、`timeout_seconds` 只接受 1..900
-  （越界报错而不是夹紧）、acquire 结果带回锁文件路径；描述里的锁文件名改为真实的
-  `Library/Locus/session-lock.json`。
-- **删除死代码**：`dsh_hot_reload_compiled_text` 消息链（JS 侧从未使用、编辑器侧也无读取者）、
-  `tools.js` 里未使用的 yaml/health 导入、`yaml-lite.js` 里重复的 live 提示行。
-
-#### 与官方对齐：权限与后台执行（新增工具复核）
-
-- 后台执行白名单与上游 `supports_async_mode` 一致：只有 `unity_execute` 与 `unity_test` 接受宿主注入的
-  `async`，其余 8 个新增工具保持同步——它们不执行会长时间占用主线程的工作。
-- 权限面复核：8 个工具都不改工程资产（`unity_lock` 只写 `Library/Locus` 下的协作锁，`unity_asset_search`
-  只写资产库缓存，热重载只改运行域），因此都不需要 `request_editor_status`，与官方 `mutates_workspace: false`
-  的只读定位一致。
-
-#### 设置页开关：默认值与接线
-
-- **默认值与 Locus 一致**：`compileSidecar`（官方 `unity.compile.sidecar`）、`backgroundHook`
-  （`unity.connection.backgroundHook`）与 `offlineDocs` 默认改为开启；`nonPublicAccess` 维持开启
-  （官方 `unity.compile.nonPublicAccess`）。settings 文档版本升到 v2，**v1 文档会被迁移**：这三个键的
-  旧 `false` 是旧默认值而非用户选择，改为新默认；`nonPublicAccess` 等未改默认的键保持原值。
-- **后台加速开关真正生效**：`unity_status` 在读取编辑器健康时按开关幂等同步 broker 的
-  `dsh_set_background_hook`（状态已一致就不发消息）；非 Windows broker 报告不支持，开关不会假装生效。
-- **离线文档开关真正生效**：开关关闭时 `unity_offline_docs action:"import"` 直接返回 `state: "disabled"`
-  并说明原因，搜索与读页仍可用于已导入内容。
-- **编译服务开关**：此前已有消费点（`unity_execute` 失败时的编辑器外编译检查），默认值改为开启后与官方一致。
-- 设置页文案同时说明各开关的默认值与「本桥无法真正解锁私有成员」的事实，避免开关看起来无效。
-
-#### 插件整体声明 payload 版本
-
-- 根 `package.json` 的 `locus` 块新增 `payload`（`package` + `version`），与已有的 `locus.version`
-  （上游 Locus release）一起构成**插件级**的 payload 声明：`locus.version` 说明 vendored 副本同步自
-  哪个上游 release，`locus.payload.version` 说明其中的 `com.farlocus.locus` 是哪个版本。
-- `src/setup.js` 新增 `payloadDeclaration()` / `payloadContract()` / `projectPayloadContract()`：
-  对照「声明 / 插件自带副本 / 工程已安装包」三方版本，不一致时在 `unity_status` 的工程诊断（连接失败
-  路径）与连接成功的状态输出里都给出一行警告，并说明是重装自带 payload 还是更新声明。警告不阻塞连接。
-- `npm run check:payload`（`scripts/sync-payload.mjs --check`）把声明与 `payload/locus_unity` 的版本
-  不一致当作硬失败；同步前也先校验，避免把与声明不符的包同步进来。
-- 硬引用 payload 程序集的边界由此写清楚：插件声明即契约，payload 升级时同步 `locus.payload.version`
-  并重新验证编译。
-
-#### 热重载分类移到插件进程
-
-- 文件级分类器移植到 `src/hotreload-classify.js`。规则保持不变：Allman/K&R 方法体、方法身份
-  （含参数反射名与 `method_key`）、record/interface/enum/字段/event 的结构信号、`.meta` 缺失、
-  删除文件、重名类型、`.asmdef`/`.asmref`/`.rsp`。
-- 分类因此完全不依赖编辑器：`unity_hot_reload` 的 `dry_run` 只读磁盘，也不受域重载窗口影响。
-- 新增 `test/hotreload-classify.test.js` 覆盖分类规则；`test/hotreload.test.js` 改为
-  真实工程文件的本地分类夹具。
-
-#### 验证
-
-- 全量 `node --test`：677 通过；`scripts/dump-tools.mjs`：25 个工具（19 `unity_*` + 6 `code_*`）全部
-  符合 schema 子集；`scripts/typecheck.mjs`：119 个模块。
-- 原生：`cargo test` 38 + 1 + 1 通过，`cargo build --release` 零警告。
-- 真机（Unity 2022.3.62f3）：热补丁全链路（diff → 编译 → `applied: 1`，`detourEngine: "detour"` →
-  `disposed: 1`）；离线文档完整导入（26660 页）、检索、读页、删除；YAML 实时读（二进制场景）、
-  Prefab 覆盖（100 条）、资产检索（7515 文件）、`unity_status` / `unity_recompile` 一次生命周期内
-  全部通过。
-
 ## [1.1.0] - 2026-11-16
 
-### 官方能力补齐：热重载 / 编译服务 / 状态探针 / 团结引擎 / 离线文档
+本版把插件的能力面推到与 Locus 官方接近的位置：热补丁从「只分类」变成真正编译并挂进运行中的编辑器，
+新增常驻编译服务、持久化资产库、YAML 实时值、离线文档与协作锁，原生侧补上状态探针与卡死诊断。
+同时删掉官方没有的 `code_analysis` 工具，`code_*` 恢复为与官方一致的五个查询工具。
 
-工具面从 17 个增加到 24 个（18 个 `unity_*` + 6 个 `code_*`）。
+工具面从 17 个增加到 23 个（18 个 `unity_*` + 5 个 `code_*`）。
 
 #### 新增工具
 
-- **`unity_hot_reload`**：判定一批改过的 `.cs` 能否热补丁（只改方法/构造/访问器体）还是必须编译域重载，
-  并列出补丁需要的成员标识。纯文件级词法判定 + 编辑器侧 detour 账本核对，**不**编译补丁程序集。
+- **`unity_hot_reload`**：用编译服务做签名级 diff（`analyze/hotDiff`），生成补丁程序集（`compile/hotPatch`），
+  再交给编辑器 detour 应用——`applied` / `detourEngine` / `patches` 说明真正挂上了什么，`dry_run` 只分类。
+  分类规则与上游一致：只有方法体、构造函数体、访问器体或字段初始化器变了才算 hot；改签名、加减成员、
+  改基类一律 cold，因为错误的 hot 比要求重新编译更糟。
 - **`unity_recompile` 新增 `mode`**（`auto` / `compile` / `scripts`，默认 `compile`）：`auto` 先分类再决定，
-  能热补丁就报 `hot`；`scripts` 走 `request_script_reload` 的快速重载，明确说明它不代表收敛。
-- **`unity_asset_search`**：基于 `.meta` 的全工程资产索引（GUID、类型、路径），编辑器关着也能答，
-  并报告缺 `.meta` 与重复 GUID。
+  能热补丁就报 `hot`；`scripts` 走 `request_script_reload` 的快速重载，并明确说明它不代表收敛。
+- **`unity_asset_search`**：全工程资产索引（GUID、类型、路径），编辑器关着也能答，并报告缺 `.meta` 与重复 GUID。
+  索引落在 `Library/Locus/asset-index.db`（`node:sqlite`，WAL）：重扫只 stat 变化的文件，可跨会话复用。
 - **`unity_yaml_read` / `unity_yaml_search`**：直接读/搜 Unity YAML（`.unity` / `.prefab` / `.asset`），
-  scope 与 match_fields 可收窄，不需要打开场景。
+  scope 与 match_fields 可收窄，不需要打开场景；带 object 选择器时读编辑器内存里的未保存修改。
 - **`unity_lock` / `unity_release`**：跨会话的协作锁，带持有者与等待/试拿两种语义，
-  存在进程已消失时自动视为过期而不是永久卡住。
+  持有进程已消失时自动视为过期而不是永久卡住。
 - **`unity_offline_docs`**：导入 Unity 官方离线文档（中文/英文，版本按工程当前编辑器版本解析），
-  并在导入后按关键词检索与读页。同时注册一个 `unity-offline-docs` 技能，让模型知道能查官方文档。
+  导入后可关键词检索、读页、删除；导入过程报告进度并可取消。同时注册 `unity-offline-docs` 技能。
 
 #### 变化的工具
 
 - **`unity_status`**：新增编辑器发行版（Unity / 团结引擎 Tuanjie，读 `ProjectVersion.txt`，编辑器没开也能答）、
-  响应性（`responsive` / `phase` / `diagnosis`，来自原生状态探针），输出新增 `flavor` / `version` /
-  `responsive` / `phase` / `diagnosis`。旧 broker 缺这项能力时降级为「无结论」，不会让状态查询失败。
+  响应性（`responsive` / `diagnosis`，来自原生状态探针），输出新增 `flavor` / `version` / `diagnosis`。
+  旧 broker 缺这项能力时降级为「无结论」，不会让状态查询失败。
 - **`unity_console_log`**：新增 `source`（`console` / `editorLog`）。编辑器连不上时也能读 `Editor.log`
   尾部，并区分「这个工程的日志」与「别的工程的日志」。
 - **`unity_asset_graph`**：`references` / `usages` 不再强制要求先打开场景——有工程索引时走索引并标
@@ -182,66 +39,109 @@
 - **`unity_execute`**：失败路径在开启编译服务时追加编辑器外的编译检查（`Compile check (off-editor …)`），
   直接回答「是不是我的代码编不过」。
 
-#### 修复（真机验证发现）
+#### 与 Locus 官方对齐
 
-- **`unity_execute` 的 `enable_non_public_access` 曾让每个片段都编不过**：桥会在片段前插
-  `using __LocusNonPublicAccess.<程序集>;`，而没有任何 Unity 程序集定义这个命名空间，所以开着
-  默认设置时一律 `CS0246`。上游这项能力由编译服务用 `IgnoresAccessChecksTo` 实现，桥用编辑器自带
-  Roslyn 根本做不到；现在片段按原样发送，并在结果后附一句明确的能力限制（私有成员请用反射）。
-- **`unity_hot_reload` 曾把分类结果整条丢掉**：编辑器回的是 `source_path`（与 payload 的
-  `HotPatchMethodDto` 一致），而桥只认 `path`，于是明明分类成功却报「没有给出编辑脚本」。
-  现在两种写法都认，回归测试用编辑器的真实字段名。
-- **`unity_yaml_read` 对二进制资产的说法**：AssetBundle 序列化的场景/预制体不是文本 YAML，
-  提示语现在说明「这个资产不是文本 YAML」，而不是误导性的「文件没有 --- 头」。
+- **编辑器侧只用 payload 已有的消息**：热补丁的 apply / 摘除 / 自检直接发 payload 自带的
+  `hot_patch_loaded` / `hot_patch_dispose` / `hot_reload_probe`，与 Locus 桌面端走同一条路；
+  整批补丁原子生效（任一处失败即回滚），`domain_generation` 取自 `get_reload_state`，旧域编译的补丁
+  被 payload 直接拒绝；detour 账本在插件进程中按 payload 的 `MethodKey` / `DetourKey` 规则维护。
+  实时值走 payload 自带的 `read_yaml`，文本原样透传。**插件不含任何 Unity 侧 C# 代码**，
+  工程里只需要 `com.farlocus.locus` 一个包。
+- **prefab 覆盖读磁盘**：按官方 `unity_yaml_read` 的 `detail: "prefab_overrides"` 语义解析
+  `m_Modifications` 与嵌套 PrefabInstance，读法就是 `unity_yaml_read`。
+- **编辑器健康只看原生证据**：`dsh_health` 由原生 broker 自己应答（主线程卡死时 managed 侧正是答不了的那个），
+  CPU、心跳、存活与主线程栈两档探针；官方的挂起诊断同样只看原生栈与 CPU。「编辑器是否在编译」由
+  broker 在编译期拒绝 managed 请求体现（`managed_not_ready` / `managed_reloading`）。
+- **`code_*` 收拢为官方的五个查询工具**：`code_symbol_search`、`code_goto_definition`、
+  `code_find_references`、`code_hover`、`code_diagnostics`；语言服务器的 Roslyn 组件与 .NET 运行时
+  在第一次查询时自动下载并在插件目录复用（对应桌面端 `assets::ensure_assets`），机器上已有 .NET 10
+  时不额外下运行时。
+- **工具权限契约**：`unity_execute` 的 `readonly` 为必填（官方 schema 即如此），只读调用跳过编辑会话，
+  写操作必须显式声明 `readonly: false`；参数根一律闭合（`additionalProperties: false`），拼错参数是参数错误
+  而不是被静默丢弃；`unity_asset` 的 `apply` / `undo` 与 `unity_scene` 的 `set` / `batch` / `undo`
+  都要求 `request_editor_status` 并与实时状态比对；`unity_execute` / `unity_run_states` 的
+  `enable_non_public_access` 如实反映能力边界（`unity_run_states` 只接受 `false`）。
+- **`unity_lock` 契约与官方一致**：`reason` 在 acquire 时必填，`timeout_seconds` 只接受 1..900（越界报错），
+  acquire 结果带回锁文件路径（`Library/Locus/session-lock.json`）。
 
 #### 新增能力与基础设施
 
-- **编译服务（.NET 10 CoreCLR sidecar）**：`tools/dsh-finish/Compiler`，独立 Roslyn 进程，不连 Unity 就能编
-  `unity_execute` 的代码片段与 `run_states` 定义。每工作区一个进程、空闲 600 秒回收、上限 8 个，
-  缺 .NET 时**如实报不可用**并回退编辑器路径，绝不静默下载 SDK。构建入口 `npm run build:compiler`。
-- **原生状态探针 / 卡死诊断 / 后台钩子**（`native/locus_unix_native/`）：`dsh_health` 由原生 broker 自己答
-  （主线程卡死时 managed 侧正是答不了的那个），两档探针 + CPU + 存活判定；卡死时抓主线程栈并给
-  「Stuck at」结论，抓不到就明说抓不到。新增 `dsh_set_background_hook`，非 Windows 诚实报 `unsupported`。
+- **常驻编译服务**：`pinSidecar` / `unpinSidecar` / `readResidency`。常驻是**租约**（默认 8 小时，
+  `Library/Locus/compile-sidecar.json` 记录 pid 与心跳），不是永不退出：插件进程被换掉时没人续租，
+  进程自己退出，不会留下孤儿。编译服务是独立 Roslyn 进程（.NET 10 CoreCLR），每工作区一个、空闲 600 秒回收、
+  上限 8 个，缺 .NET 时**如实报不可用**并回退编辑器路径，绝不静默下载 SDK。源码在 `tools/dsh-finish/Compiler/`，
+  用 `npm run build:compiler` 构建，新增 `compile/params`、`analyze/hotDiff`、`compile/hotPatch` 三个 RPC。
+- **原生状态探针 / 卡死诊断 / 后台钩子**（`native/locus_unix_native/`）：卡死时抓主线程栈并给「Stuck at」结论，
+  抓不到就明说抓不到；`dsh_set_background_hook` 在 Windows 走 dbghelp 符号，Unix 走「导出符号 → 模式扫描」
+  两条路径，且**只在唯一命中且符号名相邻时**才打补丁，否则如实报 `unsupported` 并给原因。
 - **团结引擎识别**：`ProjectVersion.txt` 与编辑器窗口标题两路识别，`unity_status` 报告发行版。
-- **设置页**新增三个开关（默认关，各自有代价）：编译服务、后台调度钩子、离线文档。
+- **设置页**：新增编译服务、后台调度钩子、离线文档三个开关，默认值与 Locus 一致（开启）；
+  settings 文档升到 v2，v1 会被自动迁移。后台加速开关由 `unity_status` 幂等同步到 broker，
+  非 Windows 仍如实报不支持。
 
+#### 修复
 
-#### 与 Locus 官方对齐：工具权限契约
-
-- `unity_execute` 的 `readonly` 恢复为**必填**（官方 schema 即如此），并删掉描述里不存在的「recording mode」说法：
-  只读调用跳过桥接的 edit session，写操作必须显式声明 `readonly: false`。
-- `unity_execute` / `unity_run_states` 补上 `enable_non_public_access`：`unity_execute` 默认 true、受设置页
-  「允许访问私有/内部成员」（全局半边）约束；`unity_run_states` 只接受 `false`，传 `true` 会明确报错而不是被忽略。
-- 所有工具的参数根改为闭合对象（`additionalProperties: false`，与官方一致）：拼错或误传的参数现在是参数错误，
-  不再被静默丢弃。受影响的正是 `readonly` / `enable_non_public_access` / `request_editor_status` 这类会改变
-  权限语义的参数。
-- `unity_asset` 的 `apply` / `undo` 与 `unity_scene` 的 `undo` 现在要求 `request_editor_status` 并与实时状态
-  比对——它们都会落盘/保存场景，不能再在任意编辑器状态下写入。`unity_asset` 新增 `request_editor_status` 参数。
-- `unity_asset` / `unity_scene` / `unity_test` 的 `action` 描述明确标出哪些动作会写（`apply`/`undo`、
-  `set`/`batch`/`undo`、`run`），替代官方把读写拆成不同工具时由工具名承载的那层语义。
+- **`unity_offline_docs` 在 DSH 里不可能成功**：导入器要求注入 `fetch`，工具却从未传入，任何运行时都报
+  `no fetch implementation available`。现在显式使用 `globalThis.fetch`。
+- **取消后状态永远停在 importing**：取消文件在场时 `docsImportState` 仍报「在跑」，界面会卡在一根不动的
+  进度条上。现在取消文件在场即 `running: false`。
+- **每个文档页标题重复两遍**：正文自带的 `<h1>` 与写入时的 `# title` 叠在一起，26660 个页面全部如此。
+- **`unity_execute` 的 `enable_non_public_access` 曾让每个片段都编不过**：桥会在片段前插
+  `using __LocusNonPublicAccess.<程序集>;`，而没有任何 Unity 程序集定义这个命名空间，开着默认设置时一律
+  `CS0246`。上游这项能力由编译服务用 `IgnoresAccessChecksTo` 实现，桥用编辑器自带 Roslyn 做不到；
+  现在片段按原样发送，并在结果后附一句明确的能力限制（私有成员请用反射）。
+- **`unity_hot_reload` 对 Allman 风格的方法体漏判**：分类器逐行扫描时要求开括号与签名同行，
+  工程里最常见的「签名一行、`{` 下一行」写法因此得到空方法表，还会输出
+  `nothing to classify: no edited scripts were given`。现在等待下一行的 `{` 作为方法体起点，
+  应答新增逐文件结论 `files[]`（`state` / `reason` / `method_count`）。
+- **补丁程序集三处不匹配**：方法表是 camelCase 而编辑器 DTO 是 snake_case、补丁类型在
+  `Locus.DshHotPatch` 命名空间下而查找时没有前缀、补丁类名被截短成类型短名——现在三者一致。
+- **空补丁**：`ProjectFacts` 用类型短名造方法键、`PatchCompiler` 用全名比对，现在统一。
+- **引擎引用缺失**：工程 `Library/ScriptAssemblies` 里没有引擎模块时补丁编译找不到 `System.Object` 与
+  `UnityEngine`；现在按 `ProjectVersion.txt` 去编辑器安装目录补齐。
+- **`node:sqlite` 在 ESM 下不可用**：`require` 未定义被静默吞掉，索引一直悄悄降级；改为 `installBuiltinLoader`。
+- **资产库 schema 不重建、`type` 为 undefined 时写库报错**：`user_version = 0` 的旧库现在会丢弃重建；
+  `node:sqlite` 不接受 undefined 绑定导致的整批写入失败已修。
+- **`unity_yaml_read` 对二进制资产的说法**：AssetBundle 序列化的场景/预制体不是文本 YAML，
+  提示语现在说明「这个资产不是文本 YAML」，而不是误导性的「文件没有 --- 头」。
+- **`unity_yaml_search`**：`scanned` 曾恒为 0；`match_fields` 的描述曾与实现不符（示例给的是字段名，
+  实现只接受 `path` / `field_name` / `field_value` / `type` / `all`）；`source:"live"` 无 `scope` 时曾崩溃。
+- **`unity_asset_search` 的非法 `guid` 曾被静默忽略**：`guid:"ZZZ"` 会返回全库资产；现在明确报错，
+  `limit` 也改为越界报错而不是悄悄夹紧。
+- **`unity_yaml_read` 对不存在的路径曾先报「文件不存在」**：空内容与「文件不存在」现在可区分。
 
 ### 兼容性与分发（1.1.0）
 
-- 运行环境不变：Node >= 22.12，`@deepseek-ai/dsh` `>=0.2.1-alpha.2 <0.3.0-0`，Unity 2021.3+（团结引擎同样识别）。
-- **编辑器侧只用 payload 已有的消息**：实时值走 `read_yaml`，热补丁应用走 `hot_patch_loaded`；
-  `payload/locus_unity/` 保持上游逐字副本，未作任何修改。
-- **可选 .NET 10 编译服务**：源码在 `tools/dsh-finish/Compiler/`，用 `npm run build:compiler` 构建；
-  未构建或没有 .NET 时全部工具照常走 Unity 自带 Roslyn，只是少了编辑器外编译检查与热补丁分类的签名级信息。
-- **原生 broker 新增模块**：`native/locus_unix_native/src/{hook,state_probe,hang}/`（状态探针、卡死诊断、
-  后台调度钩子）。Linux 上后台钩子如实报告 `unsupported`，不伪造成功。
+- 运行环境：Node >= 22.12，`@deepseek-ai/dsh` `>=0.2.1-alpha.2 <0.3.0-0`，Unity 2021.3+（团结引擎同样识别）。
+- `payload/locus_unity/` 是上游 `com.farlocus.locus` 0.1.0 的逐字副本（来自 Locus 0.9.3），未作任何修改；
+  `npm run check:payload` 校验漂移。插件整体声明它对应的 payload 版本，不一致时 `unity_status` 给出警告。
+- **可选 .NET 10 编译服务**：未构建或没有 .NET 时全部工具照常走 Unity 自带 Roslyn，
+  只是少了编辑器外编译检查、常驻租约与签名级热补丁 diff。
+- **C# 语义分析用到的组件在第一次查询时自动下载**（约 90 MB），机器上没有 .NET 10 运行时才会额外下运行时。
 - 发布 ZIP 包含 Unity payload 与安装脚本；npm tarball 仍不含 `payload/`。
-- 验证：全量测试 **638 通过 / 0 失败**（`node --test --test-concurrency=1 "test/*.test.js"`），
-  原生 `cargo test` 34 + 1 + 1 通过，编译服务自检 9 通过，`dump-tools` / `typecheck`（114 模块）/
-  客户端与查看器 bundle 校验通过；并在真实 Unity 2022.3.62f3 编辑器上逐项验证了全部新增与变更工具
-  （状态与发行版、健康探针、后台钩子、`unity_execute`、Console 日志回退、`unity_recompile mode=scripts`、
-  热重载分类、资产索引、YAML 读取与检索、协作锁、离线文档状态、工程引用图、编译服务状态）。
+
+### 验证（1.1.0）
+
+- `node --test --test-concurrency=1 "test/*.test.js"`：**704 通过 / 0 失败**。
+- `dump-tools`：23 个工具的 schema 全部符合 DSH 子集；`typecheck`：120 个模块的 import / 调用点一致；
+  客户端与 three.js 查看器 bundle 均是最新。
+- 真机（Unity 2022.3.62f3）：热补丁全链路（diff → 编译 → `applied: 1`，`detourEngine: "detour"` →
+  `disposed: 1`）；离线文档完整导入（26660 页）、检索、读页、删除；YAML 实时读（二进制场景）、
+  资产检索（7515 文件）、`unity_status` / `unity_recompile` 一次生命周期内全部通过。
+- 原生 broker 的改动（去掉阶段快照，`dsh_health` 只剩 CPU 与存活两档）在开发机上**未做编译验证**
+  （cargo 缓存只读），请在 Linux / macOS 上用 `npm run build:native && npm run test:native` 复核。
 
 ### 升级说明（1.1.0）
 
-- 工具数从 17 增至 24（18 个 `unity_*` + 6 个 `code_*`），既有工具参数保持兼容，仅新增可选参数。
-- 若在 1.0.0 下依赖过 `unity_execute` 的私有成员访问：该能力从未真正生效（见上方修复），升级后会在结果里
-  明确说明限制，请改用反射访问非公开成员。
-- 设置页新增三个开关（编译服务、后台钩子、离线文档），默认关闭，按需打开。
+- 工具数从 17 增至 23（18 个 `unity_*` + 5 个 `code_*`）。若在 1.0.0 下依赖过 `unity_execute` 的私有成员访问：
+  该能力从未真正生效，升级后会在结果里明确说明限制，请改用反射访问非公开成员。
+- **`unity_status` / `dsh_health` 不再有 `phase`**：编辑器阶段不在 payload 能看见的接口里，官方也不用阶段；
+  「是不是在编译」看 managed 请求被拒绝（`managed_not_ready`）。依赖 `tiers.t1` 的调用方请改看 `t2` / `t3`。
+- **`unity_prefab_overrides` 工具删除**：用 `unity_yaml_read` 读实例的 `m_Modifications`。
+- **`code_analysis` 工具删除**：分析组件在第一次查询时自动下载；要关闭整个功能面用设置页的
+  「C# 分析」开关（或部署级 `DSH_LOCUS_CSHARP=0`）。
+- **不需要在工程里安装额外的 Unity 包**：`Packages/` 下只需 `com.farlocus.locus`。
+- 设置页新增三个开关（编译服务、后台钩子、离线文档），默认开启，与 Locus 一致。
 
 ## [1.0.0] - 2026-11-14
 
