@@ -50,8 +50,8 @@ namespace DshBridge.Health
                 return Compiling;
             if (_importing)
                 return Importing;
-            if (LocusReflection.EditorIsPlaying() == true)
-                return LocusReflection.EditorIsPaused() == true ? Paused : Playing;
+            if (EditorApplication.isPlaying)
+                return EditorApplication.isPaused ? Paused : Playing;
             return Editing;
         }
 
@@ -141,8 +141,8 @@ namespace DshBridge.Health
                     _sinceMs = NowMs();
                 }
 
-                bool playing = LocusReflection.EditorIsPlaying() == true;
-                bool paused = playing && LocusReflection.EditorIsPaused() == true;
+                bool playing = EditorApplication.isPlaying;
+                bool paused = playing && EditorApplication.isPaused;
                 return new Snapshot
                 {
                     phase = _phase,
@@ -234,7 +234,7 @@ namespace DshBridge.Health
 
         private static void OnPlayModeStateChanged(PlayModeStateChange change)
         {
-            // 只要让 Capture() 重算即可：playing/paused 直接读 LocusReflection。
+            // 只要让 Capture() 重算即可：playing/paused 直接读 EditorApplication。
         }
 
         private static void OnPauseStateChanged(PauseState state)

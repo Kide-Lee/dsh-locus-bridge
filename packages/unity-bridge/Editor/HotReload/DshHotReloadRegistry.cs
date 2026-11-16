@@ -42,7 +42,6 @@ namespace DshBridge.HotReload
             public MethodBase Original;
             public MethodBase Patch;
             public string OriginalAssembly;
-            public DshHotReloadClassifier.MethodIdentity Identity;
         }
 
         private static readonly object Gate = new object();
@@ -62,38 +61,6 @@ namespace DshBridge.HotReload
         /// <summary>当前域的代次，格式与 payload 的 <c>_compileDomainGeneration</c> 一致（32 位十六进制）。</summary>
         internal static readonly string DomainGeneration = Guid.NewGuid().ToString("N");
 
-        /// <summary>
-        /// 本域里最后一次在分类时读到的源文本，按资产路径索引。
-        ///
-        /// 用途只有一个：热补丁要的是「域里的代码 → 磁盘上的文本」这个差分，而
-        /// 差分的前一侧编辑器从来不保存。分类是编辑器侧唯一读文件的时刻，所以把它
-        /// 读到的那份文本记下来，就是「域编译时用到的文本」最接近的证据——只要两
-        /// 次分类之间没人改过文件。它不是“当前文本”：当前文本永远从磁盘读。
-        /// 域重载时随旧域一起丢弃（见 <see cref="OnDomainLoaded"/>）。
-        /// </summary>
-        private static readonly Dictionary<string, string> CompiledTexts = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-
-        internal static void RecordCompiledText(string path, string text)
-        {
-            if (string.IsNullOrEmpty(path) || text == null)
-                return;
-            lock (Gate)
-            {
-                CompiledTexts[path] = text;
-            }
-        }
-
-        /// <summary>该路径上次分类时的文本；本域没读过就返回 null（调用方据此要求重编译）。</summary>
-        internal static string CompiledText(string path)
-        {
-            if (string.IsNullOrEmpty(path))
-                return null;
-            lock (Gate)
-            {
-                return CompiledTexts.TryGetValue(path, out string text) ? text : null;
-            }
-        }
-
         // 补丁程序集的加载代理：补丁引用 payload 的 Locus.HotReload.Runtime.dll 等
         // 预编译依赖，而 Assembly.Load(byte[]) 不会去 payload 目录里找它们。
         private static bool _resolverInstalled;
@@ -104,8 +71,6 @@ namespace DshBridge.HotReload
             lock (Gate)
             {
                 Detours.Clear();
-                // 新域编译的是新文本：上一域记下的“编译文本”对新域没有意义。
-                CompiledTexts.Clear();
                 _lastError = null;
             }
             // MonoMod 的动态方法/代码页在新域里不存在，状态全部重建。
@@ -723,6 +688,7 @@ namespace DshBridge.HotReload
         }
     }
 
+    /// <summary>
     /// <summary>
     /// MonoMod 的反射入口。只用到两个类型：
     ///   <c>MonoMod.RuntimeDetour.Detour(MethodBase original, MethodBase replacement)</c>

@@ -155,14 +155,18 @@ namespace DshBridge.Live
             if (depth > 8)
                 depth = 8;
 
-            UnityEngine.Object[] assets = AssetDatabase.LoadAllAssetsAtPath(path);
+            // A scene is not an asset the database loads by itself, and asking
+            // LoadAllAssetsAtPath for one makes Unity take the threaded read path
+            // (the "Do not use ReadObjectThreaded on scene objects!" warning).
+            // Scenes therefore go straight to the open-scene route.
+            bool isScene = path.EndsWith(".unity", StringComparison.OrdinalIgnoreCase);
+            UnityEngine.Object[] assets = isScene ? null : AssetDatabase.LoadAllAssetsAtPath(path);
             if (assets == null || assets.Length == 0)
             {
-                // A scene file is not an asset the database loads by itself; the
-                // objects live in an open scene. Opening it read-only is the only
-                // way to answer "what does this scene hold right now", and it is
-                // also what makes an edit visible before the next save.
-                if (path.EndsWith(".unity", StringComparison.OrdinalIgnoreCase))
+                // The objects live in an open scene. Opening it read-only is the
+                // only way to answer "what does this scene hold right now", and it
+                // is also what makes an edit visible before the next save.
+                if (isScene)
                     assets = LoadSceneObjects(path);
             }
             if (assets == null || assets.Length == 0)
@@ -209,6 +213,10 @@ namespace DshBridge.Live
             try
             {
                 serialized = new SerializedObject(asset);
+                // Scene objects must be read on the main thread: without an explicit
+                // Update, Unity takes the threaded path and logs "Do not use
+                // ReadObjectThreaded on scene objects!" for every object.
+                serialized.Update();
                 SerializedProperty iterator = serialized.GetIterator();
                 bool enter = true;
                 builder.Append('[');

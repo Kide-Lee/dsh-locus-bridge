@@ -2,35 +2,6 @@
 
 本文件是给在本仓库中工作的 AI agent 的说明。
 
-## 如何选择 Unity 项目
-
-**由你自己决定一次调用针对哪个 Unity 项目，不要问人类。**
-
-本仓库发布的是插件和 Linux/macOS broker，本身不是一个 Unity 项目。实际的工作
-会话通常会在代码旁边检出一份工程——本地开发用的固定工程是 `unity-test/`（它包
-含 `Assets/` 和 `ProjectSettings/`，这才是目录被称为 Unity 工程的原因）——而
-`unity_*` 工具会自己找到它：先在当前工作目录及其向下三层里搜，再到每个祖先目录
-旁边找，直到最近的 `.git` 为止。
-
-所以无论会话是从仓库根目录还是从某个子目录启动，不带 `project_path` 的
-`unity_status` 通常都能自己解析出工程。
-
-只有在候选工程不止一个、或者你要指向另一份检出时才传 `project_path`。如果某次
-调用报告了多个候选，挑出与本次需求相关的那个传进去——这种歧义本身就是信息，
-不是发问的理由。只有当需求内容和仓库都无法说明指的是哪个工程时，才去问人类。
-
-## Unity 工具需要什么
-
-- 一个正在运行的 Unity 编辑器，装有 Locus 包和原生 broker（Windows 上是
-  `locus_unity_native.dll`，Linux 上是 `liblocus_unity_native.so`），并且存在
-  `<工程>/Library/Locus/NativeBridge.enabled`（或者设置了
-  `LOCUS_UNITY_NATIVE_BRIDGE=1`）。
-- Linux 上 broker 走 Unix domain socket。在当前沙箱里它必须放在工作区内
-  （`.locus/`），因为 `/tmp` 不会在命令之间共享；因此编辑器要跑在长驻的后台作业
-  里，而不是一次性命令。
-- 没有 GPU 时按 `Unity -batchmode -nographics -projectPath <工程>` 启动，并且
-  需要 broker 一直可连时**不要**加 `-quit`。
-
 ## 修改本插件
 
 - `npm test` 跑 JS 测试套件。`npm run typecheck` 检查模块接线；
@@ -47,10 +18,17 @@
   `minimum`/`maximum` 之类的断言关键字。`node scripts/dump-tools.mjs` 是唯一会立刻报出来的检查；
   `scripts/typecheck.mjs` 只查导入与绑定，不查这些。
 - `packages/unity-bridge/` 是本仓库自己的协作 Unity 包（`com.locus.dsh-bridge`），补的是 payload
-  不暴露的编辑器侧能力（热重载分类与 detour 账本、健康阶段上报、实时值源与 prefab 覆盖）。
-  安装时由 `src/setup.js` 一并复制到 `Packages/com.locus.dsh-bridge`。它通过反射挂到 payload 的
-  `RegisterExtensionMessageHandler` 上，**不要**改成 asmdef 引用（payload 的 asmdef 是
-  `autoReferenced: false`，硬引用会把插件钉死在某个 payload 版本上）。
+  不暴露的编辑器侧能力（热重载补丁的应用与 detour 账本、健康阶段上报、实时值源与 prefab 覆盖；
+  热重载的**分类**在插件进程 `src/hotreload-classify.js`，不在这个包里）。
+  安装时由 `src/setup.js` 一并复制到 `Packages/com.locus.dsh-bridge`。它通过 asmdef 显式引用
+  `Locus.Editor` 接入 bridge（`autoReferenced: false` 不妨碍显式 `references`）；payload 缺接口时
+  是编译失败，而不是运行时悄悄失效。
+- **插件整体声明它对应的 payload 版本**，写在根 `package.json` 的 `locus` 块：`locus.version`
+  是来源的上游 Locus release，`locus.payload`（`package` + `version`）是其中 `com.farlocus.locus`
+  的包版本。`src/setup.js` 的 `payloadDeclaration()` / `payloadContract()` 用这份声明对照插件自带
+  副本与工程已安装包，`unity_status` 的工程诊断会对不一致给出警告；`npm run check:payload`
+  （`scripts/sync-payload.mjs --check`）把声明与 `payload/locus_unity` 的版本不一致当作硬失败。
+  改动 payload 时同步这两处，硬引用与升级都以该声明为准。
 - `tools/dsh-finish/Compiler/` 是可选 .NET 10 编译服务；`npm run build:compiler` 构建，
   `npm run build:compiler -- --check` 校验产物是否与源码同步。缺 .NET 时它的正确行为是报
   `no_dotnet` 并让调用方退回 Unity 路径，**绝不**在运行时下载 SDK。

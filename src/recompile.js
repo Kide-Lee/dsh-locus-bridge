@@ -176,7 +176,7 @@ export async function runRecompile(target, options = {}) {
     }
   }
 
-  if (classification && classification.needCompile.length === 0 && classification.hot.length > 0) {
+  if (classification && classification.needCompile.length === 0 && classificationIsHot(classification)) {
     return {
       mode: 'hot',
       status: 'hot',
@@ -203,9 +203,25 @@ export function formatClassification(classification, classificationError = null)
   for (const entry of classification.failed) {
     lines.push(`  not classifiable: ${entry.path}${entry.error ? ` — ${entry.error}` : ''}`)
   }
-  const hotPaths = new Set(classification.hot.map((entry) => entry.path))
+  const hotPaths = classification.files
+    ? classification.files.filter((file) => file.state === 'hot').map((file) => file.path)
+    : [...new Set(classification.hot.map((entry) => entry.path))]
   for (const path of hotPaths) lines.push(`  hot-patchable: ${path}`)
   return lines.length > 0 ? lines.join('\n') : ''
+}
+
+/**
+ * Whether every classified file is hot-patchable.
+ *
+ * `hot` only carries detourable methods, so a file judged hot without a method
+ * body (a comment-only edit) appears only in `files`; treating that as "nothing
+ * is hot" would force a needless compile.
+ */
+function classificationIsHot(classification) {
+  if (Array.isArray(classification.files) && classification.files.length > 0) {
+    return classification.files.every((file) => file.state === 'hot')
+  }
+  return classification.hot.length > 0
 }
 
 /** Keep only project-relative asset paths Locus accepts in a recompile request. */

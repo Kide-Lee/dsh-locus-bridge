@@ -41,7 +41,11 @@
   },
   "locus": {
     "repository": "https://github.com/r1n7aro/Locus",
-    "version": "0.9.3"
+    "version": "0.9.3",
+    "payload": {
+      "package": "com.farlocus.locus",
+      "version": "0.1.0"
+    }
   },
   "repository": {
     "type": "git",

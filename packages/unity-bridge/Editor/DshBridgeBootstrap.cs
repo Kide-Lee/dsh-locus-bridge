@@ -56,14 +56,6 @@ namespace DshBridge
 
         private static void RegisterSource(IEditorMessageSource source)
         {
-            if (!LocusReflection.Available)
-            {
-                Debug.LogWarning(
-                    "[dsh-bridge] Locus package not available; editor extensions stay inert. " +
-                    LocusReflection.UnavailableReason);
-                return;
-            }
-
             try
             {
                 source.OnDomainLoaded();
@@ -77,7 +69,12 @@ namespace DshBridge
             {
                 if (message?.Handler == null || string.IsNullOrEmpty(message.MessageType))
                     continue;
-                LocusReflection.RegisterHandler(message.MessageType, message.Handler);
+                // The companion package references Locus.Editor directly (the
+                // plugin declares the payload version it targets), so the bridge
+                // is a compile-time dependency here rather than a reflection
+                // probe: a payload that lacks this entry point fails the build
+                // instead of silently going inert at runtime.
+                Locus.LocusBridge.RegisterExtensionMessageHandler(message.MessageType, message.Handler);
             }
         }
     }

@@ -94,7 +94,7 @@ test('a write round-trips and is observable', (t) => {
   assert.equal(seen[0].features.csharp, false)
   // The document is a plain JSON object a human can edit.
   const onDisk = JSON.parse(readFileSync(settingsPath(env), 'utf8'))
-  assert.equal(onDisk.version, 1)
+  assert.equal(onDisk.version, 2)
   assert.equal(onDisk.features.csharp, false)
 })
 
@@ -154,12 +154,12 @@ test('non-boolean and unknown switches are not coerced', () => {
   // The global half of `enable_non_public_access` defaults on, exactly as the
   // upstream tool schema does, and a non-boolean falls back to it.
   assert.equal(settings.preferences.nonPublicAccess, true)
-  // The three expensive capabilities default off: each spends something the
-  // user did not ask for (a .NET process, a patch to the editor, a large
-  // download), so opting in has to be deliberate.
-  assert.equal(settings.preferences.compileSidecar, false)
-  assert.equal(settings.preferences.backgroundHook, false)
-  assert.equal(settings.preferences.offlineDocs, false)
+  // The three capability switches follow Locus' own defaults: the compile
+  // sidecar and the background hook ship enabled there, and the docs import is
+  // only ever started by an explicit call.
+  assert.equal(settings.preferences.compileSidecar, true)
+  assert.equal(settings.preferences.backgroundHook, true)
+  assert.equal(settings.preferences.offlineDocs, true)
 })
 
 test('a workspace path round-trips and survives a hand-edited sibling', (t) => {
@@ -174,6 +174,42 @@ test('a patch cannot invent a switch key', (t) => {
   const env = home(t)
   saveSettings({ features: { nonsense: false } }, env)
   assert.equal('nonsense' in readSettings(env).features, false)
+})
+
+test('a v1 document is migrated to the capability defaults Locus ships', (t) => {
+  const env = home(t)
+  writeFileSync(
+    settingsPath(env),
+    `${JSON.stringify({
+      version: 1,
+      features: { unity: true, csharp: true, preview: true },
+      preferences: {
+        frameCache: true,
+        workspacePath: '',
+        unityProject: '',
+        nonPublicAccess: false,
+        compileSidecar: false,
+        backgroundHook: false,
+        offlineDocs: false,
+      },
+      skills: {},
+    })}\n`,
+    'utf8',
+  )
+  const settings = readSettings(env)
+  // These three changed default in v2 (Locus enables them); a stored v1 value
+  // is the old default, not a user decision.
+  assert.equal(settings.preferences.compileSidecar, true)
+  assert.equal(settings.preferences.backgroundHook, true)
+  assert.equal(settings.preferences.offlineDocs, true)
+  // An explicit choice for a switch whose default did not change is kept.
+  assert.equal(settings.preferences.nonPublicAccess, false)
+})
+
+test('a v2 document keeps switches the user turned off', (t) => {
+  const env = home(t)
+  saveSettings({ preferences: { backgroundHook: false } }, env)
+  assert.equal(readSettings(env).preferences.backgroundHook, false)
 })
 
 test('DSH_LOCUS_CSHARP=0 pins the C# plane off regardless of the stored value', (t) => {

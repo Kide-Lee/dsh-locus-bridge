@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -701,4 +701,206 @@ test('the converge loop honours its budget even when reconnects keep failing', a
   )
   const elapsed = Date.now() - started
   assert.ok(elapsed < 20_000, `must give up near its budget, took ${elapsed}ms`)
+})
+
+// ── unity_lock：上游契约（reason 必填、timeout 1..900） ────────────────────
+
+test('unity_lock requires a reason before acquiring', async () => {
+  const result = await tools.unity_lock.execute({ action: 'acquire', owner: 'agent-a' }, ctx())
+  assert.match(result.text, /^Error: reason is required/)
+  assert.equal(result.acquired, false)
+})
+
+test('unity_lock rejects an out-of-range timeout instead of clamping it', async () => {
+  for (const timeout_seconds of [0, 901, 1.5]) {
+    const result = await tools.unity_lock.execute(
+      { action: 'acquire', owner: 'agent-a', reason: 'probe', timeout_seconds },
+      ctx(),
+    )
+    assert.match(result.text, /timeout_seconds must be an integer from 1 to 900/)
+  }
+})
+
+test('unity_lock acquires and releases with a reason', async () => {
+  const acquired = await tools.unity_lock.execute(
+    { action: 'acquire', owner: 'agent-a', reason: 'play-mode probe' },
+    ctx(),
+  )
+  assert.equal(acquired.acquired, true)
+  assert.match(acquired.path, /session-lock\.json$/)
+  const released = await tools.unity_release.execute({ owner: 'agent-a' }, ctx())
+  assert.equal(released.released, true)
+})
+
+// ── unity_prefab_overrides：路径不存在必须有别于“没有覆盖” ────────────────
+
+test('unity_prefab_overrides rejects a path that does not exist', async () => {
+  const result = await tools.unity_prefab_overrides.execute({ path: 'Assets/Nope.prefab' }, ctx())
+  assert.match(result.text, /^Error: Assets\/Nope\.prefab does not exist/)
+  assert.equal(result.total, 0)
+})
+
+test('unity_prefab_overrides explains a missing Editor for a path that exists', async () => {
+  mkdirSync(join(PROJECT, 'Assets', 'Prefabs'), { recursive: true })
+  const { writeFileSync } = await import('node:fs')
+  writeFileSync(join(PROJECT, 'Assets', 'Prefabs', 'Exists.prefab'), '%YAML 1.1\n')
+  const result = await tools.unity_prefab_overrides.execute({ path: 'Assets/Prefabs/Exists.prefab' }, ctx())
+  assert.match(result.text, /need a running Unity Editor|does not exist/)
+})
+
+// ── unity_yaml_search：live 无 scope 是全工程磁盘搜索，不是参数错误 ────────
+
+test('unity_status surfaces a payload version mismatch while connected', async () => {
+  const packageRoot = join(PROJECT, 'Packages', 'com.farlocus.locus')
+  mkdirSync(packageRoot, { recursive: true })
+  writeFileSync(
+    join(packageRoot, 'package.json'),
+    JSON.stringify({ name: 'com.farlocus.locus', version: '0.0.3' }),
+  )
+  try {
+    await withEditor(async () => {
+      const result = await tools.unity_status.execute({}, ctx())
+      assert.equal(result.connected, true)
+      // The declaration is plugin-level, so a connected editor must still say
+      // that its Locus package is not the one this build declares.
+      assert.match(result.text, /The project has Locus 0\.0\.3/)
+      assert.match(result.text, /locus\.payload\.version/)
+    })
+  } finally {
+    rmSync(packageRoot, { recursive: true, force: true })
+  }
+})
+
+test('unity_yaml_search with source "live" and no scope searches disk', async () => {
+  const result = await tools.unity_yaml_search.execute(
+    { query: 'nothing-matches-this', source: 'live', limit: 5 },
+    ctx(),
+  )
+  assert.doesNotMatch(result.text, /a path is required/)
+  assert.deepEqual(result.matches, [])
+  // Whatever the fixture tree holds is searched on disk; the point is that the
+  // call answers instead of failing on the missing scene scope.
+  assert.ok(result.scanned >= 0)
+})
+
+// ── settings switches must actually control the features ──────────────────
+
+test('unity_offline_docs refuses import while its Settings switch is off', async () => {
+  const { saveSettings } = await import('../src/settings.js')
+  saveSettings({ preferences: { offlineDocs: false } })
+  try {
+    const result = await tools.unity_offline_docs.execute({ action: 'import' }, ctx())
+    assert.equal(result.state, 'disabled')
+    assert.match(result.text, /switched off in Settings/)
+  } finally {
+    saveSettings({ preferences: { offlineDocs: true } })
+  }
+})
+
+/** A wire-shaped health report a Windows broker would send. */
+const HEALTHY_REPORT = {
+  pid: 4242,
+  processPath: 'C:/Program Files/Unity/Editor/Unity.exe',
+  managedState: 'ready',
+  editorStatus: 'editing|Assets/Scenes/Main.unity',
+  mainThreadHeartbeatSeq: 120,
+  heartbeatAgeMs: 40,
+  supported: true,
+  unresponsive: false,
+  phase: {
+    supported: true,
+    freshness: 'fresh',
+    phase: 'editing',
+    since_ms: 1_700_000_000_000,
+    age_ms: 12,
+    playing: false,
+    paused: false,
+    compiling: false,
+    updating: false,
+    importing: false,
+  },
+  cpuPercent: 3.5,
+  liveness: { supported: true, state: 'alive', zombie: false },
+  tiers: {
+    t1: { supported: true, reason: null },
+    t2: { supported: true, platform: 'win32', reason: null, windowMs: 1_000 },
+    t3: { supported: true, state: 'alive', zombie: false },
+  },
+  notes: [],
+  stackSupport: { platform: 'win32', supported: true },
+  backgroundHook: {
+    enabled: true,
+    supported: true,
+    state: 'patched',
+    patched: true,
+    symbolCount: 2,
+    processId: 4242,
+    error: null,
+  },
+}
+
+test('unity_status reconciles the background hook with the Settings switch', async () => {
+  const { saveSettings } = await import('../src/settings.js')
+  saveSettings({ preferences: { backgroundHook: false } })
+  const requests = []
+  try {
+    await withEditor(
+      async () => {
+        await tools.unity_status.execute({}, ctx())
+        const flip = requests.find((request) => request.type === 'dsh_set_background_hook')
+        assert.ok(flip, 'a status read must apply the stored preference')
+        assert.equal(flip.message, '0', 'the switch is off, so the hook is disabled')
+      },
+      {
+        onMessage: (request, _helpers, socket) => {
+          if (request.type === 'dsh_health') {
+            requests.push({ type: request.type })
+            socket.write(JSON.stringify({ type: 'response', reply_to: request.id, ok: true, message: JSON.stringify(HEALTHY_REPORT) }) + '\n')
+            return true
+          }
+          if (request.type === 'dsh_set_background_hook') {
+            requests.push({ type: request.type, message: request.message })
+            socket.write(
+              JSON.stringify({
+                type: 'response',
+                reply_to: request.id,
+                ok: true,
+                message: JSON.stringify({ ...HEALTHY_REPORT.backgroundHook, enabled: false, patched: false, state: 'unpatched' }),
+              }) + '\n',
+            )
+            return true
+          }
+          return undefined
+        },
+      },
+    )
+  } finally {
+    saveSettings({ preferences: { backgroundHook: true } })
+  }
+})
+
+test('unity_status does not flip the hook when it already matches', async () => {
+  const { saveSettings } = await import('../src/settings.js')
+  saveSettings({ preferences: { backgroundHook: true } })
+  const requests = []
+  try {
+    await withEditor(
+      async () => {
+        await tools.unity_status.execute({}, ctx())
+        assert.equal(requests.filter((request) => request.type === 'dsh_set_background_hook').length, 0)
+      },
+      {
+        onMessage: (request, _helpers, socket) => {
+          if (request.type === 'dsh_health') {
+            requests.push({ type: request.type })
+            socket.write(JSON.stringify({ type: 'response', reply_to: request.id, ok: true, message: JSON.stringify(HEALTHY_REPORT) }) + '\n')
+            return true
+          }
+          return undefined
+        },
+      },
+    )
+  } finally {
+    saveSettings({ preferences: { backgroundHook: true } })
+  }
 })

@@ -254,9 +254,18 @@ export async function scanAssets(projectRoot, { rescan = false, budgetMs = 20_00
  * @returns {Promise<{assets: Array<object>, broken: object, total: number, partial: boolean, truncated: boolean}>}
  */
 export async function searchAssets(projectRoot, { type, name, under, guid, limit, rescan = false } = {}) {
-  const index = await scanAssets(projectRoot, { rescan })
-  const size = clampLimit(limit, DEFAULT_LIMIT, SEARCH_LIMIT_MAX)
+  // A malformed GUID is a caller error, not "no filter": silently dropping it
+  // answered every asset in the project, which is worse than a rejection.
+  const guidGiven = guid !== undefined && guid !== null && String(guid).trim() !== ''
   const wantedGuid = normalizeGuid(guid)
+  if (guidGiven && wantedGuid === null) {
+    throw new Error(`guid must be the 32-hex asset GUID (got '${guid}'); it is stored on the guid: line of a .meta file.`)
+  }
+  const index = await scanAssets(projectRoot, { rescan })
+  if (limit !== undefined && limit !== null && (!Number.isInteger(limit) || limit < 1 || limit > SEARCH_LIMIT_MAX)) {
+    throw new Error(`limit must be an integer from 1 to ${SEARCH_LIMIT_MAX} (got ${JSON.stringify(limit)}).`)
+  }
+  const size = clampLimit(limit, DEFAULT_LIMIT, SEARCH_LIMIT_MAX)
   const wantedType = typeof type === 'string' && type.trim() !== '' ? normalizeType(type.trim()) : null
   const wantedName = typeof name === 'string' && name.trim() !== '' ? name.trim().toLowerCase() : null
   const wantedUnder = typeof under === 'string' && under.trim() !== '' ? normalizeUnder(under.trim()) : null

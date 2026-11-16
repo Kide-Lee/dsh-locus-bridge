@@ -64,6 +64,95 @@ const NATIVE_LIBRARY = {
 /** Holds the built `locus_unity` tree; see `scripts/sync-payload.mjs`. */
 const BUNDLED_PAYLOAD_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', 'payload', 'locus_unity')
 
+/** This plugin's own manifest: the payload contract lives in its `locus` block. */
+const PLUGIN_MANIFEST_PATH = join(dirname(fileURLToPath(import.meta.url)), '..', 'package.json')
+
+/**
+ * The payload this build declares it targets.
+ *
+ * Declared once, for the whole plugin, in the root `package.json`:
+ *
+ *   "locus": {
+ *     "version": "0.9.3",                    // upstream Locus release the payload was synced from
+ *     "payload": { "package": "com.farlocus.locus", "version": "0.1.0" }
+ *   }
+ *
+ * `locus.version` names the release the vendored tree came from; `locus.payload`
+ * names the Unity package inside it. Both are facts about this build, not about
+ * a particular project, so they are checked here rather than per install.
+ */
+export function payloadDeclaration() {
+  const manifest = readJson(PLUGIN_MANIFEST_PATH) ?? {}
+  const locus = manifest.locus && typeof manifest.locus === 'object' ? manifest.locus : {}
+  const payload = locus.payload && typeof locus.payload === 'object' ? locus.payload : {}
+  return {
+    release: typeof locus.version === 'string' ? locus.version : '',
+    packageName: typeof payload.package === 'string' ? payload.package : PACKAGE_ID,
+    version: typeof payload.version === 'string' ? payload.version : '',
+  }
+}
+
+/**
+ * Compare the declared payload with the copies that actually exist.
+ *
+ * Three versions can disagree:
+ *   * `declared` – what the plugin says it targets (root `package.json`);
+ *   * `bundled` – the payload tree this build installs (`payload/locus_unity`);
+ *   * `installed` – the Locus package the project currently loads.
+ *
+ * A mismatch is reported, never silently repaired: the project may deliberately
+ * run a different payload, and the plugin's declaration is the contract a
+ * hard-reference build compiles against.
+ *
+ * @param options.declaration - override for tests; defaults to the plugin manifest.
+ * @returns `{declared, bundled, installed, problems}` where `problems` are
+ *   warnings with a `code` and a human-readable `detail`.
+ */
+export function payloadContract({ payloadRoot = payloadDir(), packageRoot = null, declaration = null } = {}) {
+  const declared = declaration ?? payloadDeclaration()
+  const bundled = payloadRoot ? (readJson(join(payloadRoot, 'package.json'))?.version ?? null) : null
+  const installed = packageRoot ? (readJson(join(packageRoot, 'package.json'))?.version ?? null) : null
+  const problems = []
+  if (!declared.version) {
+    problems.push({
+      code: 'payload_declaration_missing',
+      detail: 'This plugin build declares no locus.payload.version in package.json, so the payload it targets is unknown.',
+    })
+  } else {
+    if (bundled !== null && bundled !== declared.version) {
+      problems.push({
+        code: 'payload_bundle_mismatch',
+        detail: `The bundled Locus package is ${bundled}, but this plugin declares payload ${declared.version}.`,
+      })
+    }
+    if (installed !== null && installed !== declared.version) {
+      problems.push({
+        code: 'payload_version_mismatch',
+        detail: `The project has Locus ${installed}, but this plugin declares payload ${declared.version}.`,
+      })
+    }
+  }
+  return { declared, bundled, installed, problems }
+}
+
+/**
+ * The payload contract for one project, without the rest of the setup probe.
+ *
+ * `unity_status` calls this on every successful connection: it reads two
+ * `package.json` files, so it is cheap enough for that path, while
+ * `inspectSetup` (which walks the package for its assemblies) stays on the
+ * failure path.
+ */
+export function projectPayloadContract(projectRoot, { env = process.env } = {}) {
+  const installed = installedPackage(projectRoot)
+  return payloadContract({ payloadRoot: payloadDir(env), packageRoot: installed?.root ?? null })
+}
+
+/** Render a contract's warnings; empty text means the versions agree. */
+export function formatPayloadContract(contract) {
+  return (contract?.problems ?? []).map((problem) => `${problem.detail}${hintFor(problem.code, null)}`).join('\n')
+}
+
 /**
  * The package tree this build installs.
  *
@@ -278,6 +367,7 @@ export function inspectSetup(projectRoot, { platform = process.platform, env = p
   const payloadBrokerPresent = broker ? isFile(join(payloadRoot, broker.relative)) : false
 
   const companion = companionStatus(projectRoot)
+  const contract = payloadContract({ payloadRoot, packageRoot })
   const problems = []
   // Not a defect — the editor simply owns the package right now. Reported so the
   // caller can ask for a restart instead of running into EPERM several steps
@@ -343,6 +433,7 @@ export function inspectSetup(projectRoot, { platform = process.platform, env = p
     endpoint,
     editorRunning,
     payload: { available: payloadAvailable, version: payloadVersion(env), brokerForHost: payloadBrokerPresent },
+    payloadContract: contract,
     problems,
     ready: problems.length === 0,
   }
@@ -649,7 +740,12 @@ export function writeMarker(projectRoot, endpoint = resolvePipeName({ projectRoo
  *     appear here, once, in the only situation that makes them actionable.
  */
 export function formatSetup(result) {
-  const lines = result.problems.map((problem) => `${problem.detail}${hintFor(problem.code, result)}`)
+  const lines = [
+    ...result.problems.map((problem) => `${problem.detail}${hintFor(problem.code, result)}`),
+    // The payload contract is a warning, not a blocker: a project can run a
+    // payload other than the declared one, but the mismatch must be visible.
+    ...(result.payloadContract?.problems ?? []).map((problem) => `${problem.detail}${hintFor(problem.code, result)}`),
+  ]
   const install = installInstructions(result)
   if (install) lines.push('', install)
   return lines.join('\n')
@@ -666,6 +762,12 @@ function hintFor(code, result) {
       return ' Move it to Packages/com.farlocus.locus.'
     case 'companion_missing':
       return ' Re-run the install command to add it; the project still connects without it.'
+    case 'payload_version_mismatch':
+      return ' Install the payload this plugin bundles, or update locus.payload.version to the payload the project targets.'
+    case 'payload_bundle_mismatch':
+      return ' Run npm run sync:payload and update locus.payload.version in package.json.'
+    case 'payload_declaration_missing':
+      return ' Add locus.payload.version to the plugin package.json.'
     default:
       return ''
   }

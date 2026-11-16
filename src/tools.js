@@ -18,6 +18,8 @@
 //   unity_scene         scene object search / read / atomic set
 
 import { randomUUID } from 'node:crypto'
+import { existsSync } from 'node:fs'
+import { join } from 'node:path'
 import { resolveProjectRoot, normalizeCode, blockedMs } from './args.js'
 import {
   activeEditOwner,
@@ -32,9 +34,9 @@ import { findCodeUsages, findReferences } from './asset-graph.js'
 import { buildCaptureRequest, captureContent, captureViewport, commitImage, assertImageCapableRoute, formatCapture, readablePath } from './capture.js'
 import { consoleLogMessage, formatConsoleLog, formatEditorLog, readEditorLogEntries } from './console.js'
 import { formatAssetSearch, searchAssets } from './asset-db.js'
-import { editYamlText, queryDocument, readYamlFile, readYamlText, renderNode, searchYamlFiles } from './yaml-lite.js'
+import { readYamlText, searchYamlFiles } from './yaml-lite.js'
 import { LockTimeout, acquireLock, lockStatus, releaseLock } from './editor-lock.js'
-import { editorHealth, enableBackgroundHook, explainUnresponsive } from './health.js'
+import { editorHealth, enableBackgroundHook } from './health.js'
 import { formatHotReload, hotReload } from './hotreload.js'
 import {
   DOCS_ROOT_NAME,
@@ -67,7 +69,7 @@ import {
 } from './run-states.js'
 import { LocusError } from './locus-client.js'
 import { playModeMessage, setPlayMode } from './play-mode.js'
-import { formatSetup, inspectSetup } from './setup.js'
+import { formatPayloadContract, formatSetup, inspectSetup, projectPayloadContract } from './setup.js'
 import {
   clampExecuteTimeout,
   EDITOR_STATUS_DISCONNECTED,
@@ -325,7 +327,11 @@ const unityStatus = {
         version: edition.version,
         health,
       })
-      return statusResult(target, state.connected, state.status, state.scenes, capabilities, state.error, text, edition, health)
+      // The payload declaration is a plugin-level fact, so a connected editor
+      // gets the mismatch note too — not only the failure-path diagnosis.
+      const contractNote = formatPayloadContract(projectPayloadContract(projectRoot))
+      const withContract = contractNote ? `${text}\n\n${contractNote}` : text
+      return statusResult(target, state.connected, state.status, state.scenes, capabilities, state.error, withContract, edition, health)
     } catch (error) {
       // A failed connection is exactly when the project's own state matters:
       // report it unprompted instead of making the caller ask again.
@@ -356,10 +362,35 @@ const unityStatus = {
 async function readHealth(target) {
   try {
     const health = await editorHealth(target)
-    return health?.supported === false ? null : health
+    if (health?.supported === false) return null
+    return await applyBackgroundHookPreference(target, health)
   } catch {
     return null
   }
+}
+
+/**
+ * Make the broker's scheduling hook match the user's switch.
+ *
+ * Locus applies `unity.connection.backgroundHook` as soon as the setting
+ * changes. This bridge has no settings push into the Host, so the preference is
+ * reconciled on the next status read instead: the flip is idempotent and only
+ * sent when the reported state disagrees with the switch. A broker that cannot
+ * patch (non-Windows) reports `supported: false` and is left alone, so the
+ * health block keeps reporting what is really true.
+ */
+async function applyBackgroundHookPreference(target, health) {
+  const hook = health?.backgroundHook
+  if (!hook || hook.supported !== true) return health
+  const wanted = readSettings().preferences.backgroundHook === true
+  if (hook.enabled === wanted) return health
+  try {
+    const flipped = await enableBackgroundHook(target, wanted)
+    if (flipped?.backgroundHook) return { ...health, backgroundHook: flipped.backgroundHook }
+  } catch {
+    // A status read must not fail because the hook could not be flipped.
+  }
+  return health
 }
 
 function statusResult(target, connected, status, scenes, capabilities, error, text, edition = null, health = null) {
@@ -2160,8 +2191,8 @@ const unityHotReload = {
       type: 'array',
       items: { type: 'string' },
       description:
-        'Project-relative script paths (for example Assets/Scripts/Player.cs). Defaults to every .cs file modified since ' +
-        'the last compile result when the Editor is connected.',
+        'Project-relative script paths to classify, for example ["Assets/Scripts/Player.cs"]. At least one path is ' +
+        'required: this bridge has no "edited since the last recompile" list of its own.',
     },
     dry_run: {
       type: 'boolean',
@@ -2178,6 +2209,11 @@ const unityHotReload = {
         hot: { type: 'array', items: { type: 'object', additionalProperties: true } },
         needCompile: { type: 'array', items: { type: 'object', additionalProperties: true } },
         failed: { type: 'array', items: { type: 'object', additionalProperties: true } },
+        files: {
+          type: 'array',
+          items: { type: 'object', additionalProperties: true },
+          description: 'Per-file verdicts (state: hot, need-compile, failed), including hot files with no detourable body.',
+        },
         supported: { type: 'boolean' },
       },
     },
@@ -2196,6 +2232,7 @@ const unityHotReload = {
       hot: result.hot ?? [],
       needCompile: result.needCompile ?? [],
       failed: result.failed ?? [],
+      files: result.files ?? [],
       supported: result.supported === true,
     }
   },
@@ -2228,12 +2265,12 @@ const unityAssetSearch = {
     },
     guid: {
       type: 'string',
-      description: 'Exact 32-hex asset GUID (as stored in the .meta).',
+      description: 'Exact 32-hex asset GUID (as stored in the .meta). Any other value is rejected.',
     },
     limit: {
       type: 'integer',
       default: 20,
-      description: 'Maximum entries to list.',
+      description: 'Maximum entries to list (1..200, default 20).',
     },
     rescan: {
       type: 'boolean',
@@ -2298,12 +2335,12 @@ const unityYamlRead = {
     depth: {
       type: 'integer',
       default: 2,
-      description: 'Nesting depth to render.',
+      description: 'Nesting depth to render (0..4, default 2).',
     },
     max_items: {
       type: 'integer',
       default: 20,
-      description: 'Maximum list items to render per sequence.',
+      description: 'Maximum list items to render per sequence (1..1024, default 20).',
     },
     source: {
       type: 'string',
@@ -2330,6 +2367,15 @@ const unityYamlRead = {
   async execute(args, exec) {
     const projectRoot = resolveProjectRoot(args.project_path, exec)
     const mode = args.source ?? 'auto'
+    if (args.depth !== undefined && (!Number.isInteger(args.depth) || args.depth < 0 || args.depth > 4)) {
+      return { text: 'Error: depth must be an integer from 0 to 4.', path: String(args.path ?? ''), source: 'disk', total: 0 }
+    }
+    if (
+      args.max_items !== undefined &&
+      (!Number.isInteger(args.max_items) || args.max_items < 1 || args.max_items > 1024)
+    ) {
+      return { text: 'Error: max_items must be an integer from 1 to 1024.', path: String(args.path ?? ''), source: 'disk', total: 0 }
+    }
     const live = await resolveLiveSource(mode, projectRoot, args.path, { depth: args.depth, exec })
     const result = readYamlText(projectRoot, {
       path: args.path,
@@ -2357,9 +2403,10 @@ const unityYamlRead = {
  */
 async function resolveLiveSource(mode, projectRoot, path, { depth, exec }) {
   if (mode === 'disk') return { bundle: null, failure: null }
-  // No file scope means "search everything", and the Editor answers for one
-  // asset at a time — there is no live project-wide read to ask for.
-  if (mode !== 'live' && (path === undefined || path === null || String(path).trim() === '')) {
+  // A live read is one asset at a time. A search without a file scope is a
+  // whole-project disk walk, exactly as the tool description says, so there is
+  // nothing to ask the Editor for — including when the caller said `live`.
+  if (path === undefined || path === null || String(path).trim() === '') {
     return { bundle: null, failure: null }
   }
   let client = null
@@ -2378,38 +2425,42 @@ const unityYamlSearch = {
   description:
     'Search Unity serialized YAML for a value — across one file, a folder, or the whole project.\n\n' +
     'Pointing scope at one asset reads its values from the running Editor by default, so an edit that has not been ' +
-    'saved yet is searched too; anything wider is read from disk.\n\n' +
+    'saved yet is searched too; a folder or the whole project is always read from disk.\n\n' +
     'Matches are found in field values and object names, so this answers "which prefabs set speed to 12", "where is ' +
-    'this GUID referenced", and "which documents mention Player". Use match_fields to restrict the search to particular ' +
-    'keys (for example "m_Name" or "speed,m_MethodName").\n\n' +
+    'this GUID referenced", and "which documents mention Player". Use match_fields to narrow what may match: path ' +
+    '(the document path), field_name (the key), field_value (the value), type (the document class name), or all.\n\n' +
     'query may be a plain substring or `re:<pattern>`.',
   parameters: {
     project_path: PROJECT_PATH,
     query: {
       type: 'string',
       description: 'Substring to find, or `re:<regular expression>`.',
+      required: true,
     },
     scope: {
       type: 'string',
-      description: 'Project-relative file or folder to search. Defaults to the whole project.',
+      description:
+        'Project-relative file or folder to search. A file scope can be answered by the live Editor; a folder or an ' +
+        'omitted scope searches the files on disk. Omit to search the whole project.',
     },
     match_fields: {
       type: 'string',
-      description: 'Comma-separated field names to restrict the match to, for example "m_Name,m_Script".',
+      description:
+        'Optional comma-separated scope: path, field_name, field_value, type, or all. Defaults to all.',
     },
     limit: {
       type: 'integer',
       default: 50,
-      description: 'Maximum matches to return.',
+      description: 'Maximum matches to return (1..1000, default 50).',
     },
     source: {
       type: 'string',
       enum: ['auto', 'disk', 'live'],
       default: 'auto',
       description:
-        'Where the values come from. auto uses the running Editor for the file scope when it is connected; disk reads ' +
-        'only the files; live requires the Editor and fails instead of falling back. A whole-project search is always ' +
-        'disk, because a live answer only exists for one file at a time.',
+        'Where the values come from. auto uses the running Editor for a file scope when it is connected and falls back ' +
+        'to disk otherwise; disk reads only the files; live requires the Editor for a file scope and fails instead of ' +
+        'falling back. A folder or whole-project scope is always read from disk.',
     },
   },
   output: {
@@ -2428,6 +2479,9 @@ const unityYamlSearch = {
     const projectRoot = resolveProjectRoot(args.project_path, exec)
     const query = String(args.query ?? '')
     if (query.trim() === '') return { text: 'Error: query is required.', matches: [], scanned: 0 }
+    if (args.limit !== undefined && (!Number.isInteger(args.limit) || args.limit < 1 || args.limit > 1000)) {
+      return { text: 'Error: limit must be an integer from 1 to 1000.', matches: [], scanned: 0 }
+    }
     const { bundle, failure } = await resolveLiveSource(args.source ?? 'auto', projectRoot, args.scope, { exec })
     const result = searchYamlFiles(projectRoot, {
       query,
@@ -2469,6 +2523,12 @@ const unityPrefabOverrides = {
     const projectRoot = resolveProjectRoot(args.project_path, exec)
     const path = String(args.path ?? '').trim()
     if (path === '') return { text: 'Error: path is required.', path: '', total: 0 }
+    // A missing asset must not read as "this instance matches its prefab": the
+    // Editor happily returns an empty override table for a path that does not
+    // exist, and that answer would be indistinguishable from a real one.
+    if (!existsSync(join(projectRoot, path))) {
+      return { text: `Error: ${path} does not exist in ${projectRoot}.`, path, total: 0 }
+    }
     // The override table only exists in the Editor, so an unreachable Editor is
     // the whole answer — say that instead of the raw connection diagnostic.
     let client
@@ -2498,11 +2558,13 @@ function asHolder(holder) {
 const unityLock = {
   name: 'unity_lock',
   description:
-    'Take the cooperative per-project editing lock that transient Unity Editor state needs: Play/Pause/Edit switches, ' +
-    'recompiles and domain reloads, active scene and Prefab Stage changes, Selection and window focus.\n\n' +
-    'The lock lives in Library/Locus/dsh-editor.lock, is stamped with the owner, and is shared by every session ' +
-    'pointed at the same project — including sessions in other processes. A lock left behind by a process that no ' +
-    'longer exists is detected as stale and broken automatically, so a crash never wedges the project.\n\n' +
+    'Acquire a cooperative lock for the smallest critical section that controls or depends on transient shared Editor ' +
+    'state: Play/Pause/Edit Mode, explicit recompilation/domain reload, active scene/Prefab Stage, Selection, or window ' +
+    'focus. Acquire immediately before the first such operation and release after the last state-dependent call. ' +
+    'Explicit-target asset/code edits, searches, creation, imports and ordinary verification stay outside the lock.\n\n' +
+    'The lock lives in Library/Locus/session-lock.json, is stamped with the owner and a required reason, and is shared ' +
+    'by every session pointed at the same project — including sessions in other processes. A lock left behind by a ' +
+    'process that no longer exists is detected as stale and broken automatically, so a crash never wedges the project.\n\n' +
     'mode "wait" blocks up to timeout_seconds; mode "try" returns immediately with the current holder. Re-taking a lock ' +
     'you already hold is a no-op. Release it with unity_release or action "status" to inspect it. This lock does not ' +
     'replace request_editor_status: it coordinates sessions, it does not change the Editor mode.',
@@ -2512,7 +2574,7 @@ const unityLock = {
       type: 'string',
       enum: ['acquire', 'release', 'status'],
       default: 'acquire',
-      description: 'acquire (default), release, or status.',
+      description: 'acquire (default), release, or status. Only acquire changes the lock.',
     },
     owner: {
       type: 'string',
@@ -2522,16 +2584,18 @@ const unityLock = {
       type: 'string',
       enum: ['wait', 'try'],
       default: 'wait',
-      description: 'wait blocks up to timeout_seconds; try fails immediately when somebody else holds it.',
+      description: 'wait queues until the lock is acquired; try fails immediately when somebody else holds it.',
     },
     timeout_seconds: {
       type: 'integer',
       default: 300,
-      description: 'How long mode "wait" blocks before reporting LockTimeout.',
+      description: 'Maximum time to wait for the lock (1..900, default 300). An out-of-range value is rejected.',
     },
     reason: {
       type: 'string',
-      description: 'Short note recorded in the lock file, so a peer waiting on it knows what is happening.',
+      description:
+        'Short description of the direct Editor-state control inside this minimal critical section, shown to sessions ' +
+        'waiting for the lock. Required for acquire; do not list asset or code edits.',
     },
   },
   output: {
@@ -2577,18 +2641,43 @@ const unityLock = {
     if (action !== 'acquire') {
       return { text: `Error: action must be acquire, release or status; got '${action}'.`, action: String(action), held: false, acquired: false, holder: '', path: '' }
     }
+    // Upstream requires the reason (contracts.md §unity_lock): the lock is shown
+    // to peers waiting on it, and an anonymous holder tells them nothing.
+    const reason = String(args.reason ?? '').trim()
+    if (reason === '') {
+      return {
+        text: 'Error: reason is required for action "acquire": name the Editor state this critical section controls.',
+        action,
+        held: false,
+        acquired: false,
+        holder: '',
+        path: '',
+      }
+    }
+    const timeout = args.timeout_seconds === undefined ? 300 : args.timeout_seconds
+    if (!Number.isInteger(timeout) || timeout < 1 || timeout > 900) {
+      return {
+        text: `Error: timeout_seconds must be an integer from 1 to 900 (got ${JSON.stringify(args.timeout_seconds)}).`,
+        action,
+        held: false,
+        acquired: false,
+        holder: '',
+        path: '',
+      }
+    }
     try {
       const result = await acquireLock(projectRoot, {
         owner: args.owner,
         mode: args.mode,
-        timeoutSeconds: args.timeout_seconds,
-        reason: args.reason,
+        timeoutSeconds: timeout,
+        reason,
       })
       const text = result.acquired
         ? `Lock acquired by ${result.holder}${result.waitedMs > 0 ? ` after ${Math.round(result.waitedMs / 1000)}s` : ''}. ` +
           'Release it with unity_release when the transient Editor state change is done.'
         : `Lock is held by ${result.holder}${result.holder === null ? '' : ''}; use mode "wait" to block for it.`
-      return { text, action, held: result.acquired, acquired: result.acquired, holder: asHolder(result.holder), path: '' }
+      const status = await lockStatus(projectRoot)
+      return { text, action, held: result.acquired, acquired: result.acquired, holder: asHolder(result.holder), path: status.path }
     } catch (error) {
       if (error instanceof LockTimeout) {
         return { text: `Error: ${error.message}`, action, held: false, acquired: false, holder: asHolder(error.holder), path: '' }
@@ -2658,7 +2747,9 @@ const unityOfflineDocs = {
     'Use this instead of guessing at Unity API behaviour: the pages are the same ones Unity ships with the Editor, so ' +
     'they match the version the project actually compiles against.\n\n' +
     'The download is several hundred megabytes and needs network access; import reports network_error instead of ' +
-    'failing when it is unavailable, and nothing is ever downloaded implicitly.',
+    'failing when it is unavailable, and nothing is ever downloaded implicitly. action "import" is refused while the ' +
+    'Settings switch "Allow the Unity offline documentation import" is off (it is on by default, as in Locus); search ' +
+    'and read keep working for whatever is already imported.',
   parameters: {
     project_path: PROJECT_PATH,
     action: {
@@ -2759,6 +2850,20 @@ const unityOfflineDocs = {
       return { text, action, imported: false, state: 'absent', version: '', results: [] }
     }
     if (action === 'import') {
+      // The Settings switch is the permission gate; search/read stay available
+      // because they only touch what is already on disk.
+      if (readSettings().preferences.offlineDocs !== true) {
+        return {
+          text:
+            'The Unity offline documentation import is switched off in Settings → dsh-locus-bridge. ' +
+            'Search and read still work for whatever is already imported.',
+          action,
+          imported: status.imported === true,
+          state: 'disabled',
+          version: status.version ?? '',
+          results: [],
+        }
+      }
       publish('Downloading and indexing the Unity offline documentation', exec)
       const result = await importDocs(projectRoot, {
         locale: args.locale,

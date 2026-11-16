@@ -58,14 +58,15 @@ separate package on purpose: `payload/` is a verbatim upstream copy and
 `npm run check:payload` fails the moment it diverges, so anything new has to live
 alongside it instead of inside it.
 
-It reaches the bridge by reflection (`Locus.LocusBridge, Locus.Editor` and
-`RegisterExtensionMessageHandler`) rather than a project reference, because the
-payload's asmdef is `autoReferenced: false` and a hard reference would pin one
-payload build. Nothing here is copied from Locus: the hot-reload ledger, the
-classifier, the health phase tracker and the JSON writer are written for this
-project. The message-type names (`dsh_hot_reload_*`, `dsh_health`,
-`dsh_health_snapshot`) are this project's own, which is why they cannot collide
-with the desktop client's protocol.
+It reaches the bridge through an explicit asmdef reference to `Locus.Editor` (the
+payload's asmdef is `autoReferenced: false`, which does not stop an explicit
+`references` entry). The plugin declares the payload version it targets in its
+root `package.json` (`locus.payload`), so a payload that lacks the entry point
+fails the build instead of drifting at runtime. Nothing here is copied from
+Locus: the hot-reload ledger, the classifier, the health phase tracker and the
+JSON writer are written for this project. The message-type names
+(`dsh_hot_reload_*`, `dsh_health`, `dsh_health_snapshot`) are this project's own,
+which is why they cannot collide with the desktop client's protocol.
 
 Later additions, all original to this project: the live-value source
 (`Editor/Live/`, messages `dsh_live_read` and `dsh_live_prefab_overrides`, which

@@ -23,12 +23,6 @@ namespace DshBridge.HotReload
     {
         // ───────────────── 请求 ─────────────────
 
-        internal sealed class ClassifyRequest
-        {
-            public string patch_id;
-            public string[] paths;
-        }
-
         internal sealed class ApplyRequest
         {
             public string patch_id;
@@ -43,19 +37,6 @@ namespace DshBridge.HotReload
         internal sealed class DisposeRequest
         {
             public string patch_id;
-        }
-
-        /// <summary><c>dsh_hot_reload_compiled_text</c>：要读哪个脚本。</summary>
-        internal sealed class CompiledTextRequest
-        {
-            public string path;
-        }
-
-        /// <summary>编译文本的答案。序列化器走公开字段，所以不能用匿名类型。</summary>
-        internal sealed class CompiledTextResponse
-        {
-            public string path;
-            public string text;
         }
 
         // ───────────────── 方法身份 ─────────────────
@@ -99,37 +80,7 @@ namespace DshBridge.HotReload
             }
         }
 
-        /// <summary>分类结果里的热方法（contracts.md §2.1 的 <c>hot[]</c>）。</summary>
-        internal sealed class HotMethod : ApplyMethod
-        {
-            // 与 MethodKey() 的结果一致：declaring_type|name|参数表|s 或 i。
-            public string method_key;
-        }
-
         // ───────────────── 响应 ─────────────────
-
-        internal sealed class CompileReason
-        {
-            public string path;
-            public string reason;
-        }
-
-        internal sealed class FailedPath
-        {
-            public string path;
-            public string error;
-        }
-
-        internal sealed class ClassifyResponse
-        {
-            public HotMethod[] hot;
-            public CompileReason[] needCompile;
-            public FailedPath[] failed;
-            /// <summary>本包是否能独立完成整个热重载流程（补丁程序集编译不在本包内）。</summary>
-            public bool supported;
-            /// <summary>对 <c>supported</c> 的说明，工具层直接展示给用户。</summary>
-            public string reason;
-        }
 
         internal sealed class SkippedMethod
         {

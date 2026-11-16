@@ -242,9 +242,11 @@ test('searchYamlFiles searches a file, a directory and the whole project', (t) =
   const root = project(t)
   const file = searchYamlFiles(root, { query: 'speed', scope: 'Assets/Prefabs/Player.prefab' })
   assert.equal(file.total, 1)
+  assert.equal(file.scanned, 1)
   assert.match(file.text, /Player\.prefab:22 \/MonoBehaviour\/speed = 5/)
   const directory = searchYamlFiles(root, { query: 'quality', scope: 'Assets' })
   assert.equal(directory.total, 1)
+  assert.ok(directory.scanned >= 1)
   assert.match(directory.matches[0].path, /^Assets\//)
   // A missing scope is an error, not a silent "no matches".
   assert.throws(() => searchYamlFiles(root, { query: 'anything', scope: 'Assets/Nope' }), /does not exist/)

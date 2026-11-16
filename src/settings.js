@@ -85,21 +85,22 @@ export const DEFAULT_SKILLS = Object.freeze(
  * same rule as upstream: a call may narrow the switch, never widen it past the
  * user's preference.
  *
- * `compileSidecar`, `backgroundHook` and `offlineDocs` default to off because
- * each one costs something the user did not ask for yet: the sidecar builds and
- * runs a separate .NET process, the background hook patches the editor's own
- * scheduling on Windows, and the documentation import downloads hundreds of
- * megabytes. A default-on switch for any of them would spend that on a session
- * that never uses the feature.
+ * `compileSidecar`, `backgroundHook` and `offlineDocs` follow Locus' own
+ * defaults: the desktop app ships with `unity.compile.sidecar` and
+ * `unity.connection.backgroundHook` enabled, and the documentation import is
+ * only ever started by an explicit call. A default-off switch here would make
+ * the plugin behave differently from Locus for no stated reason (the sidecar is
+ * built on first use, the hook is one broker message, and the docs download
+ * still requires `import`). Each of them is still switchable.
  */
 export const DEFAULT_PREFERENCES = Object.freeze({
   frameCache: true,
   workspacePath: '',
   unityProject: '',
   nonPublicAccess: true,
-  compileSidecar: false,
-  backgroundHook: false,
-  offlineDocs: false,
+  compileSidecar: true,
+  backgroundHook: true,
+  offlineDocs: true,
 })
 
 /** Preferences whose value is a string; every other preference is a boolean. */
@@ -114,7 +115,17 @@ export const HOME_ENV = 'DSH_LOCUS_BRIDGE_HOME'
 /** File name inside the bridge home. */
 export const SETTINGS_FILE = 'settings.json'
 
-const SCHEMA_VERSION = 1
+/**
+ * Document version.
+ *
+ * v2 raised the compile-sidecar / background-hook / offline-docs defaults to
+ * `true`, matching Locus. A v1 document stored the old defaults explicitly
+ * (`false`), so it is migrated instead of keeping those values forever.
+ */
+const SCHEMA_VERSION = 2
+
+/** Keys whose default changed in v2 and therefore have to be migrated. */
+const V2_DEFAULTS = Object.freeze(['compileSidecar', 'backgroundHook', 'offlineDocs'])
 
 /**
  * The directory this plugin owns for its own state.
@@ -150,6 +161,25 @@ function freezeSettings(value) {
 /** The all-default document (a fresh value on every call, never shared mutable state). */
 export function defaultSettings() {
   return freezeSettings({ features: DEFAULT_FEATURES, preferences: DEFAULT_PREFERENCES, skills: DEFAULT_SKILLS })
+}
+
+/**
+ * Bring an older stored document up to the current defaults.
+ *
+ * Only keys whose default changed are rewritten, and only for a document that
+ * predates the change: a user who toggles the switch afterwards stores v2 and
+ * keeps that choice. Everything else is left for {@link normalizeSettings} to
+ * coerce.
+ */
+export function migrateSettings(raw) {
+  const source = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {}
+  const version = Number.isInteger(source.version) ? source.version : 0
+  if (version >= SCHEMA_VERSION) return source
+  const preferences = source.preferences && typeof source.preferences === 'object' ? { ...source.preferences } : {}
+  for (const key of V2_DEFAULTS) {
+    preferences[key] = DEFAULT_PREFERENCES[key]
+  }
+  return { ...source, version: SCHEMA_VERSION, preferences }
 }
 
 /**
@@ -226,7 +256,7 @@ export function readSettings(env = process.env, { onWarning = null } = {}) {
     onWarning?.(`ignoring malformed ${path}: ${error?.message ?? error}`)
     return defaultSettings()
   }
-  const value = normalizeSettings(parsed)
+  const value = normalizeSettings(migrateSettings(parsed))
   cache.set(path, { mtimeMs: info.mtimeMs, size: info.size, value })
   return value
 }

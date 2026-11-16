@@ -5,15 +5,15 @@
 // is a generated copy of upstream's package (`npm run sync:payload`), and
 // `npm run check:payload` fails the build if it diverges. Everything this
 // repository adds to the *editor* therefore lives here, is original code under
-// this repository's licence, and reaches the bridge through one reflected entry
-// point (`Locus.LocusBridge.RegisterExtensionMessageHandler`) instead of a
-// project reference — see docs/internal/contracts.md.
+// this repository's licence, and reaches the bridge through an explicit asmdef
+// reference to `Locus.Editor` — the plugin declares the payload version it
+// targets in its root package.json (`locus.payload`), so a payload that lacks
+// the entry point fails the build instead of drifting at runtime.
 //
 // Installed layout: <project>/Packages/com.locus.dsh-bridge/
 //   package.json
 //   Editor/Locus.DshBridge.Editor.asmdef
 //   Editor/DshBridgeBootstrap.cs      registration fan-out (this file's siblings)
-//   Editor/LocusReflection.cs         reflected bridge entry point
 //   Editor/<Feature>/…                one directory per capability
 
 import { existsSync } from 'node:fs'
@@ -33,7 +33,6 @@ export const COMPANION_REQUIRED_FILES = Object.freeze([
   'package.json',
   'Editor/Locus.DshBridge.Editor.asmdef',
   'Editor/DshBridgeBootstrap.cs',
-  'Editor/LocusReflection.cs',
 ])
 
 /** Directories inside the companion package that must never be installed. */

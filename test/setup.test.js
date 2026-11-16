@@ -26,9 +26,14 @@ import {
   installPackage,
   manifestDependency,
   nativeBrokerFor,
+  payloadContract,
+  payloadDeclaration,
   payloadDir,
   writeMarker,
 } from '../src/setup.js'
+
+/** The payload version this build declares; fixtures use it so the contract matches. */
+const PAYLOAD_VERSION = payloadDeclaration().version
 
 /**
  * Point this process at a fixture package for the duration of one test.
@@ -71,7 +76,7 @@ function fakePackage(dir, { native = 'linux' } = {}) {
   mkdirSync(join(dir, 'Editor', 'Roslyn'), { recursive: true })
   mkdirSync(join(dir, 'Editor', 'Native', 'linux-x86_64'), { recursive: true })
   mkdirSync(join(dir, 'Editor', 'Native', 'x86_64'), { recursive: true })
-  writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'com.farlocus.locus', version: '9.9.9' }))
+  writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'com.farlocus.locus', version: PAYLOAD_VERSION }))
   writeFileSync(join(dir, 'Editor', 'Locus.Editor.asmdef'), '{}')
   for (const name of ['Locus.Json.dll', 'Locus.Roslyn.dll', 'Locus.Detour.dll', 'Locus.HotReload.Runtime.dll']) {
     writeFileSync(join(dir, 'Editor', 'Roslyn', name), `${name} bytes`)
@@ -150,7 +155,7 @@ test('an embedded package wins over a manifest dependency and is not marked lega
   const result = inspectSetup(root, { platform: 'linux' })
   assert.equal(result.package.via, 'packages')
   assert.equal(result.package.legacy, false)
-  assert.equal(result.package.version, '9.9.9')
+  assert.equal(result.package.version, PAYLOAD_VERSION)
 })
 
 test('an Assets/Locus copy is reported as legacy but still counts as installed', () => {
@@ -474,7 +479,91 @@ test('a half-copied companion package is not complete even though package.json e
   assert.deepEqual(result.companion.missingFiles.sort(), [
     'Editor/DshBridgeBootstrap.cs',
     'Editor/Locus.DshBridge.Editor.asmdef',
-    'Editor/LocusReflection.cs',
   ])
   assert.equal(result.companion.version, '1.0.0')
+})
+
+// ── the payload contract (root package.json → locus.payload) ────────────────
+
+/** One throwaway directory holding a package.json with the given version. */
+function packageTree(t, version) {
+  const dir = mkdtempSync(join(tmpdir(), 'locus-payload-contract-'))
+  t.after(() => rmSync(dir, { recursive: true, force: true }))
+  writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'com.farlocus.locus', version }))
+  return dir
+}
+
+test('the plugin declares the payload it targets', () => {
+  const declared = payloadDeclaration()
+  // Both halves are part of the contract: the upstream release the tree was
+  // synced from, and the Unity package version inside it.
+  assert.equal(declared.packageName, 'com.farlocus.locus')
+  assert.equal(typeof declared.release, 'string')
+  assert.ok(declared.release.length > 0)
+  assert.equal(declared.version, PAYLOAD_VERSION)
+  assert.ok(PAYLOAD_VERSION.length > 0)
+})
+
+test('payloadContract reports a bundled tree that disagrees with the declaration', (t) => {
+  const bundled = packageTree(t, '0.0.1')
+  const result = payloadContract({
+    payloadRoot: bundled,
+    declaration: { packageName: 'com.farlocus.locus', version: '0.1.0' },
+  })
+  assert.equal(result.declared.version, '0.1.0')
+  assert.equal(result.bundled, '0.0.1')
+  assert.deepEqual(result.problems.map((p) => p.code), ['payload_bundle_mismatch'])
+  assert.match(result.problems[0].detail, /0\.0\.1.*0\.1\.0/)
+})
+
+test('payloadContract reports an installed payload that disagrees', (t) => {
+  const bundled = packageTree(t, '0.1.0')
+  const installed = packageTree(t, '0.0.2')
+  const result = payloadContract({
+    payloadRoot: bundled,
+    packageRoot: installed,
+    declaration: { packageName: 'com.farlocus.locus', version: '0.1.0' },
+  })
+  assert.equal(result.installed, '0.0.2')
+  assert.deepEqual(result.problems.map((p) => p.code), ['payload_version_mismatch'])
+  assert.match(result.problems[0].detail, /project has Locus 0\.0\.2/)
+})
+
+test('payloadContract reports a missing declaration instead of guessing', () => {
+  const result = payloadContract({ payloadRoot: null, declaration: { packageName: 'com.farlocus.locus', version: '' } })
+  assert.deepEqual(result.problems.map((p) => p.code), ['payload_declaration_missing'])
+})
+
+test('a matching payload produces no contract warning', (t) => {
+  const bundled = packageTree(t, PAYLOAD_VERSION)
+  const installed = packageTree(t, PAYLOAD_VERSION)
+  const result = payloadContract({
+    payloadRoot: bundled,
+    packageRoot: installed,
+    declaration: { packageName: 'com.farlocus.locus', version: PAYLOAD_VERSION },
+  })
+  assert.deepEqual(result.problems, [])
+  assert.equal(result.bundled, PAYLOAD_VERSION)
+  assert.equal(result.installed, PAYLOAD_VERSION)
+})
+
+test('inspectSetup surfaces the contract and warns on a mismatch', (t) => {
+  const root = project()
+  usePayloadFixture(t, fakePackage)
+  installPackage(root)
+  writeMarker(root, inspectSetup(root, { platform: 'linux' }).endpoint)
+
+  const matched = inspectSetup(root, { platform: 'linux' })
+  assert.equal(matched.payloadContract.declared.version, PAYLOAD_VERSION)
+  assert.deepEqual(matched.payloadContract.problems, [])
+
+  // A project carrying a different Locus build is a warning, not a blocker: the
+  // editor may still connect, but the declaration no longer describes it.
+  const installedPath = join(root, 'Packages', 'com.farlocus.locus', 'package.json')
+  const manifest = JSON.parse(readFileSync(installedPath, 'utf8'))
+  writeFileSync(installedPath, JSON.stringify({ ...manifest, version: '0.0.3' }))
+  const mismatched = inspectSetup(root, { platform: 'linux' })
+  assert.deepEqual(mismatched.problems, [])
+  assert.deepEqual(mismatched.payloadContract.problems.map((p) => p.code), ['payload_version_mismatch'])
+  assert.match(formatSetup(mismatched), /project has Locus 0\.0\.3/)
 })

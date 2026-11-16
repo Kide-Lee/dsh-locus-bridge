@@ -12,8 +12,9 @@
 
 1. **不改 `payload/locus_unity/`**。它是 `npm run sync:payload` 的生成物，CI 里
    `npm run check:payload` 会校验。需要编辑器侧新增能力时，写旁挂包
-   `packages/unity-bridge/`（本仓库原创 GPL 代码），通过反射挂到
-   `Locus.LocusBridge.RegisterExtensionMessageHandler`。
+   `packages/unity-bridge/`（本仓库原创 GPL 代码），通过 asmdef 显式引用
+   `Locus.Editor` 调用 `Locus.LocusBridge.RegisterExtensionMessageHandler`；
+   插件在根 `package.json` 的 `locus.payload` 声明对应的 payload 版本。
 2. **不改 broker wire 协议**（`native/locus-native-protocol/`）。新增编辑器侧能力
    走**扩展消息**（同进程，不经 broker）；只有非改不可时才动
    `native/locus_unix_native/`，并在 `NOTICE` 里记录为本仓库修改。
@@ -39,13 +40,13 @@
 
 | 工具 | 归属线 | 参数（除 `project_path`） | 输出 | 说明 |
 |---|---|---|---|---|
-| `unity_hot_reload` | A | `request_editor_status`(必填), `paths?`(string[]), `dry_run?`(boolean, 默认 false) | `{text, hot, needCompile, failed, details:[{path, method?, state, reason?}]}` | 写操作。`dry_run` 只跑归类器不落补丁。 |
-| `unity_asset_search` | E | `type?`, `name?`, `under?`, `guid?`, `limit?`(1..200 默认 20), `rescan?` | `{text, total, partial, entries:[{path,type,guid}], broken?}` | 只读，无编辑器也可用。 |
-| `unity_yaml_read` | E | `path`(必填), `object?`(fileId 或名字), `depth?`(0..4 默认 2), `max_items?`(默认 20) | `{text, source:'live'\|'disk', documents:[…]}` | 只读。磁盘模式无编辑器也可用。 |
-| `unity_yaml_search` | E | `query`(必填, 支持 `re:`), `match_fields?`, `limit?`(1..1000 默认 50), `scope?` | `{text, source, total, matches:[{path, pointer, field, value}]}` | 只读。GUID 搜索请用 `unity_asset_search`。 |
-| `unity_lock` | E | `mode`('wait'\|'try', 默认 wait), `timeout_seconds?`(1..900 默认 300), `reason?` | `{text, holder, acquiredAt}` | 协作锁，非编辑器锁。 |
-| `unity_release` | E | — | `{text, released}` | 只释放本会话 owner 的锁。 |
-| `unity_offline_docs` | D | `action`('status'\|'import'\|'search'\|'read'), `query?`, `path?`, `locale?`('en'\|'zh-cn') | `{text, …}` | 导入/检索 Unity 官方离线文档。 |
+| `unity_hot_reload` | A | `paths`(string[], 至少一个), `dry_run?`(boolean, 默认 false) | `{text, hot, needCompile, failed, files:[{path,state,reason?,method_count}], supported}` | 编辑会话内不写工程文件；`dry_run` 只跑归类器不落补丁。`files` 是逐文件结论（含无方法体的热文件）。 |
+| `unity_asset_search` | E | `type?`, `name?`, `under?`, `guid?`(32-hex), `limit?`(1..200 默认 20), `rescan?` | `{text, total, partial, assets:[{path,type,guid}]}` | 只读，无编辑器也可用；非法 `guid` 直接报错。 |
+| `unity_yaml_read` | E | `path`(必填), `object?`(fileId 或名字), `depth?`(0..4 默认 2), `max_items?`(1..1024 默认 20), `source?`('auto'\|'disk'\|'live') | `{text, path, source:'live'\|'disk', total}` | 只读。磁盘模式无编辑器也可用；`auto` 对单文件走 live 并回退磁盘。 |
+| `unity_yaml_search` | E | `query`(必填, 支持 `re:`), `scope?`(文件或目录), `match_fields?`(path\|field_name\|field_value\|type\|all), `limit?`(1..1000 默认 50), `source?` | `{text, matches:[{path, pointer, field, value}], scanned}` | 只读。单文件范围可用 live；目录/全工程只读磁盘。 |
+| `unity_lock` | E | `action?`(acquire\|release\|status), `owner?`, `mode?`('wait'\|'try', 默认 wait), `timeout_seconds?`(1..900 默认 300, 越界报错), `reason`(acquire 必填) | `{text, action, held, acquired, holder, path}` | 协作锁，锁文件 `Library/Locus/session-lock.json`，非编辑器锁。 |
+| `unity_release` | E | `owner?` | `{text, released, holder}` | 只释放本会话 owner 的锁。 |
+| `unity_offline_docs` | D | `action`('status'\|'import'\|'search'\|'read'\|'cancel'\|'delete'), `query?`, `path?`, `locale?`('en'\|'zh-cn'), `version?`, `limit?` | `{text, action, imported, state, version, results}` | 导入/检索 Unity 官方离线文档；导入可取消，索引可删除。 |
 | `unity_recompile` (改) | A | 新增 `mode?`('auto'\|'compile'\|'scripts', 默认 'compile') | 原输出 + `mode` | `auto`：热更优先，结构变化回退重编译。 |
 | `unity_console_log` (改) | E | 新增 `source?`('console'\|'editorLog', 默认 'console') | 原输出，前缀 `[source: Editor.log]` | — |
 | `unity_status` (改) | B/C | — | 原输出 + `flavor`, `editorHealth`, `selection` | flavor 由 B 提供，health 由 C 提供，selection 由 E 提供。 |
@@ -58,12 +59,12 @@
 ### 2.1 编辑器侧（旁挂包，A 负责）
 目录：`packages/unity-bridge/Editor/HotReload/`，asmdef 名 `Locus.DshBridge.Editor`。
 
-通过反射注册扩展消息处理函数，消息名固定为：
+通过 asmdef 显式引用 `Locus.Editor` 注册扩展消息处理函数。热重载的**分类**在插件
+进程完成（`src/hotreload-classify.js`，只读磁盘源码）；编辑器只负责应用补丁：
 
 | 消息 | 请求 JSON | 应答 JSON |
 |---|---|---|
-| `dsh_hot_reload_classify` | `{paths:[string], patch_id:string}` | `{hot:[{path, method_key, declaring_type, name, param_type_names, param_type_sigs, is_static, is_ctor}], needCompile:[{path, reason}], failed:[{path, error}]}` |
-| `dsh_hot_reload_apply` | `{patch_id, assembly_b64, methods:[…同 hot], domain_generation?}` | `{applied:number, skipped:[{method_key, reason}]}` |
+| `dsh_hot_reload_apply` | `{patch_id, assembly_b64, methods:[…], domain_generation?}` | `{applied:number, skipped:[{method_key, reason}]}` |
 | `dsh_hot_reload_status` | `{}` | `{detours:number, patched_methods:[string], last_error?:string}` |
 | `dsh_hot_reload_dispose` | `{patch_id?}` | `{disposed:number}` |
 
@@ -76,11 +77,12 @@
    `hot_patch_loaded` 需要的），然后用 `execute_code` 反射调用
    `Locus.LocusBridge.hot_patch_loaded` 的私有处理器是不可行的——它是私有方法。
    **因此最终形态**：旁挂包自己持有 `Dictionary<MethodBase, IDisposable>`，
-   通过 `MonoMod.RuntimeDetour.Hook`（payload 的 `Locus.Detour.dll` 已在编辑器域，
-   旁挂包在 asmdef 里 `precompiledReferences` 引用它，并通过 `Locus.Editor`
-   asmdef 的 `autoReferenced:false` 关系用反射拿到 DLL 路径后
-   `Assembly.LoadFrom`）建立 detour。两条 detour 路径互不干扰的前提是：
-   payload 只在桌面端驱动 `hot_patch_loaded`，DSH 侧永不发送该消息。
+   通过反射从 payload 的 `Locus.Detour.dll` 找到
+   `MonoMod.RuntimeDetour.Detour`（失败再退 `NativeDetour`）建立 detour。
+   asmdef 里虽然列了 `precompiledReferences`，Detour 仍走反射：实测把协作包整体重装后，
+   Unity 会丢失这些包内 precompiled 引用，编译期硬引用不稳定（注册与事件发送不依赖它，
+   那两处是硬引用）。两条 detour 路径互不干扰的前提是：payload 只在桌面端驱动
+   `hot_patch_loaded`，DSH 侧永不发送该消息。
 2. 结构变化（字段增删、签名、类型形状）→ 归类为 `needCompile`，不尝试补丁。
 
 ### 2.2 JS 侧（A 负责）
@@ -88,7 +90,7 @@
 
 ```js
 export const HOT_RELOAD_MODES = Object.freeze(['auto', 'compile', 'scripts'])
-export async function classifyHotEdit(client, { paths }) // → {hot, needCompile, failed}
+export function classifyHotEdit(projectRoot, paths)      // → {hot, needCompile, failed, files}（本地分类）
 export async function applyHotPatch(client, { patchId, assemblyB64, methods, domainGeneration })
 export async function hotReloadStatus(client)          // → {detours, patchedMethods, lastError}
 export async function disposeHotPatches(client, { patchId })

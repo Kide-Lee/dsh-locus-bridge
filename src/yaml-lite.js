@@ -1264,12 +1264,14 @@ export function searchYamlFiles(projectRoot, { query, scope, limit = 50, matchFi
   if (total > matches.length) lines.push(`… showing ${matches.length} of ${total}`)
   if (liveFiles > 0) lines.push(`(${liveFiles} file(s) read from the live Editor, not from disk)`)
   if (total === 0) lines.push('<no matches>')
-  if (liveFiles > 0) lines.push(`(${liveFiles} file(s) read from the live Editor, not from disk)`)
   return {
     text: lines.join('\n'),
     source: liveFiles > 0 ? 'live' : 'disk',
     total,
     matches,
+    // `scanned` is what the tool returns to the model; `files` is the same
+    // number under the name the rest of this module already used.
+    scanned: files.length,
     files: files.length,
     liveFiles,
     truncated: total > matches.length,

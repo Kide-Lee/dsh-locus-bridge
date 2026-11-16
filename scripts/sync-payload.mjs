@@ -17,7 +17,7 @@
 //   node scripts/sync-payload.mjs --source <dir>
 //   node scripts/sync-payload.mjs --check         # verify only, never write
 
-import { cpSync, existsSync, mkdirSync, readdirSync, rmSync, statSync } from 'node:fs'
+import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs'
 import { dirname, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -134,6 +134,25 @@ function detectNativeBrokers(root) {
     .map(([key]) => key)
 }
 
+/** The payload version this plugin declares in its own manifest. */
+function declaredPayloadVersion() {
+  try {
+    const manifest = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8'))
+    return manifest?.locus?.payload?.version ?? null
+  } catch {
+    return null
+  }
+}
+
+/** The version inside one Unity package tree. */
+function packageVersion(dir) {
+  try {
+    return JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8'))?.version ?? null
+  } catch {
+    return null
+  }
+}
+
 function main() {
   const options = parseArgs(process.argv.slice(2))
   const source = join(options.source, 'locus_unity')
@@ -147,6 +166,24 @@ function main() {
     fail(
       `the package at ${source} is incomplete:\n  ${missing.join('\n  ')}\n` +
         'Build the DLLs first (upstream: bun run unity:bundle, plus npm run build:native here).',
+    )
+  }
+
+  // The plugin states which payload it targets in package.json; that declaration
+  // is the contract a hard-reference build compiles against, so a synced tree
+  // that disagrees with it is a release blocker, not a note.
+  const declared = declaredPayloadVersion()
+  const sourceVersion = packageVersion(source)
+  if (!declared) {
+    fail(
+      'package.json declares no locus.payload.version. Add it so the plugin states which payload it targets ' +
+        '(for example "locus": { "payload": { "package": "com.farlocus.locus", "version": "0.1.0" } }).',
+    )
+  }
+  if (sourceVersion !== declared) {
+    fail(
+      `payload version mismatch: ${source} is ${sourceVersion ?? 'unknown'}, but package.json declares ${declared}. ` +
+        'Sync from the matching Locus release or update locus.payload.version.',
     )
   }
 

@@ -128,7 +128,11 @@ namespace DshBridge.Health
 
             try
             {
-                LocusReflection.EmitEvent(SnapshotEvent, SnapshotJson());
+                // The bridge is a compile-time dependency of this package;
+                // SendEventToRust is its public event channel. The subscription
+                // only exists while a client is connected, so there is no
+                // "nobody is listening" case to gate here.
+                Locus.LocusBridge.SendEventToRust(SnapshotEvent, SnapshotJson());
             }
             catch (Exception ex)
             {

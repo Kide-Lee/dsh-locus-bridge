@@ -1,15 +1,16 @@
-// `unity_hot_reload`: patch edited method bodies into the running editor without
-// a compile, and report honestly when an edit is structural instead.
+// `unity_hot_reload`: classify edited method bodies and patch them into the
+// running editor without a compile.
 //
-// Wire flow (contracts.md §2.1, editor side in
-// packages/unity-bridge/Editor/HotReload/):
-//   1. `dsh_hot_reload_classify {paths, patch_id}` → which files are
-//      hot-patchable (`hot[]`, with per-method identities), which need a real
-//      compile (`needCompile[]`), which failed to read (`failed[]`).
-//   2. `dsh_hot_reload_apply {patch_id, assembly_b64, methods, domain_generation}`
-//      → the editor detours each method with MonoMod and reports the count.
-//   3. `dsh_hot_reload_status {}` → the editor's own detour ledger.
-//   4. `dsh_hot_reload_dispose {patch_id}` → detach one patch (or all of them).
+// Flow:
+//   1. classification runs in the plugin process (`src/hotreload-classify.js`):
+//      it reads the scripts from disk and decides which files/methods can be
+//      detoured, which need a real compile, and which were unreadable;
+//   2. the patch assembly is built by the bundled .NET compile service
+//      (`src/csharp/sidecar.js` → `compile/hotPatch`);
+//   3. `dsh_hot_reload_apply {patch_id, assembly_b64, methods, domain_generation}`
+//      → the editor detours each method with MonoMod and reports the count;
+//   4. `dsh_hot_reload_status {}` → the editor's own detour ledger;
+//   5. `dsh_hot_reload_dispose {patch_id}` → detach one patch (or all of them).
 //
 // The editor keeps its OWN detour registry and never sends the payload's
 // `hot_patch_loaded`: that message belongs to the desktop client, which accounts
@@ -27,6 +28,7 @@ import { join } from 'node:path'
 
 import { getClient } from './client-pool.js'
 import { SidecarError, SidecarUnavailable, hotDiff, hotPatch } from './csharp/sidecar.js'
+import { classifyHotPaths } from './hotreload-classify.js'
 import { isTransientBrokerError, normalizeChangedPaths } from './recompile.js'
 
 /**
@@ -43,10 +45,6 @@ const HOT_RELOAD_TIMEOUT_MS = 60_000
 /** Last text seen per absolute path, used as the "before" side of a hot diff. */
 const revisionCache = new Map()
 
-/** Asks the companion package for the text the running domain compiled. */
-const COMPILED_TEXT_MESSAGE = 'dsh_hot_reload_compiled_text'
-
-const CLASSIFY_MESSAGE = 'dsh_hot_reload_classify'
 const APPLY_MESSAGE = 'dsh_hot_reload_apply'
 const STATUS_MESSAGE = 'dsh_hot_reload_status'
 const DISPOSE_MESSAGE = 'dsh_hot_reload_dispose'
@@ -102,12 +100,21 @@ async function send(client, type, payload) {
   return body
 }
 
-/** Classify edited paths without touching any loaded assembly. */
-export async function classifyHotEdit(client, { paths } = {}) {
-  const list = Array.isArray(paths) ? paths.map((value) => String(value ?? '').trim()).filter(Boolean) : []
+/**
+ * Classify edited paths locally.
+ *
+ * The same file-level rules the editor package used to answer
+ * `dsh_hot_reload_classify` with now run in this process, so a dry run needs no
+ * Editor and the editor package only has to apply patches.
+ *
+ * @param projectRoot - the Unity project root the paths are relative to.
+ * @param paths - project-relative scripts (Assets/ or Packages/).
+ * @returns `{hot, needCompile, failed, files, supported, reason}`.
+ */
+export function classifyHotEdit(projectRoot, paths) {
+  const list = (Array.isArray(paths) ? paths : []).map((value) => String(value ?? '').trim()).filter(Boolean)
   if (list.length === 0) throw new Error('unity_hot_reload needs at least one Assets/ or Packages/ path')
-  const body = await send(client, CLASSIFY_MESSAGE, { paths: list, patch_id: randomPatchId() })
-  return normalizeClassification(body)
+  return classifyHotPaths(projectRoot, list)
 }
 
 /** Load a patch assembly in the editor and detour every listed method. */
@@ -163,20 +170,10 @@ export async function hotReload(target, options = {}) {
   if (signal?.aborted) throw new Error('cancelled')
 
   onPhase('Classifying edited scripts')
-  const client = await getClient(target)
   // Paths are normalized the same way a recompile normalizes them, so the
-  // editor only ever sees `Assets/…` / `Packages/…`. Doing it here (and not
-  // only in the caller) keeps classify/apply/dry-run consistent.
+  // classifier and the patch request agree on `Assets/…` / `Packages/…`.
   const normalized = normalizeChangedPaths(paths, target?.projectRoot)
-  let classified
-  try {
-    classified = await classifyHotEdit(client, { paths: normalized.length > 0 ? normalized : paths })
-  } catch (error) {
-    if (!isTransient(error)) throw error
-    onPhase('Editor reloading; retrying the classification')
-    const retried = await getClient(target)
-    classified = await classifyHotEdit(retried, { paths: normalized.length > 0 ? normalized : paths })
-  }
+  const classified = classifyHotEdit(target?.projectRoot, normalized.length > 0 ? normalized : paths)
 
   if (signal?.aborted) throw new Error('cancelled')
 
@@ -189,7 +186,10 @@ export async function hotReload(target, options = {}) {
     patchError: null,
   }
 
+  // A dry run, or an edit with nothing detourable, never touches the Editor.
   if (dryRun || (result.hot?.length ?? 0) === 0) return result
+
+  const client = await getClient(target)
 
   // Classification only says what *could* be patched. Turning that into live
   // code needs a patch assembly, and an answered `done`.
@@ -337,24 +337,6 @@ function identityChanged(entries) {
 }
 
 /**
- * The editor's compiled copy of a file, if it exposes one.
- *
- * Nothing is invented here: when the companion package does not answer this
- * request (or answers with nothing usable) the caller falls back to the
- * revision cache, and a cache miss leaves the edit to `unity_recompile`.
- */
-async function readCompiledText(client, projectRoot, path) {
-  try {
-    const body = await send(client, COMPILED_TEXT_MESSAGE, { path })
-    const text = typeof body?.text === 'string' ? body.text : null
-    if (text === null || text.length === 0) return null
-    return text
-  } catch {
-    return null
-  }
-}
-
-/**
  * The last text this process saw for a path *before* the current one.
  *
  * The editor answers with method identities, not revisions, so the "old" side
@@ -394,32 +376,65 @@ function describeSkippedPatch(entry) {
  *
  * The wording matters: a caller must be able to tell "these edits are live"
  * from "these edits cannot be live without a compile" without reading JSON.
+ * `files` is the per-file view; `hot[]` only carries detourable methods, so a
+ * file the editor judged hot without a method body appears only in `files`.
  */
 export function formatHotReload(result) {
   const hot = result?.hot ?? []
   const needCompile = result?.needCompile ?? []
   const failed = result?.failed ?? []
+  const files = Array.isArray(result?.files) ? result.files : null
   const lines = []
 
-  const hotPaths = new Set(hot.map((entry) => entry.path).filter(Boolean))
-  for (const path of hotPaths) {
-    const methods = hot.filter((entry) => entry.path === path)
-    lines.push(`hot: ${path}${methods.length > 0 ? ` (${methods.length} method${methods.length === 1 ? '' : 's'})` : ' (no method bodies to patch)'}`)
+  const hotFiles = files === null
+    ? [...new Set(hot.map((entry) => entry.path).filter(Boolean))].map((path) => ({
+        path,
+        methodCount: hot.filter((entry) => entry.path === path).length,
+      }))
+    : files
+        .filter((file) => file.state === 'hot')
+        .map((file) => ({ path: file.path, methodCount: file.method_count ?? 0 }))
+
+  for (const file of hotFiles) {
+    const methods = hot.filter((entry) => entry.path === file.path)
+    const count = file.methodCount ?? methods.length
+    lines.push(
+      `hot: ${file.path}` +
+        (count > 0
+          ? ` (${count} method${count === 1 ? '' : 's'})`
+          : ' (no method bodies to patch)'),
+    )
     for (const method of methods) lines.push(`  · ${method.method_key ?? describeMethod(method)}`)
   }
-  for (const entry of needCompile) {
+  const needCompileRows = files === null
+    ? needCompile
+    : files
+        .filter((file) => file.state === 'need-compile')
+        .map((file) => ({ path: file.path, reason: file.reason }))
+  const failedRows = files === null
+    ? failed
+    : files
+        .filter((file) => file.state === 'failed')
+        .map((file) => ({ path: file.path, error: file.reason }))
+  for (const entry of needCompileRows) {
     lines.push(`needs compile: ${entry.path}${entry.reason ? ` — ${entry.reason}` : ''}`)
   }
-  for (const entry of failed) {
+  for (const entry of failedRows) {
     lines.push(`failed: ${entry.path}${entry.error ? ` — ${entry.error}` : ''}`)
   }
 
-  if (lines.length === 0) lines.push('nothing to classify: no edited scripts were given')
+  if (lines.length === 0) {
+    lines.push(
+      files !== null
+        ? 'nothing to classify: the Editor returned no file states for these paths'
+        : 'nothing to classify: no edited scripts were given',
+    )
+  }
 
   const summary =
-    `${hotPaths.size} file${hotPaths.size === 1 ? '' : 's'} hot-patchable, ` +
-    `${needCompile.length} need${needCompile.length === 1 ? 's' : ''} a compile, ` +
-    `${failed.length} could not be read`
+    `${hotFiles.length} file${hotFiles.length === 1 ? '' : 's'} hot-patchable, ` +
+    `${needCompileRows.length} need${needCompileRows.length === 1 ? 's' : ''} a compile, ` +
+    `${failedRows.length} could not be read`
   lines.push('', summary)
 
   const applied = result?.applied ?? []
@@ -445,11 +460,14 @@ export function formatHotReload(result) {
     } else {
       lines.push('No method bodies were patched; run unity_recompile if needed.')
     }
+  } else if (hotFiles.length > 0) {
+    // 文件判热但没有任何可 detour 的方法：这不是「没给文件」，如实说明。
+    lines.push('These files have no method bodies to detour; no compile is needed for them.')
   }
-  if (needCompile.length > 0) {
+  if (needCompileRows.length > 0) {
     lines.push('Run unity_recompile (mode "auto" re-checks, mode "compile" forces it) for the files that need a compile.')
   }
-  for (const entry of failed) {
+  for (const entry of failedRows) {
     if (/no \.meta yet|still importing/i.test(String(entry.error ?? ''))) {
       lines.push('Some assets are still importing; retry once the import finishes.')
       break
@@ -486,9 +504,22 @@ function describeMethod(method) {
   return `${type}.${name}(${params})${method.is_static ? ' [static]' : ''}`
 }
 
-/** Flatten the three buckets into the `details[]` rows the tool returns. */
+/** Flatten the classification into the `details[]` rows callers report. */
 function buildDetails(classified) {
   const details = []
+  if (Array.isArray(classified.files) && classified.files.length > 0) {
+    for (const file of classified.files) {
+      const state =
+        file.state === 'need-compile' ? STATE_NEED_COMPILE : file.state === 'failed' ? STATE_FAILED : STATE_HOT
+      details.push({
+        path: file.path,
+        state,
+        methodCount: file.method_count,
+        ...(file.reason ? { reason: file.reason } : {}),
+      })
+    }
+    return details
+  }
   for (const entry of classified.hot) {
     details.push({
       path: entry.path,
@@ -503,45 +534,4 @@ function buildDetails(classified) {
     details.push({ path: entry.path, state: STATE_FAILED, ...(entry.error ? { reason: entry.error } : {}) })
   }
   return details
-}
-
-function normalizeClassification(body) {
-  const hot = Array.isArray(body.hot) ? body.hot.map(normalizeHotMethod).filter(Boolean) : []
-  const needCompile = Array.isArray(body.needCompile)
-    ? body.needCompile.map((entry) => ({ path: String(entry?.path ?? ''), reason: String(entry?.reason ?? '') }))
-    : []
-  const failed = Array.isArray(body.failed)
-    ? body.failed.map((entry) => ({ path: String(entry?.path ?? ''), error: String(entry?.error ?? '') }))
-    : []
-  return {
-    hot,
-    needCompile,
-    failed,
-    supported: body.supported !== false,
-    reason: body.reason ?? null,
-  }
-}
-
-function normalizeHotMethod(entry) {
-  if (!entry) return null
-  // The editor names the file `source_path` (HotPatchMethodDto in the payload
-  // uses the same spelling); an object that carries neither cannot be placed.
-  const file = entry.path ?? entry.source_path ?? ''
-  if (file === '') return null
-  return {
-    path: String(file),
-    method_key: entry.method_key ?? null,
-    declaring_type: entry.declaring_type ?? null,
-    name: entry.name ?? null,
-    param_type_names: Array.isArray(entry.param_type_names) ? entry.param_type_names : [],
-    param_type_sigs: Array.isArray(entry.param_type_sigs) ? entry.param_type_sigs : [],
-    is_static: Boolean(entry.is_static),
-    is_ctor: Boolean(entry.is_ctor),
-  }
-}
-
-let patchCounter = 0
-function randomPatchId() {
-  patchCounter += 1
-  return `dsh-hot-${Date.now().toString(36)}-${patchCounter}`
 }

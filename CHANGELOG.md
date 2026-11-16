@@ -55,6 +55,90 @@
 - **`type` 为 undefined 时写库报错**：`node:sqlite` 不接受 undefined 绑定，整批写入被吞成
   「不可用」。
 
+#### 修复（新增工具的验收回归）
+
+- **`unity_hot_reload` 对 Allman 风格的方法体一律漏判**（严重）：分类器逐行扫描时要求开括号与签名
+  同行，工程里最常见的「签名一行、`{` 下一行」写法因此得到空方法表，工具还会输出
+  `nothing to classify: no edited scripts were given`——把「没识别出方法」说成「没给文件」。
+  现在等待下一行的 `{` 作为方法体起点，并在应答里新增逐文件结论 `files[]`（`state` / `reason` /
+  `method_count`），`hot[]` 只承载可 detour 方法，文件级 hot 不再消失；`unity_recompile mode:"auto"`
+  也据此把「热但无可补方法」判为 hot 而不是白白编译一次。
+- **`unity_yaml_search` 的 `scanned` 恒为 0**：实现返回 `files`，工具层却读 `result.scanned`。
+- **`unity_yaml_search` 的 `match_fields` 描述与实现不符**：描述示例是字段名（`m_Name`），实际只接受
+  `path`/`field_name`/`field_value`/`type`/`all`；描述改为官方语义，按字段名过滤请用 `field_value`。
+- **`unity_yaml_search` 的 `source:"live"` 无 `scope` 时崩溃**：全工程搜索本应走磁盘，却把空路径
+  传进 live 读取并抛 `a path is required`。
+- **`unity_asset_search` 的非法 `guid` 被静默忽略**：`guid:"ZZZ"` 会返回全库资产；现在明确报错，
+  `limit` 也改为越界报错而不是悄悄夹紧。
+- **`unity_prefab_overrides` 把不存在的路径报成「没有覆盖」**：空覆盖表与「路径不存在」必须可区分，
+  现在先检查资产是否存在。
+- **`unity_lock` 与官方契约对齐**：`reason` 在 acquire 时必填、`timeout_seconds` 只接受 1..900
+  （越界报错而不是夹紧）、acquire 结果带回锁文件路径；描述里的锁文件名改为真实的
+  `Library/Locus/session-lock.json`。
+- **协作包对场景对象刷 `Do not use ReadObjectThreaded on scene objects!`**：场景路径不再调用
+  `AssetDatabase.LoadAllAssetsAtPath`（它会对场景对象走线程化读取），`SerializedObject` 也显式
+  `Update()`；一次 live 读场景不再新增警告。
+- **删除死代码**：`dsh_hot_reload_compiled_text` 消息链（JS 侧从未使用、编辑器侧也无读取者）、
+  `tools.js` 里未使用的 yaml/health 导入、`yaml-lite.js` 里重复的 live 提示行。
+
+#### 与官方对齐：权限与后台执行（新增工具复核）
+
+- 后台执行白名单与上游 `supports_async_mode` 一致：只有 `unity_execute` 与 `unity_test` 接受宿主注入的
+  `async`，其余 8 个新增工具保持同步——它们不执行会长时间占用主线程的工作。
+- 权限面复核：8 个工具都不改工程资产（`unity_lock` 只写 `Library/Locus` 下的协作锁，`unity_asset_search`
+  只写资产库缓存，热重载只改运行域），因此都不需要 `request_editor_status`，与官方 `mutates_workspace: false`
+  的只读定位一致。
+
+#### 设置页开关：默认值与接线
+
+- **默认值与 Locus 一致**：`compileSidecar`（官方 `unity.compile.sidecar`）、`backgroundHook`
+  （`unity.connection.backgroundHook`）与 `offlineDocs` 默认改为开启；`nonPublicAccess` 维持开启
+  （官方 `unity.compile.nonPublicAccess`）。settings 文档版本升到 v2，**v1 文档会被迁移**：这三个键的
+  旧 `false` 是旧默认值而非用户选择，改为新默认；`nonPublicAccess` 等未改默认的键保持原值。
+- **后台加速开关真正生效**：`unity_status` 在读取编辑器健康时按开关幂等同步 broker 的
+  `dsh_set_background_hook`（状态已一致就不发消息）；非 Windows broker 报告不支持，开关不会假装生效。
+- **离线文档开关真正生效**：开关关闭时 `unity_offline_docs action:"import"` 直接返回 `state: "disabled"`
+  并说明原因，搜索与读页仍可用于已导入内容。
+- **编译服务开关**：此前已有消费点（`unity_execute` 失败时的编辑器外编译检查），默认值改为开启后与官方一致。
+- 设置页文案同时说明各开关的默认值与「本桥无法真正解锁私有成员」的事实，避免开关看起来无效。
+
+#### 插件整体声明 payload 版本
+
+- 根 `package.json` 的 `locus` 块新增 `payload`（`package` + `version`），与已有的 `locus.version`
+  （上游 Locus release）一起构成**插件级**的 payload 声明：`locus.version` 说明 vendored 副本同步自
+  哪个上游 release，`locus.payload.version` 说明其中的 `com.farlocus.locus` 是哪个版本。
+- `src/setup.js` 新增 `payloadDeclaration()` / `payloadContract()` / `projectPayloadContract()`：
+  对照「声明 / 插件自带副本 / 工程已安装包」三方版本，不一致时在 `unity_status` 的工程诊断（连接失败
+  路径）与连接成功的状态输出里都给出一行警告，并说明是重装自带 payload 还是更新声明。警告不阻塞连接。
+- `npm run check:payload`（`scripts/sync-payload.mjs --check`）把声明与 `payload/locus_unity` 的版本
+  不一致当作硬失败；同步前也先校验，避免把与声明不符的包同步进来。
+- 硬引用 payload 程序集的边界由此写清楚：插件声明即契约，payload 升级时同步 `locus.payload.version`
+  并重新验证编译；`autoReferenced: false` 不妨碍 asmdef 里的显式 `references`。
+
+#### 协作包改用硬引用（减少反射与体积）
+
+- 协作包的 asmdef 显式引用 `Locus.Editor`（`overrideReferences: true`，保留
+  `precompiledReferences`），直接调用 `LocusBridge.RegisterExtensionMessageHandler` 与
+  `SendEventToRust`；删除 `LocusReflection.cs` 反射桥（约 140 行）。payload 缺接口时是编译失败，
+  不再是运行时「扩展静默失效」。
+- 播放/暂停状态从 payload 私有字段的反射改为 `EditorApplication.isPlaying` / `isPaused`。
+- detour 引擎保留反射加载 `Locus.Detour.dll`：实测把协作包整体重装后，Unity 会丢失 asmdef 里
+  包内 precompiled 引用，编译期直接构造 MonoMod 类型不稳定，因此只有注册与事件发送走硬引用。
+- 协作包 C# 代码约 3,900 行 → 约 3,600 行。保留：健康阶段上报、live 值源与 prefab 覆盖——
+  payload 没有对应的公开 API。
+
+#### 热重载分类移到插件进程
+
+- 文件级分类器从协作包（`DshHotReloadClassifier.cs`，约 815 行）移植到
+  `src/hotreload-classify.js`。规则保持一致：Allman/K&R 方法体、方法身份（含参数反射名与
+  `method_key`）、record/interface/enum/字段/event 的结构信号、`.meta` 缺失、删除文件、
+  重名类型、`.asmdef`/`.asmref`/`.rsp`。
+- 协议删除 `dsh_hot_reload_classify`；协作包只保留 `apply` / `status` / `dispose`。
+  `unity_hot_reload` 的 `dry_run` 因此完全不依赖编辑器，本地分类也不再受域重载窗口影响。
+- 协作包 C# 代码从约 3,600 行降到约 2,800 行（-22%）。
+- 新增 `test/hotreload-classify.test.js` 覆盖移植后的分类规则；`test/hotreload.test.js` 改为
+  真实工程文件的本地分类夹具。
+
 #### 验证
 
 - 全量 `node --test`：677 通过；`scripts/dump-tools.mjs`：25 个工具（19 `unity_*` + 6 `code_*`）全部

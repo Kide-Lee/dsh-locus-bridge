@@ -1,17 +1,16 @@
-// Hot reload: the JS half of `unity_hot_reload` (contracts.md §2.2/§2.3).
+// Hot reload: the JS half of `unity_hot_reload`.
 //
-// Everything here runs against test/fake-broker.js with `onMessage`
-// interception, so no Unity editor is needed: the four `dsh_hot_reload_*`
-// extension messages are answered from fixtures exactly as
-// packages/unity-bridge/Editor/HotReload/ answers them in a real domain.
+// Classification runs in this process now (`src/hotreload-classify.js`), so the
+// fixtures are real files under a throwaway project; only applying a patch talks
+// to the editor, and those messages are answered by test/fake-broker.js.
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { LocusClient, LocusError } from '../src/locus-client.js'
+import { LocusClient } from '../src/locus-client.js'
 import { __resetPoolForTest, __setClientForTest, shutdownPool } from '../src/client-pool.js'
 import { resolvePipeName } from '../src/pipe-name.js'
 import {
@@ -23,13 +22,62 @@ import {
   hotReload,
   hotReloadStatus,
 } from '../src/hotreload.js'
-import { recompile, runRecompile, scriptReloadPayload } from '../src/recompile.js'
+import { runRecompile, scriptReloadPayload } from '../src/recompile.js'
 import { startFakeBroker } from './fake-broker.js'
 
 const PROJECT = mkdtempSync(join(tmpdir(), 'locus-hotreload-test-'))
-mkdirSync(join(PROJECT, 'Assets', 'Scripts'), { recursive: true })
+const SCRIPTS = join(PROJECT, 'Assets', 'Scripts')
+mkdirSync(SCRIPTS, { recursive: true })
 mkdirSync(join(PROJECT, 'ProjectSettings'), { recursive: true })
 process.on('exit', () => rmSync(PROJECT, { recursive: true, force: true }))
+
+/** A method-body edit under Allman braces: the shape that used to classify as empty. */
+const PLAYER_SOURCE = `namespace Game
+{
+    public class Player
+    {
+        public void Update()
+        {
+            int x = 1;
+        }
+    }
+}
+`
+
+/** A field declaration at member position: cold without a real compile. */
+const ENEMY_SOURCE = `namespace Game
+{
+    public class Enemy
+    {
+        public int hp;
+
+        public void Tick()
+        {
+        }
+    }
+}
+`
+
+const ONLY_COMMENTS = `// nothing to detour here
+`
+
+/** A different type name: importing Broken.cs must not make Player.cs look duplicated. */
+const BROKEN_SOURCE = `public class BrokenProbe
+{
+}
+`
+
+function writeScript(name, source, { meta = true } = {}) {
+  const path = join(SCRIPTS, name)
+  writeFileSync(path, source)
+  if (meta) writeFileSync(`${path}.meta`, '')
+}
+
+writeScript('Player.cs', PLAYER_SOURCE)
+writeScript('Enemy.cs', ENEMY_SOURCE)
+writeScript('OnlyComments.cs', ONLY_COMMENTS)
+writeScript('Broken.cs', BROKEN_SOURCE, { meta: false })
+writeFileSync(join(SCRIPTS, 'Notes.txt'), 'not a script')
 
 const TARGET = { projectRoot: PROJECT }
 
@@ -39,23 +87,10 @@ function answer(socket, request, body) {
   return true
 }
 
-/** Reply the way LocusBridge.HandleExtensionMessageAsync does on a handler throw. */
-function refuse(socket, request, error) {
-  socket.write(JSON.stringify({ type: 'response', reply_to: request.id, ok: false, error }) + '\n')
-  return true
-}
-
-// The editor speaks `source_path` (HotPatchMethodDto); a regression once dropped
-// every hot method because only `path` was read, so the tool claimed "no edited
-// scripts were given" while the classifier had answered correctly.
-// Both spellings appear in practice: the classifier answers `source_path`
-// (HotPatchMethodDto, like the payload), while a caller round-tripping the
-// normalized form sends `path`. A regression once dropped every hot method
-// because only `path` was read, so the tool claimed "no edited scripts were
-// given" although the editor had answered correctly.
+/** A method identity in the shape the classifier emits. */
 function hotMethod(overrides = {}) {
   return {
-    source_path: 'Assets/Scripts/Player.cs',
+    path: 'Assets/Scripts/Player.cs',
     method_key: 'Game.Player|Update||i',
     declaring_type: 'Game.Player',
     name: 'Update',
@@ -94,86 +129,54 @@ test('HOT_RELOAD_MODES matches the unity_recompile mode enum', () => {
   assert.ok(Object.isFrozen(HOT_RELOAD_MODES))
 })
 
-test('classifyHotEdit sends paths and decodes the editor answer', async () => {
-  await withEditor(
-    async ({ requests, client }) => {
-      const result = await classifyHotEdit(client, {
-        paths: ['Assets/Scripts/Player.cs', 'Assets/Scripts/Enemy.cs'],
-      })
-      const request = requests.find((item) => item.type === 'dsh_hot_reload_classify')
-      const body = JSON.parse(request.message)
-      assert.deepEqual(body.paths, ['Assets/Scripts/Player.cs', 'Assets/Scripts/Enemy.cs'])
-      assert.match(body.patch_id, /^dsh-hot-/)
+// ── local classification ────────────────────────────────────────────────────
 
-      assert.equal(result.hot.length, 1)
-      assert.equal(result.hot[0].method_key, 'Game.Player|Update||i')
-      assert.equal(result.hot[0].declaring_type, 'Game.Player')
-      assert.deepEqual(result.hot[0].param_type_names, [])
-      assert.equal(result.hot[0].is_ctor, false)
-      assert.deepEqual(result.needCompile, [{ path: 'Assets/Scripts/Enemy.cs', reason: 'field layout changed' }])
-      assert.deepEqual(result.failed, [])
-      assert.equal(result.supported, true)
-    },
-    {
-      onMessage: (request, _helpers, socket) => {
-        if (request.type !== 'dsh_hot_reload_classify') return undefined
-        return answer(socket, request, {
-          hot: [hotMethod()],
-          needCompile: [{ path: 'Assets/Scripts/Enemy.cs', reason: 'field layout changed' }],
-          failed: [],
-          supported: true,
-        })
-      },
-    },
-  )
+test('classifyHotEdit reads method identities from disk', () => {
+  const result = classifyHotEdit(PROJECT, ['Assets/Scripts/Player.cs', 'Assets/Scripts/Enemy.cs'])
+  assert.equal(result.hot.length, 1)
+  assert.equal(result.hot[0].method_key, 'Game.Player|Update||i')
+  assert.equal(result.hot[0].declaring_type, 'Game.Player')
+  assert.deepEqual(result.hot[0].param_type_names, [])
+  assert.equal(result.hot[0].is_ctor, false)
+  assert.equal(result.needCompile.length, 1)
+  assert.match(result.needCompile[0].reason, /field layout changed/)
+  assert.deepEqual(result.failed, [])
+  assert.equal(result.supported, true)
 })
 
-test('classifyHotEdit rejects an empty path list before touching the broker', async () => {
-  await withEditor(
-    async ({ requests, client }) => {
-      const before = requests.length
-      await assert.rejects(() => classifyHotEdit(client, { paths: [] }), /at least one Assets\/ or Packages\/ path/)
-      assert.equal(requests.length, before, 'no classify request was written')
-    },
-  )
+test('classifyHotEdit needs no editor connection at all', () => {
+  // No broker, no client: classification only reads the project.
+  __resetPoolForTest()
+  const result = classifyHotEdit(PROJECT, ['Assets/Scripts/Player.cs'])
+  assert.equal(result.hot.length, 1)
 })
 
-test('classifyHotEdit surfaces a handler-side {"error": …} body', async () => {
-  await withEditor(
-    async ({ client }) => {
-      await assert.rejects(() => classifyHotEdit(client, { paths: ['Assets/Scripts/Player.cs'] }), /sidecar not ready/)
-    },
-    {
-      onMessage: (request, _helpers, socket) => {
-        if (request.type === 'dsh_hot_reload_classify') return answer(socket, request, { error: 'sidecar not ready' })
-        return undefined
-      },
-    },
-  )
+test('classifyHotEdit rejects an empty path list', () => {
+  assert.throws(() => classifyHotEdit(PROJECT, []), /at least one Assets\/ or Packages\/ path/)
 })
 
-test('classifyHotEdit surfaces a non-JSON answer honestly', async () => {
-  await withEditor(
-    async ({ client }) => {
-      await assert.rejects(() => classifyHotEdit(client, { paths: ['Assets/Scripts/Player.cs'] }), /invalid JSON/)
-    },
-    {
-      onMessage: (request, _helpers, socket) => {
-        if (request.type !== 'dsh_hot_reload_classify') return undefined
-        socket.write(JSON.stringify({ type: 'response', reply_to: request.id, ok: true, message: 'not json' }) + '\n')
-        return true
-      },
-    },
-  )
+test('classifyHotEdit separates failed files from cold ones', () => {
+  const result = classifyHotEdit(PROJECT, ['Assets/Scripts/Notes.txt', '../outside.cs', 'Assets/Nope.cs'])
+  assert.equal(result.failed.length, 2, 'a non-script and an outside path are failures')
+  assert.equal(result.needCompile.length, 1, 'a deleted script is cold')
+  assert.match(result.needCompile[0].reason, /file was deleted/)
 })
 
-test('classifyHotEdit surfaces a bridge refusal (unknown message type)', async () => {
-  // A payload without this sidecar package answers `unknown command …`; that is
-  // a real refusal, not a transient-domain condition, so it must not be retried.
-  await withEditor(async ({ client }) => {
-    await assert.rejects(() => classifyHotEdit(client, { paths: ['Assets/Scripts/Player.cs'] }), /unknown command/)
-  })
+test('classifyHotEdit reports a comment-only file as hot with no method body', () => {
+  const result = classifyHotEdit(PROJECT, ['Assets/Scripts/OnlyComments.cs'])
+  assert.equal(result.hot.length, 0)
+  assert.equal(result.files[0].state, 'hot')
+  assert.equal(result.files[0].method_count, 0)
+  assert.match(formatHotReload({ ...result, dryRun: true }), /no method bodies to patch/)
 })
+
+test('classifyHotEdit flags a script that has not been imported yet', () => {
+  const result = classifyHotEdit(PROJECT, ['Assets/Scripts/Broken.cs'])
+  assert.equal(result.needCompile.length, 1)
+  assert.match(result.needCompile[0].reason, /no \.meta yet/)
+})
+
+// ── apply / status / dispose (editor side) ──────────────────────────────────
 
 test('applyHotPatch sends the patch body and reports skipped methods', async () => {
   await withEditor(
@@ -262,107 +265,51 @@ test('disposeHotPatches sends the patch id, and nothing for "all"', async () => 
   )
 })
 
-test('hotReload normalizes project-relative paths and builds details[]', async () => {
-  await withEditor(
-    async ({ requests }) => {
-      const result = await hotReload(TARGET, {
-        paths: ['Assets/Scripts/Player.cs', '/etc/passwd', 'Packages/com.x/Runtime/Y.cs'],
-      })
-      const request = requests.find((item) => item.type === 'dsh_hot_reload_classify')
-      // normalizeChangedPaths drops anything that is not an Assets/ or Packages/ asset.
-      assert.deepEqual(JSON.parse(request.message).paths, ['Assets/Scripts/Player.cs', 'Packages/com.x/Runtime/Y.cs'])
+// ── hotReload orchestration ─────────────────────────────────────────────────
 
-      assert.deepEqual(result.details, [
-        { path: 'Assets/Scripts/Player.cs', method: 'Game.Player|Update||i', state: 'hot' },
-        { path: 'Assets/Scripts/Enemy.cs', state: 'need-compile', reason: 'field layout changed' },
-        { path: 'Assets/Broken.cs', state: 'failed', reason: 'CS1002' },
-      ])
-      assert.equal(result.dryRun, false)
-      assert.equal(result.projectRoot, PROJECT)
-    },
-    {
-      onMessage: (request, _helpers, socket) => {
-        if (request.type !== 'dsh_hot_reload_classify') return undefined
-        return answer(socket, request, {
-          hot: [hotMethod()],
-          needCompile: [{ path: 'Assets/Scripts/Enemy.cs', reason: 'field layout changed' }],
-          failed: [{ path: 'Assets/Broken.cs', error: 'CS1002' }],
-          supported: true,
-        })
-      },
-    },
+test('a dry run classifies locally and never connects', async () => {
+  // No broker is started: a dry run must answer from disk alone.
+  const result = await hotReload(
+    { projectRoot: PROJECT, pipe: 'no-such-pipe' },
+    { paths: ['Assets/Scripts/Player.cs'], dryRun: true },
   )
+  assert.equal(result.hot.length, 1)
+  assert.equal(result.dryRun, true)
+  assert.equal(result.files[0].state, 'hot')
 })
 
-test('hotReload retries once across a domain reload window', async () => {
-  // A transport-class failure (the reload tore the connection down) is retried
-  // once, on a freshly connected client — what `getClient` hands back after a
-  // reconnect. The fixture's seeded stream cannot be swapped for a new one, so
-  // the reconnect itself is stubbed and the retry's request is what is asserted.
-  let calls = 0
-  const requests = []
-  const transportLoss = new LocusError('locus stream closed', { code: null })
-  const client = {
-    async request(type, message) {
-      requests.push({ type, message })
-      calls += 1
-      if (calls === 1) throw transportLoss
-      return { ok: true, message: JSON.stringify({ hot: [hotMethod()], needCompile: [], failed: [], supported: true }) }
-    },
-  }
-  const broker = await startFakeBroker({ onMessage: () => undefined })
-  try {
-    __resetPoolForTest()
-    __setClientForTest(resolvePipeName({ projectRoot: PROJECT }), {
-      connected: true,
-      state: 'connected',
-      connect: async () => {},
-      request: (type, message) => client.request(type, message),
-    })
+test('hotReload normalizes project-relative paths before classifying', async () => {
+  const result = await hotReload(TARGET, { paths: ['Assets/Scripts/Player.cs', '/etc/passwd'], dryRun: true })
+  // normalizeChangedPaths drops anything that is not an Assets/ or Packages/ asset.
+  assert.equal(result.files.length, 1)
+  assert.equal(result.files[0].path, 'Assets/Scripts/Player.cs')
+})
+
+test('hotReload skips a file the editor has no baseline for', async () => {
+  // Classification is local, but applying a patch has to reproduce the text the
+  // running domain compiled; with no baseline the edit is left to a recompile.
+  await withEditor(async () => {
     const result = await hotReload(TARGET, { paths: ['Assets/Scripts/Player.cs'] })
-    assert.equal(calls, 2, 'retried exactly once')
-    assert.equal(result.hot.length, 1)
-    assert.equal(result.hot[0].method_key, 'Game.Player|Update||i')
-    assert.deepEqual(
-      requests.map((item) => item.type),
-      ['dsh_hot_reload_classify', 'dsh_hot_reload_classify'],
-    )
-  } finally {
-    __resetPoolForTest()
-    await broker.close()
-  }
-})
-
-test('hotReload does not retry a refusal that is not about the reload window', async () => {
-  let calls = 0
-  await withEditor(
-    async () => {
-      await assert.rejects(() => hotReload(TARGET, { paths: ['Assets/Scripts/Player.cs'] }), /unknown command/)
-      assert.equal(calls, 1)
-    },
-    {
-      onMessage: (request) => {
-        if (request.type !== 'dsh_hot_reload_classify') return undefined
-        calls += 1
-        return undefined
-      },
-    },
-  )
+    assert.equal(result.dryRun, false)
+    assert.deepEqual(result.patches, [])
+    assert.deepEqual(result.applied, [])
+    assert.equal(result.skipped.length, 1)
+    assert.match(result.skipped[0].reason, /no baseline for this file/)
+  })
 })
 
 test('formatHotReload renders hot, needs-compile and failed rows', () => {
-  // A normalized entry (`path`, not the editor's `source_path`).
   const text = formatHotReload({
-    hot: [hotMethod({ path: 'Assets/Scripts/Player.cs' })],
+    hot: [hotMethod()],
     needCompile: [{ path: 'Assets/Scripts/Enemy.cs', reason: 'field layout changed' }],
-    failed: [{ path: 'Assets/Broken.cs', error: 'CS1002' }],
+    failed: [{ path: 'Assets/Broken.txt', error: 'not a C# source file' }],
     details: [],
     dryRun: false,
   })
   assert.match(text, /hot: Assets\/Scripts\/Player\.cs \(1 method\)/)
   assert.match(text, /· Game\.Player\|Update\|\|i/)
   assert.match(text, /needs compile: Assets\/Scripts\/Enemy\.cs — field layout changed/)
-  assert.match(text, /failed: Assets\/Broken\.cs — CS1002/)
+  assert.match(text, /failed: Assets\/Broken\.txt — not a C# source file/)
   assert.match(text, /1 file hot-patchable, 1 needs a compile, 1 could not be read/)
   // No patch was applied, so the rendering must say so rather than imply the
   // method is live.
@@ -370,31 +317,9 @@ test('formatHotReload renders hot, needs-compile and failed rows', () => {
   assert.match(text, /unity_recompile \(mode "auto"/)
 })
 
-test('hotReload skips a file the editor reported no revision pair for', async () => {
-  // Classification alone still works, but the patch has to reproduce the file's
-  // current text: with no readable file there is nothing to compile against, and
-  // patching the file onto itself would report a success that changed nothing.
-  await withEditor(
-    async () => {
-      const result = await hotReload(TARGET, { paths: ['Assets/Scripts/Player.cs'] })
-      assert.equal(result.dryRun, false)
-      assert.deepEqual(result.patches, [])
-      assert.deepEqual(result.applied, [])
-      assert.equal(result.skipped.length, 1)
-      assert.match(result.skipped[0].reason, /no baseline for this file/)
-    },
-    {
-      onMessage: (request, _helpers, socket) => {
-        if (request.type !== 'dsh_hot_reload_classify') return undefined
-        return answer(socket, request, { hot: [hotMethod()], needCompile: [], failed: [], supported: true })
-      },
-    },
-  )
-})
-
 test('formatHotReload reports a patch that could not be compiled', () => {
   const text = formatHotReload({
-    hot: [hotMethod({ path: 'Assets/Scripts/Player.cs' })],
+    hot: [hotMethod()],
     needCompile: [],
     failed: [],
     patches: [],
@@ -409,7 +334,7 @@ test('formatHotReload reports a patch that could not be compiled', () => {
 
 test('formatHotReload reports the methods that were detoured', () => {
   const text = formatHotReload({
-    hot: [hotMethod({ path: 'Assets/Scripts/Player.cs' })],
+    hot: [hotMethod()],
     needCompile: [],
     failed: [],
     patches: [{ id: 'dsh-hot-abc-1', path: 'Assets/Scripts/Player.cs', methods: 1, applied: 1 }],
@@ -424,8 +349,7 @@ test('formatHotReload reports the methods that were detoured', () => {
 })
 
 test('formatHotReload is explicit about a dry run', () => {
-  // `path` spelling, the normalized shape a caller round-trips.
-  const text = formatHotReload({ hot: [hotMethod({ path: 'Assets/Scripts/Player.cs' })], needCompile: [], failed: [], dryRun: true })
+  const text = formatHotReload({ hot: [hotMethod()], needCompile: [], failed: [], dryRun: true })
   assert.match(text, /Dry run: nothing was patched\./)
   assert.doesNotMatch(text, /patched: \d+ method/)
 })
@@ -434,7 +358,27 @@ test('formatHotReload handles an empty classification', () => {
   assert.match(formatHotReload({ hot: [], needCompile: [], failed: [] }), /nothing to classify/)
 })
 
-// ── src/recompile.js modes (§2.3) ───────────────────────────────────────────
+test('formatHotReload reports a hot file that has no detourable method body', () => {
+  const text = formatHotReload({
+    hot: [],
+    needCompile: [],
+    failed: [],
+    files: [{ path: 'Assets/Scripts/OnlyComments.cs', state: 'hot', reason: 'no detour target found in this file', method_count: 0 }],
+    dryRun: false,
+  })
+  assert.match(text, /hot: Assets\/Scripts\/OnlyComments\.cs \(no method bodies to patch\)/)
+  assert.match(text, /1 file hot-patchable, 0 need a compile, 0 could not be read/)
+  assert.match(text, /no method bodies to detour/)
+  assert.doesNotMatch(text, /nothing to classify/)
+})
+
+test('formatHotReload refuses to claim nothing was classified when files were reported', () => {
+  const text = formatHotReload({ hot: [], needCompile: [], failed: [], files: [] })
+  assert.match(text, /no file states/)
+  assert.doesNotMatch(text, /no edited scripts were given/)
+})
+
+// ── recompile modes ─────────────────────────────────────────────────────────
 
 test('runRecompile mode "compile" preserves the classic recompile result', async () => {
   await withEditor(
@@ -490,6 +434,8 @@ test('runRecompile mode "scripts" uses request_script_reload', async () => {
 })
 
 test('runRecompile mode "auto" stops at a fully hot-patchable edit', async () => {
+  // Player.cs only changes a method body, so the local classifier is enough and
+  // no compile is requested.
   await withEditor(
     async ({ requests }) => {
       const result = await runRecompile(TARGET, { mode: 'auto', paths: ['Assets/Scripts/Player.cs'] })
@@ -498,49 +444,28 @@ test('runRecompile mode "auto" stops at a fully hot-patchable edit', async () =>
       assert.equal(result.classification.hot.length, 1)
       assert.equal(requests.filter((item) => item.type === 'request_recompile').length, 0, 'no compile was requested')
     },
-    {
-      onMessage: (request, _helpers, socket) => {
-        if (request.type !== 'dsh_hot_reload_classify') return undefined
-        return answer(socket, request, { hot: [hotMethod()], needCompile: [], failed: [], supported: true })
-      },
+  )
+})
+
+test('runRecompile mode "auto" treats a hot file with no method body as hot', async () => {
+  await withEditor(
+    async ({ requests }) => {
+      const result = await runRecompile(TARGET, { mode: 'auto', paths: ['Assets/Scripts/OnlyComments.cs'] })
+      assert.equal(result.mode, 'hot')
+      assert.equal(result.status, 'hot')
+      assert.equal(requests.filter((item) => item.type === 'request_recompile').length, 0)
     },
   )
 })
 
 test('runRecompile mode "auto" compiles when an edit needs it', async () => {
+  // Enemy.cs declares a field, which is metadata: a real compile is required.
   await withEditor(
     async ({ requests }) => {
       const result = await runRecompile(TARGET, { mode: 'auto', paths: ['Assets/Scripts/Enemy.cs'] })
       assert.equal(result.mode, 'compile')
       assert.equal(result.status, 'ok')
       assert.equal(result.classification.needCompile.length, 1)
-      assert.equal(requests.filter((item) => item.type === 'request_recompile').length, 1)
-    },
-    {
-      onMessage: (request, _helpers, socket) => {
-        if (request.type === 'dsh_hot_reload_classify') {
-          return answer(socket, request, {
-            hot: [],
-            needCompile: [{ path: 'Assets/Scripts/Enemy.cs', reason: 'field layout changed' }],
-            failed: [],
-            supported: true,
-          })
-        }
-        return answeredCompile()(request, _helpers, socket)
-      },
-    },
-  )
-})
-
-test('runRecompile mode "auto" still compiles when classification is unavailable', async () => {
-  // A payload without the sidecar package answers `unknown command …`; the
-  // classic compile must keep working rather than the tool failing.
-  await withEditor(
-    async ({ requests }) => {
-      const result = await runRecompile(TARGET, { mode: 'auto', paths: ['Assets/Scripts/Player.cs'] })
-      assert.equal(result.mode, 'compile')
-      assert.equal(result.status, 'ok')
-      assert.match(result.classificationError, /unknown command/)
       assert.equal(requests.filter((item) => item.type === 'request_recompile').length, 1)
     },
     { onMessage: answeredCompile() },
@@ -550,17 +475,6 @@ test('runRecompile mode "auto" still compiles when classification is unavailable
 test('scriptReloadPayload carries the recompile request shape', () => {
   const body = JSON.parse(scriptReloadPayload({ paths: ['Assets/A.cs'], reason: 'why', operationId: 'op-1' }))
   assert.deepEqual(body, { schema: 1, paths: ['Assets/A.cs'], reason: 'why', operationId: 'op-1' })
-})
-
-test('recompile() keeps its original signature and result shape', async () => {
-  await withEditor(
-    async () => {
-      const result = await recompile(TARGET, { syncMode: 'none', paths: [], reason: 'test' })
-      assert.deepEqual(Object.keys(result).sort(), ['adopted', 'elapsedMs', 'message', 'operationId', 'startedAt', 'status'])
-      assert.equal(result.status, 'ok')
-    },
-    { onMessage: answeredCompile() },
-  )
 })
 
 /** The fake broker's own compile register, but with the start acknowledged. */

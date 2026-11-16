@@ -262,6 +262,14 @@ describe('searchAssets', () => {
     assert.equal(result.total, 0)
   })
 
+  test('a malformed guid is rejected instead of filtering nothing', async (t) => {
+    // Dropping the filter silently answered every asset in the project; that is
+    // worse than telling the caller the GUID is not a GUID.
+    const project = buildProject(t)
+    __resetAssetDbForTest()
+    await assert.rejects(() => searchAssets(project, { guid: 'ZZZ' }), /guid must be the 32-hex asset GUID/)
+  })
+
   test('renders a compact, readable answer', async (t) => {
     const project = buildProject(t)
     __resetAssetDbForTest()
