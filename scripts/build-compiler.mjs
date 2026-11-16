@@ -59,10 +59,20 @@ if (!existsSync(OUTPUT)) {
   process.exit(0)
 }
 
+// 没有 HOME 的沙箱里 dotnet 会在 `~/.dotnet/*.sentinel` 上失败（只读家目录）；
+// 给它一个项目内的 CLI home 与包目录，构建就与运行环境的写权限无关。
+const buildEnv = {
+  ...process.env,
+  DOTNET_CLI_HOME: process.env.DOTNET_CLI_HOME ?? join(ROOT, '.tmp', 'dotnet-home'),
+  NUGET_PACKAGES: process.env.NUGET_PACKAGES ?? join(ROOT, '.tmp', 'nuget'),
+  DOTNET_CLI_TELEMETRY_OPTOUT: process.env.DOTNET_CLI_TELEMETRY_OPTOUT ?? '1',
+  DOTNET_NOLOGO: process.env.DOTNET_NOLOGO ?? '1',
+}
+
 const result = spawnSync(
   'dotnet',
   ['build', PROJECT_FILE, '-c', 'Release', '--nologo', '-v', 'minimal'],
-  { cwd: ROOT, stdio: 'inherit', env: process.env },
+  { cwd: ROOT, stdio: 'inherit', env: buildEnv },
 )
 
 if (result.error) {

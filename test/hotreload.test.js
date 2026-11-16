@@ -364,9 +364,63 @@ test('formatHotReload renders hot, needs-compile and failed rows', () => {
   assert.match(text, /needs compile: Assets\/Scripts\/Enemy\.cs — field layout changed/)
   assert.match(text, /failed: Assets\/Broken\.cs — CS1002/)
   assert.match(text, /1 file hot-patchable, 1 needs a compile, 1 could not be read/)
-  // The bridge classifies; it does not compile patch assemblies.
-  assert.match(text, /does not compile patch assemblies, so no method bodies were detoured/)
+  // No patch was applied, so the rendering must say so rather than imply the
+  // method is live.
+  assert.match(text, /No method bodies were patched/)
   assert.match(text, /unity_recompile \(mode "auto"/)
+})
+
+test('hotReload skips a file the editor reported no revision pair for', async () => {
+  // Classification alone still works, but the patch has to reproduce the file's
+  // current text: with no readable file there is nothing to compile against, and
+  // patching the file onto itself would report a success that changed nothing.
+  await withEditor(
+    async () => {
+      const result = await hotReload(TARGET, { paths: ['Assets/Scripts/Player.cs'] })
+      assert.equal(result.dryRun, false)
+      assert.deepEqual(result.patches, [])
+      assert.deepEqual(result.applied, [])
+      assert.equal(result.skipped.length, 1)
+      assert.match(result.skipped[0].reason, /no baseline for this file/)
+    },
+    {
+      onMessage: (request, _helpers, socket) => {
+        if (request.type !== 'dsh_hot_reload_classify') return undefined
+        return answer(socket, request, { hot: [hotMethod()], needCompile: [], failed: [], supported: true })
+      },
+    },
+  )
+})
+
+test('formatHotReload reports a patch that could not be compiled', () => {
+  const text = formatHotReload({
+    hot: [hotMethod({ path: 'Assets/Scripts/Player.cs' })],
+    needCompile: [],
+    failed: [],
+    patches: [],
+    applied: [],
+    skipped: [{ path: 'Assets/Scripts/Player.cs', reason: 'the patch assembly did not compile' }],
+    patchError: '[no_dotnet] no .NET SDK',
+    dryRun: false,
+  })
+  assert.match(text, /not patched: \[no_dotnet\] no \.NET SDK/)
+  assert.match(text, /run unity_recompile to converge the edit instead/)
+})
+
+test('formatHotReload reports the methods that were detoured', () => {
+  const text = formatHotReload({
+    hot: [hotMethod({ path: 'Assets/Scripts/Player.cs' })],
+    needCompile: [],
+    failed: [],
+    patches: [{ id: 'dsh-hot-abc-1', path: 'Assets/Scripts/Player.cs', methods: 1, applied: 1 }],
+    applied: [{ patchId: 'dsh-hot-abc-1', path: 'Assets/Scripts/Player.cs', method: 'Game.Player.Update()' }],
+    skipped: [],
+    patchError: null,
+    dryRun: false,
+  })
+  assert.match(text, /patched: 1 method in 1 patch assembly\./)
+  assert.match(text, /· Assets\/Scripts\/Player\.cs — 1\/1 method\(s\), patch dsh-hot-abc-1/)
+  assert.doesNotMatch(text, /No method bodies were patched/)
 })
 
 test('formatHotReload is explicit about a dry run', () => {

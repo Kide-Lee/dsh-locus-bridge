@@ -47,11 +47,12 @@ dsh plugin --profile <profile> add github:Kide-Lee/dsh-locus-bridge
 | `unity_asset_graph` | 资产引用图与脚本用法：`references` / `dependencies` / `usages`；有工程索引时标 `source: "project"`，否则退回已打开场景并标 `open-scene` | 资产索引 / 生成的 `execute_code`（按 `.meta` 的 GUID 比对序列化字段） |
 | `unity_capture` | 截取 Game / Scene / 编辑器窗口，图像直接随结果返回（`ImageBlock`），一次调用即可看见 | `capture_viewport` + `attachments.saveImage` |
 | `unity_scene` | 场景对象检索（`search` 按名称、`find` 按组件类型）、属性树读取、原子 `set`、单事务 `batch` 与 `undo` | `search_scene_objects` / `property_tree_read` / 生成的 `execute_code` |
-| `unity_hot_reload` | 判定改过的脚本能否热补丁（只改方法/构造/访问器体）而非编译域重载，并列出补丁需要的成员 | `dsh_hot_reload_classify`（协作包扩展消息） |
-| `unity_asset_search` | 基于 `.meta` 的全工程资产索引：类型、名字、目录、GUID，并报告缺 `.meta` 与重复 GUID；编辑器关着也能答 | 本地索引 `Library/Locus/dsh-asset-db` |
-| `unity_yaml_read` / `unity_yaml_search` | 直接读写 Unity YAML（`.unity` / `.prefab` / `.asset`），按 scope 与字段收窄，不必打开场景 | 本地解析 |
+| `unity_hot_reload` | 判定改过的脚本能否热补丁（只改方法/构造/访问器体）而非编译域重载；可行时用编译服务生成补丁程序集并让编辑器 detour 真正挂上，`dry_run` 只分类 | `dsh_hot_reload_classify` / `dsh_hot_reload_apply`（协作包）+ 编译服务 `analyze/hotDiff`、`compile/hotPatch` |
+| `unity_asset_search` | 基于 `.meta` 的全工程资产索引：类型、名字、目录、GUID，并报告缺 `.meta` 与重复 GUID；编辑器关着也能答 | 持久化索引 `Library/Locus/asset-index.db`（SQLite，只扫变化文件） |
+| `unity_yaml_read` / `unity_yaml_search` | 直接读写 Unity YAML（`.unity` / `.prefab` / `.asset`），按 scope 与字段收窄，不必打开场景；`source: "live"` 改读编辑器内存值（未保存的修改、二进制序列化的场景） | 本地解析，或 `dsh_live_read`（协作包） |
 | `unity_lock` / `unity_release` | 跨会话的协作编辑器锁，带持有者、等待/试拿语义与过期判定 | 锁文件（进程消失即过期） |
-| `unity_offline_docs` | 导入 Unity 官方离线文档（中/英，版本按工程解析）并检索、读页；同时提供 `unity-offline-docs` 技能 | 本地文档树 `Library/Locus/unity-docs` |
+| `unity_offline_docs` | 导入 Unity 官方离线文档（中/英，版本按工程解析）并检索、读页，导入过程可看进度、取消、删除；同时提供 `unity-offline-docs` 技能 | 本地文档树 `Library/Locus/unity-docs` |
+| `unity_prefab_overrides` | 读 Prefab 实例相对源的逐字段覆盖（值、对象引用、原始值）；实例与源一致时如实说明 | `dsh_live_prefab_overrides`（协作包） |
 
 `unity_execute` 与 `unity_test action:"run"` 还接受宿主注入的 `async` 参数，语义与 Locus 一致：`sync`（默认）等待结果；`async` 立即返回 job id，不发送完成通知，用 `job_output` 读取；`notify` 立即返回，并在完成时自动投递结果。job 由 DSH 的 jobs 管理，`job_kill` 可以取消，生命周期限于当前 Session；后台只让 agent 继续，不绕开 Unity 主线程，也不解除 `unity_execute` 的 30 秒无输出限制和工具自身的 `timeout`。`unity_run_states` 按官方行为保持同步。
 

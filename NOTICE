@@ -34,7 +34,12 @@ upstream repository. **Modified** for POSIX hosts:
   as upstream `unity_bridge/background_hook.rs`, but only on Windows: the patch
   needs Unity's PDB symbols for private engine functions, and a Unix
   `UnityPlayer.so` exports neither the symbols nor a parseable table. Non-Windows
-  hosts report `unsupported` instead of claiming a patch;
+  hosts therefore try two further routes (`src/hook/symbols.rs`) before giving
+  up: a `dlsym` lookup of an exported `IsApplicationActive`, and a byte-signature
+  scan that is accepted only when it matches exactly once *and* the two symbol
+  names sit next to each other in the image's string section. Both failing means
+  `unsupported` with the reason, never a guess — a wrong six-byte write in
+  someone else's code page crashes the editor;
 - the state probe and hang diagnosis (`src/state_probe/`, `src/hang/`) replace
   upstream's out-of-process `state_probe.rs` / `hang_diagnosis.rs` with an
   in-process equivalent: T1 phase freshness, T2 CPU from `/proc/<pid>/stat` or
@@ -62,6 +67,12 @@ project. The message-type names (`dsh_hot_reload_*`, `dsh_health`,
 `dsh_health_snapshot`) are this project's own, which is why they cannot collide
 with the desktop client's protocol.
 
+Later additions, all original to this project: the live-value source
+(`Editor/Live/`, messages `dsh_live_read` and `dsh_live_prefab_overrides`, which
+read values through `SerializedObject` and reflection rather than upstream's
+own readers) and the compiled-text channel used to decide whether a file on disk
+is newer than the assembly the domain compiled.
+
 ### `tools/dsh-finish/Compiler/` — .NET compile sidecar
 
 **Original work**, with two files copied from upstream and marked as such in
@@ -77,6 +88,13 @@ their own headers:
   written for this project. The sidecar speaks its own LSP-framed JSON protocol
   over stdio; it does not reuse upstream's `locus_compile_server` sources, which
   are tied to upstream's Rust client.
+- Later additions, also original: `ProjectFacts.cs` (the signature-level hot
+  diff: which edits are method-body-only, and the compile parameters read from
+  `ProjectSettings.asset`) and `PatchCompiler.cs` (builds the patch assembly the
+  editor detours into). They follow the *shape* of upstream's `analyze/hotDiff`
+  and `compile/hotPatch` responses — patch type naming, `PatchMethodMap`
+  fields — so the editor-side ledger is a drop-in replacement, but the code is
+  not derived from `HotDiff.cs`, `CallerScan.cs` or `PatchRewriter.cs`.
 
 The sidecar is built on demand by `npm run build:compiler`; the assembly it needs
 (`Microsoft.CodeAnalysis.CSharp` 5.x) is fetched from NuGet at build time, so the

@@ -615,6 +615,8 @@ test('every declared output property is allowed by its own schema', () => {
     unity_asset_search: { text: '', total: 0, partial: false, assets: [] },
     unity_yaml_read: { text: '', path: '', source: '', total: 0 },
     unity_yaml_search: { text: '', matches: [], scanned: 0 },
+    // live only: the override table Unity resolved for this prefab instance
+    unity_prefab_overrides: { text: '', path: '', total: 0 },
     unity_lock: { text: '', action: '', held: false, acquired: false, holder: '', path: '' },
     unity_release: { text: '', released: true, holder: '' },
     unity_offline_docs: { text: '', action: '', imported: false, state: '', version: '', results: [] },

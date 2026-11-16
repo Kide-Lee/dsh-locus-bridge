@@ -20,7 +20,7 @@ use locus_native_protocol::envelope::{
     OutEnvelope, REQUEST_ACCEPTED_EVENT, REQUEST_STATE_REQUEST, RESPONSE_KIND,
 };
 
-use crate::host_config::{errors, host_kind, managed_state};
+use crate::host_config::{errors, managed_state};
 use crate::outbox::{Outbox, EVENT_FRAME_LIMIT, REPLY_BYTE_LIMIT};
 use crate::state_plane::StatePlane;
 
@@ -34,8 +34,6 @@ pub(crate) const REQUEST_DEADLINE_MS: i64 = 10 * 60 * 1000;
 pub(crate) const EXECUTION_REQUEST_DEADLINE_MS: i64 = 2 * 60 * 60 * 1000;
 pub(crate) const EXECUTION_PROGRESS_LIMIT: usize = 16;
 pub(crate) const EXECUTION_PROGRESS_MAX_BYTES: usize = 64 * 1024;
-
-pub(crate) const NO_CLIENT: u64 = 0;
 
 // ── Editor-health commands ─────────────────────────────────────────────────
 //

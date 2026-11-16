@@ -18,10 +18,19 @@
 // This is deliberately *our* index, not a mirror of upstream's SQLite one: it is
 // in-memory per process, capped, and rebuilt when the tree's mtime moves.
 
-import { readdirSync, readFileSync, realpathSync, statSync } from 'node:fs'
+import { readFileSync, readdirSync, realpathSync, statSync } from 'node:fs'
 import { join, relative, sep } from 'node:path'
 
+import { createRequire } from 'node:module'
+
+import { installBuiltinLoader } from './asset-index.js'
+import { refreshIndex } from './asset-index-sync.js'
 import { readYamlFile, queryDocument } from './yaml-lite.js'
+
+// `node:sqlite` is a CommonJS builtin, and the index API is synchronous, so the
+// loader is handed over once here instead of awaiting an import at every scan.
+const requireBuiltin = createRequire(import.meta.url)
+installBuiltinLoader((specifier) => requireBuiltin(specifier))
 
 /** Hard ceiling on files in one scan; past it the answer is marked partial. */
 export const ASSET_DB_MAX_FILES = 200_000
@@ -147,7 +156,7 @@ const caches = new Map()
  *   memberBindings: Array<{scriptGuid: string, assetPath: string, fileId: number, className: string}>,
  *   partial: boolean, scannedFiles: number, elapsedMs: number}}
  */
-export async function scanAssets(projectRoot, { rescan = false, budgetMs = 20_000 } = {}) {
+export async function scanAssets(projectRoot, { rescan = false, budgetMs = 20_000, durable = true } = {}) {
   const root = await canonicalRoot(projectRoot)
   const cached = caches.get(root)
   if (!rescan && cached !== undefined) return cached
@@ -169,12 +178,20 @@ export async function scanAssets(projectRoot, { rescan = false, budgetMs = 20_00
   const owners = new Map()
   for (const file of files) {
     const guid = readMetaGuid(file.absolute)
+    const type = typeOf(file.ext)
+    const asset = { guid, path: file.path, ext: file.ext, type }
+    // The durable index needs the GUID and type on the walk entry; carrying them
+    // here avoids a second `readMetaGuid` in the sync layer.
+    file.guid = guid
+    file.type = type
+    file.root = root
+    file.yaml = YAML_EXTENSIONS.has(file.ext)
     if (guid === null) {
       missingMeta.push(file.path)
-      assets.push({ guid: null, path: file.path, ext: file.ext, type: typeOf(file.ext) })
+      assets.push(asset)
       continue
     }
-    assets.push({ guid, path: file.path, ext: file.ext, type: typeOf(file.ext) })
+    assets.push(asset)
     const previous = owners.get(guid)
     if (previous === undefined) owners.set(guid, file.path)
     else if (typeof previous === 'string') owners.set(guid, [previous, file.path])
@@ -190,6 +207,25 @@ export async function scanAssets(projectRoot, { rescan = false, budgetMs = 20_00
 
   assets.sort((left, right) => left.path.localeCompare(right.path))
 
+  // Keep the durable index current. A partial walk must not be written: it would
+  // record the un-walked half of the tree as "removed".
+  let index = null
+  if (durable && !partial) {
+    try {
+      const summary = refreshIndex(root, files)
+      index = {
+        available: summary.unavailable === null,
+        unavailable: summary.unavailable,
+        changed: summary.changed,
+        removed: summary.removed,
+        objects: summary.objects,
+        refs: summary.refs,
+      }
+    } catch (error) {
+      index = { available: false, unavailable: `index update failed: ${error?.message ?? error}`, changed: 0, removed: 0, objects: 0, refs: 0 }
+    }
+  }
+
   const scanned = {
     assets,
     broken: { missingMeta, duplicateGuids },
@@ -197,6 +233,7 @@ export async function scanAssets(projectRoot, { rescan = false, budgetMs = 20_00
     partial,
     scannedFiles: files.length,
     elapsedMs: Date.now() - startedAt,
+    index,
   }
   caches.set(root, scanned)
   return scanned

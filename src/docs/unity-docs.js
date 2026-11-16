@@ -450,12 +450,32 @@ function readIndexFile(projectRoot) {
  * 调用方传进来的 `signal`。整包读完再解析的理由见文件头：我们需要随机读中央目录与
  * 几千个条目的本地头，逐块流式解析会让状态机复杂得多，而 350 MB 对内存不是问题。
  */
-async function downloadArchive(url, { fetchImpl, signal } = {}) {
+async function downloadArchive(url, { fetchImpl, signal, onProgress = () => {} } = {}) {
   if (typeof fetchImpl !== 'function') throw new Error('no fetch implementation available')
   const response = await fetchImpl(url, { signal, redirect: 'follow' })
   const status = Number(response?.status ?? 0)
   if (!(status >= 200 && status < 300)) throw new Error(`archive download failed with HTTP ${status}`)
+  const total = Number(response?.headers?.get?.('content-length') ?? 0) || 0
+  const body = response?.body
+  // 有流就读流报进度；没有流（测试里的假 fetch、部分 HTTP/1.0 代理）退回一次性读完，
+  // 只是少了进度，不影响结果。
+  if (body && typeof body.getReader === 'function') {
+    const reader = body.getReader()
+    const chunks = []
+    let downloaded = 0
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      const chunk = Buffer.from(value)
+      chunks.push(chunk)
+      downloaded += chunk.length
+      onProgress({ downloaded, total })
+    }
+    return Buffer.concat(chunks, downloaded)
+  }
   const bytes = Buffer.from(await response.arrayBuffer())
+  // 不知道 Content-Length 时 total 留 0：进度文字会只说「已下载 X MB」。
+  onProgress({ downloaded: bytes.length, total })
   return bytes
 }
 
@@ -469,7 +489,7 @@ async function downloadArchive(url, { fetchImpl, signal } = {}) {
  * 其余情况走「下载 → 逐个条目转换 → 写 Markdown + 索引」。写到临时目录
  * `.importing`，成功后整体替换，所以导入中断不会留下半个索引。
  */
-export async function importDocs(projectRoot, { locale, version, signal, fetchImpl, force = false } = {}) {
+export async function importDocs(projectRoot, { locale, version, signal, fetchImpl, force = false, onProgress = () => {} } = {}) {
   const resolvedLocale = normalizeLocale(locale)
   const projectVersion = projectUnityVersion(projectRoot)
   const docsVersion = version === undefined || version === null || version === ''
@@ -481,6 +501,12 @@ export async function importDocs(projectRoot, { locale, version, signal, fetchIm
       version: null,
       reason: 'ProjectSettings/ProjectVersion.txt does not name a Unity version',
     }
+  }
+  // 导入开始前清掉上一次的取消标记，否则一次误点取消会让之后每次导入立刻停。
+  try {
+    rmSync(cancelPath(projectRoot), { force: true })
+  } catch {
+    // 没有标记文件是正常情况。
   }
   const existing = readIndexFile(projectRoot)
   if (!force && existing && existing.version === docsVersion && existing.locale === resolvedLocale) {
@@ -505,14 +531,26 @@ export async function importDocs(projectRoot, { locale, version, signal, fetchIm
       ...(source.tried ? { tried: source.tried } : {}),
     }
   }
-  if (signal?.aborted) return { state: 'network_error', version: docsVersion, locale: resolvedLocale, reason: 'aborted' }
+  if (signal?.aborted) return { state: 'cancelled', version: docsVersion, locale: resolvedLocale, reason: 'aborted' }
 
+  const tick = (event) => {
+    writeProgress(projectRoot, event)
+    onProgress(event)
+  }
+  const cancelled = () => signal?.aborted === true || existsSync(cancelPath(projectRoot))
+  tick({ phase: 'resolving', version: docsVersion, locale: resolvedLocale, url: source.zipUrl, downloaded: 0, total: 0 })
   let archive
   try {
-    archive = await downloadArchive(source.zipUrl, { fetchImpl, signal })
+    archive = await downloadArchive(source.zipUrl, {
+      fetchImpl,
+      signal,
+      onProgress: (event) => tick({ phase: 'downloading', version: docsVersion, locale: resolvedLocale, url: source.zipUrl, ...event }),
+    })
   } catch (error) {
+    if (cancelled()) return { state: 'cancelled', version: docsVersion, locale: resolvedLocale, reason: 'aborted' }
     return { state: 'network_error', version: docsVersion, locale: resolvedLocale, reason: messageOf(error) }
   }
+  if (cancelled()) return { state: 'cancelled', version: docsVersion, locale: resolvedLocale, reason: 'aborted' }
 
   const root = docsRoot(projectRoot)
   // staging 与 root 平级而不是在 root 里面：替换时要能 rename 目录，并且万一失败，
@@ -530,9 +568,18 @@ export async function importDocs(projectRoot, { locale, version, signal, fetchIm
     const pages = []
     let files = 0
     let skipped = 0
+    let visited = 0
+    // 每 200 个条目报一次进度：转换近三万个页面要几分钟，调用方需要能显示进度，
+    // 也需要在这里响应取消。
+    const reportEvery = 200
+    tick({ phase: 'converting', version: docsVersion, locale: resolvedLocale, converted: 0, total: entries.length, downloaded: archive.length })
     for (const entry of entries) {
-      if (signal?.aborted) {
-        return { state: 'network_error', version: docsVersion, locale: resolvedLocale, reason: 'aborted' }
+      if (cancelled()) {
+        return { state: 'cancelled', version: docsVersion, locale: resolvedLocale, reason: 'aborted' }
+      }
+      visited += 1
+      if (visited % reportEvery === 0) {
+        tick({ phase: 'converting', version: docsVersion, locale: resolvedLocale, converted: files, total: entries.length, downloaded: archive.length })
       }
       const target = classifyDocEntry(entry.name)
       if (!target) continue
@@ -555,6 +602,12 @@ export async function importDocs(projectRoot, { locale, version, signal, fetchIm
         skipped += 1
         continue
       }
+      // Unity's own pages start with an <h1> that the converter keeps, so
+      // `# <title>` alone makes every page open with its title twice. Strip the
+      // leading heading only when it demotes to the same title: a page whose
+      // first heading is a subsection keeps it, and a different first heading is
+      // real content rather than a duplicate.
+      page = { ...page, markdown: stripRepeatedTitle(page.markdown, page.title) }
       const output = resolveInside(staging, target)
       mkdirSync(dirname(output), { recursive: true })
       writeFileSync(output, `# ${page.title}\n\n${page.markdown}\n`, 'utf8')
@@ -586,11 +639,126 @@ export async function importDocs(projectRoot, { locale, version, signal, fetchIm
     if (existsSync(root)) renameSync(root, previous)
     renameSync(staging, root)
     rmSync(previous, { recursive: true, force: true })
+    clearProgress(projectRoot)
     return { state: 'imported', version: docsVersion, locale: resolvedLocale, files, bytes: archive.length, skipped }
   } finally {
     // 成功时 staging 已被 rename 走；失败/中断时在这里清掉半成品，旧索引不受影响。
     rmSync(staging, { recursive: true, force: true })
   }
+}
+
+/**
+ * Drop the leading `# <title>` line when it repeats the page title.
+ *
+ * Returns the markdown unchanged when the first heading differs, so this only
+ * ever removes a duplicate. Any other heading level counts as content.
+ */
+function stripRepeatedTitle(markdown, title) {
+  const lines = markdown.split('\n')
+  let index = 0
+  while (index < lines.length && lines[index].trim() === '') index += 1
+  if (index >= lines.length) return markdown
+  const first = lines[index].trim()
+  if (!first.startsWith('# ')) return markdown
+  const heading = first.slice(2).replace(/\s+#+$/, '').trim()
+  const normalise = (text) => text.replace(/\s+/g, ' ').trim().toLowerCase()
+  if (normalise(heading) !== normalise(title)) return markdown
+  lines.splice(index, 1)
+  while (index < lines.length && lines[index].trim() === '') lines.splice(index, 1)
+  return lines.join('\n')
+}
+
+/** 进行中的导入标记。
+ *
+ * 导入是用户主动触发的长任务（350 MB + 近三万个页面，几分钟）。DSH 的工具调用不会
+ * 永久占着会话，所以「状态」必须能在下一次调用里读到：进度写进
+ * `Library/Locus/unity-docs.progress.json`，导入结束时删掉。取消则通过
+ * `<project>/Library/Locus/unity-docs.cancel` 这个标记文件跨调用传递——标记文件存在
+ * 时，正在跑的导入在下一次循环里停下（`importDocs` 的 `signal` 之外的第二条路，
+ * 因为取消发生在另一次工具调用里，拿不到第一次调用的 AbortSignal）。
+ */
+export const DOCS_PROGRESS_FILE = 'unity-docs.progress.json'
+export const DOCS_CANCEL_FILE = 'unity-docs.cancel'
+
+function progressPath(projectRoot) {
+  return join(docsRoot(projectRoot), DOCS_PROGRESS_FILE)
+}
+
+function cancelPath(projectRoot) {
+  return join(docsRoot(projectRoot), DOCS_CANCEL_FILE)
+}
+
+function writeProgress(projectRoot, event) {
+  try {
+    mkdirSync(docsRoot(projectRoot), { recursive: true })
+    const previous = readProgressFile(projectRoot) ?? {}
+    const merged = { ...previous, ...event, updatedAt: new Date().toISOString() }
+    // 进度文件只该描述「正在发生什么」：保留 startedAt，丢弃上一阶段的大字段。
+    if (event.phase === 'downloading' && !merged.startedAt) merged.startedAt = merged.updatedAt
+    writeFileSync(progressPath(projectRoot), `${JSON.stringify(merged)}\n`, 'utf8')
+  } catch {
+    // 进度是附带信息，写不进去不能打断导入本身。
+  }
+}
+
+function readProgressFile(projectRoot) {
+  try {
+    const parsed = JSON.parse(readFileSync(progressPath(projectRoot), 'utf8'))
+    return parsed && typeof parsed === 'object' ? parsed : null
+  } catch {
+    return null
+  }
+}
+
+function clearProgress(projectRoot) {
+  for (const target of [progressPath(projectRoot), cancelPath(projectRoot)]) {
+    try {
+      rmSync(target, { force: true })
+    } catch {
+      // 删不掉也只会让状态里多一条陈旧的进度，不影响数据。
+    }
+  }
+}
+
+/** 当前是否有导入在进行（以及它的进度）。 */
+export function docsImportState(projectRoot) {
+  const progress = readProgressFile(projectRoot)
+  if (!progress) return { running: false, cancelRequested: false, progress: null }
+  // 没有进程在跑时进度文件是陈旧的（例如进程被强杀）：把它如实报出来，但标成 stale，
+  // 让调用方知道「导入正在跑」这个结论只在文件新鲜时成立。
+  //
+  // 取消文件在场时永远不算「在跑」：导入每个检查点都会看它，看到就立刻返回
+  // cancelled，所以「刚下完、正在转换」这个阶段剩下的唯一一件事就是退出。继续
+  // 声称 importing 会让界面永远停在一根不会再动的进度条上。
+  let stale = false
+  try {
+    const age = Date.now() - Number(progress.updatedAt ? Date.parse(progress.updatedAt) : 0)
+    stale = !Number.isFinite(age) || age > 10 * 60 * 1000
+  } catch {
+    stale = true
+  }
+  const cancelRequested = existsSync(cancelPath(projectRoot))
+  return { running: !stale && !cancelRequested, cancelRequested, progress, stale }
+}
+
+/** 请求取消正在进行的导入；下一次工具调用时生效。 */
+export function requestDocsCancel(projectRoot) {
+  mkdirSync(docsRoot(projectRoot), { recursive: true })
+  writeFileSync(cancelPath(projectRoot), new Date().toISOString(), 'utf8')
+  return { cancelRequested: true, file: cancelPath(projectRoot) }
+}
+
+/**
+ * 删除已导入的文档。
+ *
+ * 与导入一样是显式动作：删掉 Markdown 与索引，`Library/Locus` 其余内容不动。返回删除
+ * 的页数，便于调用方确认自己删掉的是哪一份（版本、语言）。
+ */
+export function deleteDocs(projectRoot) {
+  const status = docsStatus(projectRoot)
+  const root = docsRoot(projectRoot)
+  rmSync(root, { recursive: true, force: true })
+  return { deleted: status.imported, version: status.version ?? null, locale: status.locale ?? null, files: status.files ?? 0, root }
 }
 
 function messageOf(error) {
@@ -636,6 +804,32 @@ export function docsStatus(projectRoot) {
     files: typeof index.files === 'number' ? index.files : index.pages.length,
     updatedAt: index.updatedAt ?? null,
   }
+}
+
+/**
+ * 进度文字：调用方在 status 里看到的「正在下载 41%」就是这里生成的。
+ *
+ * 百分比只在知道总字节时给出；中文包与英文包的 Content-Length 都可靠，但没有时
+ * 宁可只报已下载量，也不编一个分母。
+ */
+export function formatDocsProgress(progress) {
+  if (!progress) return null
+  const phase = String(progress.phase ?? '')
+  if (phase === 'converting') {
+    const done = Number(progress.converted ?? 0)
+    const total = Number(progress.total ?? 0)
+    const percent = total > 0 ? Math.floor((done / total) * 100) : null
+    return `converting ${done}/${total} page(s)${percent === null ? '' : ` (${percent}%)`}`
+  }
+  if (phase === 'downloading') {
+    const downloaded = Number(progress.downloaded ?? 0)
+    const total = Number(progress.total ?? 0)
+    const mb = (downloaded / (1024 * 1024)).toFixed(1)
+    const percent = total > 0 ? Math.floor((downloaded / total) * 100) : null
+    return percent === null ? `downloaded ${mb} MB` : `downloaded ${mb} MB of ${(total / (1024 * 1024)).toFixed(1)} MB (${percent}%)`
+  }
+  if (phase === 'resolving') return 'resolving the documentation package'
+  return null
 }
 
 /**

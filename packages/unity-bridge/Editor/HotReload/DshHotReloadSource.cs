@@ -1,4 +1,5 @@
 using System;
+using System.IO;
 using System.Collections.Generic;
 using System.Reflection;
 using System.Threading.Tasks;
@@ -28,6 +29,7 @@ namespace DshBridge.HotReload
         internal const string ApplyMessage = "dsh_hot_reload_apply";
         internal const string StatusMessage = "dsh_hot_reload_status";
         internal const string DisposeMessage = "dsh_hot_reload_dispose";
+        internal const string CompiledTextMessage = "dsh_hot_reload_compiled_text";
 
         private static DshHotReloadSource _instance;
 
@@ -53,6 +55,7 @@ namespace DshBridge.HotReload
                 new DshBridgeBootstrap.MessageHandler { MessageType = ApplyMessage, Handler = HandleApply },
                 new DshBridgeBootstrap.MessageHandler { MessageType = StatusMessage, Handler = HandleStatus },
                 new DshBridgeBootstrap.MessageHandler { MessageType = DisposeMessage, Handler = HandleDispose },
+                new DshBridgeBootstrap.MessageHandler { MessageType = CompiledTextMessage, Handler = HandleCompiledText },
             };
         }
 
@@ -135,6 +138,67 @@ namespace DshBridge.HotReload
             catch (Exception ex)
             {
                 return Task.FromResult(HotReloadDtos.Error("status failed: " + ex.Message));
+            }
+        }
+
+        /// <summary>
+        /// 读一个脚本“当前域编译时用到的源码”。
+        ///
+        /// 热补丁要做的差分是「域里的代码」→「磁盘上的文本」。编辑器自己不会保留
+        /// 旧源码，但 `AssetPostprocessor.GetPostprocessOrder` 之类的钩子也不可靠，
+        /// 所以这里只在**文本资产**上回答问题：从 `AssetDatabase` 取到脚本文件实例
+        /// （不是 `.asset`、不是二进制），读出它的文本。读不到时如实报错，让调用方
+        /// 退回「跳过这次热补丁、要求重编译」，而不是拿磁盘文本冒充旧版本把文件补丁
+        /// 到它自身。
+        /// </summary>
+        private static Task<string> HandleCompiledText(string requestJson)
+        {
+            try
+            {
+                HotReloadDtos.CompiledTextRequest request = HotReloadDtos.Parse<HotReloadDtos.CompiledTextRequest>(requestJson);
+                string path = request != null ? request.path : null;
+                if (string.IsNullOrEmpty(path))
+                    return Task.FromResult(HotReloadDtos.Error("dsh_hot_reload_compiled_text expects a \"path\""));
+                if (!path.StartsWith("Assets/", StringComparison.Ordinal) && !path.StartsWith("Packages/", StringComparison.Ordinal))
+                    return Task.FromResult(HotReloadDtos.Error("the compiled text of " + path + " is only available for Assets/ or Packages/ paths"));
+                string absolute = Path.Combine(Directory.GetCurrentDirectory(), path);
+                if (!File.Exists(absolute))
+                    return Task.FromResult(HotReloadDtos.Error("the Editor has no compiled text for " + path + ": the file is gone"));
+                // The disk file is NOT the compiled text: the domain was compiled
+                // from whatever the file said last reload, and reading the current
+                // file would make the diff empty by construction. What the editor
+                // actually has is the last text this package saw while the domain
+                // was live -- recorded by the classifier, which is the only code
+                // that reads the file on the editor's side.
+                //
+                // 本域第一次被问到时还没有任何调用读过它：先拿磁盘文本作为「本域
+                // 起始文本」记下来，再按正常路径回答。这是诚实的一步——域刚编译完，
+                // 磁盘上的内容就是它编译的内容（同一份文件、同一个域）。真正想要
+                // 「编辑后未重编译」的差分，靠的是之后每次分类把磁盘文本记成新基线；
+                // 编辑发生在基线之后时，差分才非空（见 src/hotreload.js 的
+                // asRevisionPair）。
+                //
+                // 但磁盘文本只有「本域刚编译过、之后没人再改过」时才算数：一次未重编译
+                // 的编辑之后，磁盘已经不是域里的代码了。所以这里自带一条保守规则——
+                // 磁盘文本与上次记录不同，就报 imported：「文件变了但域没重载」，这是
+                // 真实的热补丁窗口，而不是可以当成旧版本回答的东西。之后分类会重新
+                // 记录基线，本次编辑自然退回重编译，下一次编辑才可能被补丁。
+                string text = DshHotReloadRegistry.CompiledText(path);
+                if (text == null)
+                {
+                    text = File.ReadAllText(absolute);
+                    DshHotReloadRegistry.RecordCompiledText(path, text);
+                }
+                else if (!string.Equals(text, File.ReadAllText(absolute), StringComparison.Ordinal))
+                {
+                    return Task.FromResult(HotReloadDtos.Error(
+                        "the Editor has no recorded compiled text for " + path + ": the file changed but the domain has not been reloaded since"));
+                }
+                return Task.FromResult(HotReloadDtos.ToJson(new HotReloadDtos.CompiledTextResponse { path = path, text = text }));
+            }
+            catch (Exception ex)
+            {
+                return Task.FromResult(HotReloadDtos.Error("compiled text failed: " + ex.Message));
             }
         }
 

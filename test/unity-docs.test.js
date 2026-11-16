@@ -18,8 +18,11 @@ import {
   cleanMarkdown,
   convertHtmlPage,
   deriveDocsVersion,
+  deleteDocs,
+  docsImportState,
   docsRoot,
   docsStatus,
+  formatDocsProgress,
   extractMainHtml,
   extractSummary,
   extractTitle,
@@ -28,6 +31,7 @@ import {
   normalizeLocale,
   projectUnityVersion,
   readDoc,
+  requestDocsCancel,
   resolveDocPath,
   resolveOfflineSource,
   searchDocs,
@@ -680,4 +684,113 @@ test('an index without its directory is reported as not imported', async (t) => 
   // decides, and it never throws.
   assert.equal(docsStatus(root).imported, false)
   assert.deepEqual(searchDocs(root, { query: 'Transform' }), [])
+})
+
+// ---------------------------------------------------------------------------
+// 进度 / 取消 / 删除（对应上游 unity_docs.rs 的导入状态机）
+// ---------------------------------------------------------------------------
+
+test('importDocs reports download and conversion progress', async (t) => {
+  const root = projectFixture(t)
+  const { fetchImpl } = makeFetch(makeZip(SAMPLE_PAGES))
+  const events = []
+  const result = await importDocs(root, { fetchImpl, onProgress: (event) => events.push(event) })
+  assert.equal(result.state, 'imported')
+  const phases = events.map((event) => event.phase)
+  assert.deepEqual([...new Set(phases)], ['resolving', 'downloading', 'converting'])
+  // 下载阶段必须报字节数：status 里的 "41%" 就是从这两个字段算的。
+  const last = events.filter((event) => event.phase === 'downloading').at(-1)
+  // 假 fetch 是个一次性的 Response：没有流也没有 Content-Length，所以 total 为 0，
+  // 进度只能报「已下载多少」——这正是 formatDocsProgress 的降级分支。
+  assert.ok(last.downloaded > 0)
+  assert.equal(last.total, 0)
+  assert.match(formatDocsProgress(last), /downloaded .* MB$/)
+  // 转换完成时进度文件被清掉：一次成功的导入不该留下「正在导入」的假状态。
+  assert.equal(docsImportState(root).running, false)
+})
+
+test('an imported page does not open with its title twice', async (t) => {
+  const root = projectFixture(t)
+  const { fetchImpl } = makeFetch(makeZip(SAMPLE_PAGES))
+  assert.equal((await importDocs(root, { fetchImpl })).state, 'imported')
+  // Unity's own pages begin with an <h1> that the converter keeps, so writing
+  // "# title" above it used to produce "# Introduction to 2D" followed by
+  // "# Introduction to 2D" on every single page.
+  const page = readDoc(root, { path: 'manual/2D-introduction.md' })
+  // readDoc prepends its own "# title"; the body must not repeat it below.
+  const headings = page.markdown.split('\n').map((line) => line.trim()).filter((line) => line === '# Introduction to 2D')
+  assert.equal(headings.length, 1, 'the title appears as a heading exactly once')
+  assert.equal(page.markdown.trim().split('\n')[0], '# Introduction to 2D')
+  assert.match(page.markdown, /You can use Unity to create/)
+})
+
+test('a cancel request stops the import and leaves the previous index alone', async (t) => {
+  const root = projectFixture(t)
+  const zip = makeZip(SAMPLE_PAGES)
+  assert.equal((await importDocs(root, { fetchImpl: makeFetch(zip).fetchImpl })).state, 'imported')
+  const before = readFileSync(join(docsRoot(root), 'index.json'), 'utf8')
+
+  // 取消不是「先点取消再导入」：那是下一次导入，标记会被清掉。真实场景是另一次
+  // 工具调用在导入跑到一半时写下标记，所以这里让 fetch 在下载途中点取消。
+  const lateCancel = async (url) => {
+    const response = await makeFetch(zip).fetchImpl(url)
+    if (!String(url).includes('OfflineDocumentation.html')) requestDocsCancel(root)
+    return response
+  }
+  const result = await importDocs(root, { fetchImpl: lateCancel, force: true })
+  // 取消发生在下载之后的检查点：状态如实说 cancelled，而不是 network_error。
+  assert.equal(result.state, 'cancelled')
+  assert.equal(readFileSync(join(docsRoot(root), 'index.json'), 'utf8'), before)
+})
+
+test('a stale cancel file does not block the next import', async (t) => {
+  const root = projectFixture(t)
+  const zip = makeZip(SAMPLE_PAGES)
+  requestDocsCancel(root)
+  // 导入开始时会清掉旧标记：上一次被取消不应该让之后每次导入立刻失败。
+  assert.equal((await importDocs(root, { fetchImpl: makeFetch(zip).fetchImpl })).state, 'imported')
+  assert.equal(docsImportState(root).cancelRequested, false)
+})
+
+test('docsImportState reports what is running and flags a stale record', (t) => {
+  const root = projectFixture(t)
+  mkdirSync(docsRoot(root), { recursive: true })
+  writeFileSync(join(docsRoot(root), 'unity-docs.progress.json'), JSON.stringify({ phase: 'converting', converted: 500, total: 2000, updatedAt: new Date().toISOString() }))
+  const live = docsImportState(root)
+  assert.equal(live.running, true)
+  assert.match(formatDocsProgress(live.progress), /converting 500\/2000 page\(s\) \(25%\)/)
+
+  writeFileSync(join(docsRoot(root), 'unity-docs.progress.json'), JSON.stringify({ phase: 'downloading', downloaded: 1024, total: 4096, updatedAt: new Date(Date.now() - 60 * 60 * 1000).toISOString() }))
+  const stale = docsImportState(root)
+  assert.equal(stale.running, false)
+  assert.equal(stale.stale, true)
+  assert.match(formatDocsProgress(stale.progress), /1\.0 KB|0\.0 MB/)
+})
+
+test('a cancel request ends the importing state instead of leaving a dead progress bar', (t) => {
+  const root = projectFixture(t)
+  mkdirSync(docsRoot(root), { recursive: true })
+  // The exact moment this regressed against: the archive has landed and the
+  // import is converting, so the progress record is fresh and still says
+  // "converting" — but the cancel file is already on disk and the importer's
+  // next checkpoint returns immediately.
+  writeFileSync(join(docsRoot(root), 'unity-docs.progress.json'), JSON.stringify({ phase: 'converting', converted: 500, total: 2000, updatedAt: new Date().toISOString() }))
+  requestDocsCancel(root)
+  const state = docsImportState(root)
+  assert.equal(state.running, false, 'a cancelled import is not still running')
+  assert.equal(state.cancelRequested, true)
+  assert.equal(state.stale, false, 'the record is fresh; it is cancelled, not abandoned')
+  assert.match(formatDocsProgress(state.progress), /converting 500\/2000/)
+})
+
+test('deleteDocs removes the imported documentation and says what it removed', async (t) => {
+  const root = projectFixture(t)
+  assert.equal((await importDocs(root, { fetchImpl: makeFetch(makeZip(SAMPLE_PAGES)).fetchImpl })).state, 'imported')
+  assert.equal(docsStatus(root).imported, true)
+  const removed = deleteDocs(root)
+  assert.equal(removed.deleted, true)
+  assert.ok(removed.files > 0)
+  assert.equal(docsStatus(root).imported, false)
+  // 再删一次不是错误，只是没什么可删。
+  assert.equal(deleteDocs(root).deleted, false)
 })

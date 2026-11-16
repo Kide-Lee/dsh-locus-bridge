@@ -29,7 +29,7 @@
 // 调用方回退，而不是假装编译成功。
 
 import { spawn } from 'node:child_process'
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -37,6 +37,14 @@ import { LspProtocolError, LspReader, encodeLspMessage } from './lsp-protocol.js
 
 /** 空闲多久回收编译进程（与上游 `compile_idle_timeout_secs` 同值 600 秒）。 */
 export const SIDECAR_IDLE_TIMEOUT_MS = 600_000
+/**
+ * 常驻（pinned）进程的空闲回收时限。
+ *
+ * 常驻是一种**租约**而不是"永不退出"：插件进程被 DSH 换掉时没人会写文件解除它，
+ * 那个 .NET 进程就会永远占着几百 MB。所以常驻只是把回收窗口从 10 分钟拉长到
+ * {@link SIDECAR_PINNED_IDLE_TIMEOUT_MS}；调一次用一次就把租约续上。
+ */
+export const SIDECAR_PINNED_IDLE_TIMEOUT_MS = 8 * 60 * 60 * 1000
 /** 同时保留的编译进程上限；超出时淘汰最久未用的。 */
 export const SIDECAR_MAX_WORKSPACES = 8
 /** 进程启动到 `initialize` 应答的时限。冷启动要加载 Roslyn，留足余量。 */
@@ -76,7 +84,20 @@ export class SidecarError extends Error {
   }
 }
 
-/** projectRoot → { connection, lastUsed, starting, build } */
+/**
+ * 常驻租约：`Library/Locus/compile-sidecar.json`。
+ *
+ * DSH 插件不能保证进程比用户的项目活得久，而"编译服务一直热着"恰好要求跨调用、
+ * 最好跨会话复用同一个 .NET 进程。做法是把租约写在项目的 `Library/` 里：文件在，
+ * 空闲窗口就是 {@link SIDECAR_PINNED_IDLE_TIMEOUT_MS}；谁来调用都先把里面的 `touched_at`
+ * 和 `pid` 续上。宿主没了、文件过期、或 `pid` 已经不是我们的进程，租约就自动失效，
+ * 不需要任何清理进程。
+ */
+export const RESIDENCY_FILE = 'compile-sidecar.json'
+/** 租约多久没被续过就作废。比 pinned 窗口略宽，留一次调用的余量。 */
+export const RESIDENCY_TTL_MS = SIDECAR_PINNED_IDLE_TIMEOUT_MS + 60 * 60 * 1000
+
+/** projectRoot → { connection, lastUsed, starting, build, pinned } */
 const pool = new Map()
 let reaper = null
 /** 与 `reaper` 配对创建的那个 `clearInterval`。 */
@@ -281,7 +302,7 @@ export async function ensureSidecar(projectRoot = null, { env = process.env, bui
   // 淘汰排在落池之后：`evictIfNeeded()` 有 `await`，放在前面的话两个并发调用都会
   // 先腾位置、再各自 `pool.set()`，去重就失效了。落池之后新条目自己也在候选里，所以
   // 淘汰条件必须是"多于 N 个"（`>`）而不是"满 N 个"（`>=`）。
-  const entry = { connection: null, lastUsed: Date.now(), starting: null }
+  const entry = { connection: null, lastUsed: Date.now(), starting: null, pinned: false }
   pool.set(key, entry)
   // 分开两步赋值：`evictIfNeeded()` 会 `await`，那段窗口里并发的第二个调用必须看到
   // `starting` 已经就位，否则它会以为"没人起这个进程"而再起一个。
@@ -460,7 +481,8 @@ function startReaper() {
     const now = Date.now()
     for (const [key, entry] of pool) {
       if (entry.starting) continue
-      if (now - entry.lastUsed < SIDECAR_IDLE_TIMEOUT_MS) continue
+      const window = entry.pinned ? SIDECAR_PINNED_IDLE_TIMEOUT_MS : SIDECAR_IDLE_TIMEOUT_MS
+      if (now - entry.lastUsed < window) continue
       pool.delete(key)
       Promise.resolve(entry.connection?.close?.()).catch(() => {})
     }
@@ -576,6 +598,197 @@ export async function compileRunStates(projectRoot, request, { timeoutMs = COMPI
 }
 
 /** 关闭一个或全部编译进程；返回关掉的 key。 */
+/**
+ * 把某个工作区的编译进程标成常驻，并把租约写进 `Library/Locus/compile-sidecar.json`。
+ *
+ * 常驻**不**意味着永不退出（见 {@link SIDECAR_PINNED_IDLE_TIMEOUT_MS}）：它只是把空闲窗口
+ * 从 10 分钟拉到 8 小时，每次经由 `ensureSidecar()` 的调用都会把这个窗口续上。
+ * 进程已经在跑就直接转常驻，没跑就起一个。
+ */
+export async function pinSidecar(projectRoot, { env = process.env } = {}) {
+  if (!projectRoot) throw new SidecarError('pinSidecar needs a project root.', { code: 'invalid_params' })
+  const key = normalizeRoot(projectRoot)
+  const { service, dotnetVersion: version, pid } = await ensureSidecar(projectRoot, { env })
+  const entry = pool.get(key)
+  if (entry) entry.pinned = true
+  const lease = {
+    version: 1,
+    pid: pid ?? null,
+    dotnet_version: version ?? null,
+    assembly: compilerAssemblyPath(),
+    touched_at: new Date().toISOString(),
+    ttl_ms: RESIDENCY_TTL_MS,
+  }
+  const file = join(projectRoot, 'Library', 'Locus', RESIDENCY_FILE)
+  try {
+    mkdirSync(dirname(file), { recursive: true })
+    writeFileSync(file, `${JSON.stringify(lease, null, 2)}\n`)
+  } catch {
+    // 写不了租约不是失败：进程已经在跑，只是这个会话结束后它会按普通空闲回收。
+  }
+  return { pinned: true, pid: service?.pid ?? null, file, lease }
+}
+
+/** 取消常驻：删掉租约并把空闲窗口退回 10 分钟（进程本身继续服务）。 */
+export async function unpinSidecar(projectRoot) {
+  const key = normalizeRoot(projectRoot)
+  const entry = pool.get(key)
+  if (entry) entry.pinned = false
+  const file = join(projectRoot, 'Library', 'Locus', RESIDENCY_FILE)
+  let removed = false
+  try {
+    rmSync(file, { force: true })
+    removed = true
+  } catch {
+    // ignore
+  }
+  return { pinned: false, removed, file }
+}
+
+/**
+ * 租约现在是否有效：文件在、没过期、且里面的 pid 还活着。
+ *
+ * `pid` 已经不在了就是"上次会话留下的文件"——那种情况必须报无效，否则我们会
+ * 一直以为有进程在给这个项目加速。
+ */
+export function readResidency(projectRoot, { now = Date.now(), alive = isProcessAlive } = {}) {
+  const file = join(projectRoot ?? '', 'Library', 'Locus', RESIDENCY_FILE)
+  let lease
+  try {
+    lease = JSON.parse(readFileSync(file, 'utf8'))
+  } catch {
+    return { pinned: false, file, lease: null, reason: 'no lease' }
+  }
+  const touched = Date.parse(String(lease?.touched_at ?? ''))
+  if (!Number.isFinite(touched)) return { pinned: false, file, lease, reason: 'lease has no timestamp' }
+  const ttl = Number.isFinite(Number(lease?.ttl_ms)) ? Number(lease.ttl_ms) : RESIDENCY_TTL_MS
+  if (now - touched > ttl) return { pinned: false, file, lease, reason: 'lease expired' }
+  const pid = Number(lease?.pid)
+  if (Number.isSafeInteger(pid) && pid > 0 && !alive(pid)) {
+    return { pinned: false, file, lease, reason: `pid ${pid} is gone` }
+  }
+  const key = normalizeRoot(projectRoot)
+  const keyed = pool.get(key)
+  return { pinned: true, file, lease, reason: null, attached: Boolean(keyed?.connection?.connected) }
+}
+
+/** 进程是否还在（`kill(pid, 0)`），用于租约的存活判断。 */
+function isProcessAlive(pid) {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (error) {
+    return error?.code === 'EPERM'
+  }
+}
+
+/**
+ * 直接问常驻的编译服务要这个项目的编译参数（引用集、define、语言版本）。
+ *
+ * 上游的 `get_compile_params` 走 Unity 桥；这里走我们自己的 sidecar，
+ * 所以编辑器不在线时也能拿到一套可用的参数——这是热补丁能脱离 Unity 分析的前提。
+ */
+export async function compileParams(projectRoot, { env = process.env } = {}) {
+  if (!projectRoot) throw new SidecarError('compileParams needs a project root.', { code: 'invalid_params' })
+  const { service } = await ensureSidecar(projectRoot, { env })
+  let result
+  try {
+    result = await service.request('compile/params', { project_root: normalizeRoot(projectRoot) }, { timeoutMs: COMPILE_TIMEOUT_MS })
+  } catch (error) {
+    if (error instanceof SidecarError) throw error
+    throw new SidecarUnavailable(`the compile sidecar stopped answering: ${error.message}`, { code: 'start_failed' })
+  }
+  const key = normalizeRoot(projectRoot)
+  if (pool.has(key)) pool.get(key).lastUsed = Date.now()
+  return {
+    referencePaths: Array.isArray(result?.reference_paths) ? result.reference_paths.map(String) : [],
+    defines: Array.isArray(result?.defines) ? result.defines.map(String) : [],
+    langVersion: typeof result?.lang_version === 'string' ? result.lang_version : null,
+    allowUnsafe: Boolean(result?.allow_unsafe),
+    origin: typeof result?.origin === 'string' ? result.origin : null,
+  }
+}
+
+/**
+ * 分析一批编辑能不能热打补丁（只分析，不编译）。
+ *
+ * `files` 是 `[{path, oldText, newText}]`；返回值告诉我们哪些文件是"方法体级别
+ * 的编辑"、哪些方法可以替换。这是纯函数式的——同一个输入永远得到同一个答案，
+ * 所以调用方可以先分析再决定要不要真的打。
+ */
+export async function hotDiff(projectRoot, files, { env = process.env } = {}) {
+  if (!Array.isArray(files) || files.length === 0) {
+    throw new SidecarError('hotDiff needs at least one edited file.', { code: 'invalid_params' })
+  }
+  const { service } = await ensureSidecar(projectRoot, { env })
+  const params = { project_root: normalizeRoot(projectRoot ?? ''), files }
+  let result
+  try {
+    result = await service.request('analyze/hotDiff', params, { timeoutMs: COMPILE_TIMEOUT_MS })
+  } catch (error) {
+    if (error instanceof SidecarError) throw error
+    throw new SidecarUnavailable(`the compile sidecar stopped answering: ${error.message}`, { code: 'start_failed' })
+  }
+  const key = normalizeRoot(projectRoot ?? '')
+  if (pool.has(key)) pool.get(key).lastUsed = Date.now()
+  return {
+    hot: Boolean(result?.hot),
+    files: Array.isArray(result?.files)
+      ? result.files.map((file) => ({
+          path: String(file?.path ?? ''),
+          hot: Boolean(file?.hot),
+          reason: typeof file?.reason === 'string' ? file.reason : null,
+          methods: Array.isArray(file?.methods) ? file.methods.map(normalizePatchMethod) : [],
+          addedTypes: Array.isArray(file?.added_types) ? file.added_types.map(String) : [],
+          addedFields: Array.isArray(file?.added_fields) ? file.added_fields.map(String) : [],
+        }))
+      : [],
+  }
+}
+
+/** 编译补丁程序集（`compile/hotPatch`），返回程序集字节与需要登记的补丁方法。 */
+export async function hotPatch(projectRoot, edits, { env = process.env } = {}) {
+  if (!Array.isArray(edits) || edits.length === 0) {
+    throw new SidecarError('hotPatch needs at least one edit.', { code: 'invalid_params' })
+  }
+  const { service } = await ensureSidecar(projectRoot, { env })
+  let result
+  try {
+    result = await service.request(
+      'compile/hotPatch',
+      { project_root: normalizeRoot(projectRoot ?? ''), files: edits },
+      { timeoutMs: COMPILE_TIMEOUT_MS },
+    )
+  } catch (error) {
+    if (error instanceof SidecarError) throw error
+    throw new SidecarUnavailable(`the compile sidecar stopped answering: ${error.message}`, { code: 'start_failed' })
+  }
+  const key = normalizeRoot(projectRoot ?? '')
+  if (pool.has(key)) pool.get(key).lastUsed = Date.now()
+  return {
+    ok: Boolean(result?.ok),
+    error: typeof result?.error === 'string' ? result.error : null,
+    assemblyB64: typeof result?.assembly_b64 === 'string' ? result.assembly_b64 : null,
+    assemblyName: typeof result?.assembly_name === 'string' ? result.assembly_name : null,
+    methods: Array.isArray(result?.methods) ? result.methods.map(normalizePatchMethod) : [],
+    diagnostics: Array.isArray(result?.diagnostics) ? result.diagnostics.map(normalizeDiagnostic) : [],
+    addedTypes: Array.isArray(result?.added_types) ? result.added_types.map(String) : [],
+  }
+}
+
+/** 一个补丁方法：原方法签名 + 承载它的补丁类型。 */
+function normalizePatchMethod(method) {
+  return {
+    declaringType: String(method?.declaring_type ?? method?.DeclaringType ?? ''),
+    patchDeclaringType: String(method?.patch_declaring_type ?? method?.PatchDeclaringType ?? ''),
+    name: String(method?.name ?? method?.Name ?? ''),
+    paramTypeNames: Array.isArray(method?.param_type_names) ? method.param_type_names.map(String) : [],
+    isStatic: Boolean(method?.is_static ?? method?.IsStatic),
+    isCtor: Boolean(method?.is_ctor ?? method?.IsCtor),
+    originalAssembly: typeof method?.original_assembly === 'string' ? method.original_assembly : null,
+  }
+}
+
 export async function shutdownSidecar(projectRoot = null) {
   const targets = projectRoot ? [normalizeRoot(projectRoot)] : [...pool.keys()]
   const closed = []

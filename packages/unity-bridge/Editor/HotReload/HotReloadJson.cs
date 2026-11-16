@@ -45,6 +45,19 @@ namespace DshBridge.HotReload
             public string patch_id;
         }
 
+        /// <summary><c>dsh_hot_reload_compiled_text</c>：要读哪个脚本。</summary>
+        internal sealed class CompiledTextRequest
+        {
+            public string path;
+        }
+
+        /// <summary>编译文本的答案。序列化器走公开字段，所以不能用匿名类型。</summary>
+        internal sealed class CompiledTextResponse
+        {
+            public string path;
+            public string text;
+        }
+
         // ───────────────── 方法身份 ─────────────────
 
         /// <summary>

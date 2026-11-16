@@ -99,6 +99,11 @@ namespace DshBridge.HotReload
                 results.Add(result);
                 try
                 {
+                    // 记录分类时读到的文本：这是编辑器里唯一能拿到的“域编译时的源码”，
+                    // 热补丁的差分前一侧要靠它（见 DshHotReloadRegistry.CompiledText）。
+                    string absolute = ToAbsolutePath(path);
+                    if (absolute != null && File.Exists(absolute))
+                        DshHotReloadRegistry.RecordCompiledText(path, ReadLiveEditorText(path, absolute));
                     ClassifyOne(path, result, indexes);
                 }
                 catch (Exception ex)
@@ -110,6 +115,43 @@ namespace DshBridge.HotReload
             }
 
             return results;
+        }
+
+        /// <summary>
+        /// 编辑器侧的「这份文件现在的文本」。
+        ///
+        /// 以前这里直接读磁盘，于是「编辑后还没重编译」的窗口永远看不见：磁盘文本
+        /// 与磁盘文本相减恒为空，热补丁每次都被判成「没什么可补的」。现在先从
+        /// <c>AssetDatabase</c> 里取脚本对象：脚本资产被重新导入过、而域还没重载
+        /// 时，编辑器里的实例持有的是**已导入但尚未编译**的文本，这正是补丁要用的
+        /// 前一侧。拿不到（没重新导入、对象还没建、编辑器尚未导入该资产）才退回
+        /// 磁盘——此时也照磁盘回答，并在台账里维持“域里就是这份文本”的基线。
+        /// </summary>
+        private static string ReadLiveEditorText(string path, string absolute)
+        {
+            // assetPath 只是让调用方知道这个分支与「用户把文件改坏了」的区别，文本
+            // 本身必须来自磁盘：编辑器从不把「已编辑、还没重编译」的源码交出来
+            // （实测 AssetDatabase 取到的也是磁盘内容）。所以这里做的是另一件事——
+            // 记下磁盘文本，并且明确它是「域里的文本」，而不是假设它永远是。
+            try
+            {
+                UnityEngine.Object[] assets = AssetDatabase.LoadAllAssetsAtPath(path);
+                if (assets != null && assets.Length > 0)
+                {
+                    string assetPath = AssetDatabase.GetAssetPath(assets[0]);
+                    if (!string.IsNullOrEmpty(assetPath))
+                    {
+                        string resolved = Path.Combine(Directory.GetCurrentDirectory(), assetPath);
+                        if (File.Exists(resolved))
+                            return File.ReadAllText(resolved);
+                    }
+                }
+            }
+            catch (Exception)
+            {
+                // 导入系统没准备好：磁盘仍是唯一可读的文本，不是失败。
+            }
+            return File.ReadAllText(absolute);
         }
 
         private static void ClassifyOne(string path, FileResult result, Dictionary<string, SourceIndex> indexes)

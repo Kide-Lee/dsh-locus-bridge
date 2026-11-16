@@ -1027,6 +1027,106 @@ export function projectRelativePath(projectRoot, absolute) {
   return relative(resolve(projectRoot), resolve(absolute)).split(sep).join('/')
 }
 
+/** `1998-12-31 23:59:59` for a file, or `unknown` when it cannot be stat'ed. */
+function describeDiskTime(absolute) {
+  try {
+    const stamp = statSync(absolute).mtime
+    const pad = (value) => String(value).padStart(2, '0')
+    return `${stamp.getFullYear()}-${pad(stamp.getMonth() + 1)}-${pad(stamp.getDate())} ${pad(stamp.getHours())}:${pad(stamp.getMinutes())}:${pad(stamp.getSeconds())}`
+  } catch {
+    return 'unknown'
+  }
+}
+
+/**
+ * Render one editor object from the live snapshot in the same shape the disk
+ * renderer produces, so the two sources can be compared field by field.
+ *
+ * `fields` is `[{name, type, value, reference?, size?, children?}]` from
+ * `dsh_live_read`. Returns null when the snapshot has nothing for this object.
+ */
+export function renderLiveObject(object, { depth = 2, maxItems = 20, header = true } = {}) {
+  if (!object || !Array.isArray(object.fields)) return null
+  const lines = header ? [`# live values (${object.type ?? '?'} ${object.name ?? ''})`.trimEnd()] : []
+  const render = (fields, indent) => {
+    let shown = 0
+    for (const field of fields) {
+      if (shown >= maxItems) {
+        lines.push(`${indent}… ${fields.length - shown} more field(s) not shown`)
+        return
+      }
+      shown += 1
+      const label = indent + (field.name ?? '?')
+      let text = `${label}: ${field.value ?? ''}`.trimEnd()
+      if (field.reference) text += `  {${field.reference}}`
+      if (typeof field.size === 'number') text += `  [${field.size}]`
+      lines.push(text)
+      if (Array.isArray(field.children) && field.children.length > 0 && indent.length < depth * 2) {
+        render(field.children, `${indent}  `)
+      } else if (Array.isArray(field.children) && field.children.length > 0) {
+        lines.push(`${indent}  … ${field.children.length} child field(s) not expanded (depth ${depth})`)
+      }
+    }
+  }
+  render(object.fields, '  ')
+  return lines.join('\n')
+}
+
+/**
+ * Render a live snapshot as the answer of `unity_yaml_read`.
+ *
+ * The Editor's objects are keyed by FileID, the same identity the disk parser
+ * puts in each `--- !u!<class> &<fileID>` header, so the two can be compared
+ * object by object. When the disk file is not text (an AssetBundle binary) the
+ * live snapshot is not a comparison, it is the only answer there is — which is
+ * why this path never reports "binary asset".
+ */
+function renderLiveAsset(file, documents, live, { object = null, depth = 2, maxItems = 20 } = {}) {
+  const wanted = object === null || object === undefined ? null : String(object).trim()
+  const entries = []
+  for (const document of documents) {
+    const snapshot = live.objects?.[String(document.fileId)] ?? live.objects?.[document.liveKey]
+    if (snapshot !== undefined) entries.push({ document, snapshot })
+  }
+  for (const snapshot of Object.values(live.objects ?? {})) {
+    if (entries.some((entry) => entry.snapshot === snapshot)) continue
+    entries.push({ document: null, snapshot })
+  }
+  const lines = [
+    `Unity YAML: ${file.path} (live Unity Editor, ${entries.length} object(s); disk file last modified ${describeDiskTime(file.absolute)})`,
+  ]
+  if (documents.length === 0) {
+    lines.push('# the file on disk is not text YAML, so every value below comes from the Editor')
+  } else {
+    lines.push('# values are from the Editor, not from the file on disk')
+  }
+  let shown = 0
+  for (const { document, snapshot } of entries) {
+    if (wanted !== null && !matchesObjectIdentity(snapshot, document, wanted)) continue
+    shown += 1
+    const header = document === null
+      ? `--- ${snapshot.type ?? '?'} ${snapshot.file_id ?? ''}`.trimEnd()
+      : `--- !u!${document.classId} &${document.fileId} (${document.typeName ?? snapshot.type ?? '?'})`
+    lines.push('', header)
+    lines.push(renderLiveObject(snapshot, { depth, maxItems, header: false }))
+  }
+  if (shown === 0 && wanted !== null) lines.push('', `<no object matching "${wanted}" in the live snapshot>`)
+  return {
+    text: lines.join('\n'),
+    path: file.path,
+    source: 'live',
+    total: shown,
+    live: true,
+  }
+}
+
+/** `object` selects one FileID, one `!u!<classId>` selector, or one type name. */
+function matchesObjectIdentity(snapshot, document, wanted) {
+  if (document !== null && (wanted === String(document.fileId) || wanted === `!u!${document.classId}`)) return true
+  const type = snapshot.type ?? document?.typeName
+  return typeof type === 'string' && type.toLowerCase() === wanted.toLowerCase()
+}
+
 /**
  * `unity_yaml_read`: the text for one asset (or one object inside it).
  *
@@ -1034,7 +1134,7 @@ export function projectRelativePath(projectRoot, absolute) {
  * which owns the broker connection. Keeping the fallback in this module means
  * the tool works with no Editor running at all.
  */
-export function readYamlText(projectRoot, { path, object, depth = 2, maxItems = 20 } = {}) {
+export function readYamlText(projectRoot, { path, object, depth = 2, maxItems = 20, live = null } = {}) {
   const file = readYamlFile(projectRoot, path)
   const selected = selectDocument(file.documents, object)
   if (object !== undefined && String(object ?? '').trim() !== '' && selected === null) {
@@ -1045,6 +1145,9 @@ export function readYamlText(projectRoot, { path, object, depth = 2, maxItems = 
     throw new Error(`No document in ${file.path} matches object '${object}'. Documents: ${known || '<none>'}.`)
   }
   const documents = selected === null ? file.documents : [selected.document]
+  if (live !== null) {
+    return renderLiveAsset(file, documents, live, { object, depth, maxItems })
+  }
   const lines = [`Unity YAML: ${file.path} (disk, ${file.documents.length} document(s), ${file.text.length} bytes)`]
   if (documents.length === 0) {
     lines.push(
@@ -1093,7 +1196,7 @@ export function readYamlText(projectRoot, { path, object, depth = 2, maxItems = 
  * @param {string} [options.matchFields]
  * @param {(path:string)=>boolean} [options.include] - directory filter.
  */
-export function searchYamlFiles(projectRoot, { query, scope, limit = 50, matchFields, extensions = ['.unity', '.prefab', '.asset'], include = null } = {}) {
+export function searchYamlFiles(projectRoot, { query, scope, limit = 50, matchFields, extensions = ['.unity', '.prefab', '.asset'], include = null, live = null } = {}) {
   const matcher = buildMatcher(query)
   const fields = parseMatchFields(matchFields)
   const size = Number.isInteger(limit) && limit > 0 ? Math.min(limit, 1000) : 50
@@ -1109,15 +1212,26 @@ export function searchYamlFiles(projectRoot, { query, scope, limit = 50, matchFi
   }
   const matches = []
   let total = 0
+  let liveFiles = 0
   for (const file of files) {
     let parsed
+    const relativePath = projectRelativePath(projectRoot, file)
+    const liveText = live?.texts?.[relativePath]
     try {
-      parsed = parseUnityYaml(readFileSync(file, 'utf8'))
+      // The live Editor only ever supplies one file (the one being read), but a
+      // search over that same file must see the live text too, otherwise
+      // `unity_yaml_search` on a modified-but-unsaved asset contradicts
+      // `unity_yaml_read`.
+      if (typeof liveText === 'string') {
+        parsed = parseUnityYaml(liveText)
+        liveFiles += 1
+      } else {
+        parsed = parseUnityYaml(readFileSync(file, 'utf8'))
+      }
     } catch {
       // A binary or unreadable file inside the scope is skipped, not fatal.
       continue
     }
-    const relativePath = projectRelativePath(projectRoot, file)
     for (const document of parsed.documents) {
       walkFields(document, (pointer, node) => {
         const value = nodeValue(node)
@@ -1148,8 +1262,18 @@ export function searchYamlFiles(projectRoot, { query, scope, limit = 50, matchFi
   const lines = [`Unity YAML search "${query}" in ${absolute === null ? 'the project' : projectRelativePath(projectRoot, absolute)}: ${total} match(es) in ${files.length} file(s)`]
   for (const match of matches) lines.push(`- ${match.path}:${match.line} ${match.pointer} = ${match.value}`)
   if (total > matches.length) lines.push(`… showing ${matches.length} of ${total}`)
+  if (liveFiles > 0) lines.push(`(${liveFiles} file(s) read from the live Editor, not from disk)`)
   if (total === 0) lines.push('<no matches>')
-  return { text: lines.join('\n'), source: 'disk', total, matches, files: files.length, truncated: total > matches.length }
+  if (liveFiles > 0) lines.push(`(${liveFiles} file(s) read from the live Editor, not from disk)`)
+  return {
+    text: lines.join('\n'),
+    source: liveFiles > 0 ? 'live' : 'disk',
+    total,
+    matches,
+    files: files.length,
+    liveFiles,
+    truncated: total > matches.length,
+  }
 }
 
 /** Walk a directory for YAML assets, one symlink-safe level at a time. */

@@ -38,8 +38,8 @@
 - `src/model-viewer/` 是浏览器 three.js 模型查看器的源码，构建成独立的
   `lib/model-viewer.js`（`npm run build:viewer`）；它由侧栏按需懒加载，不进主客户端包。
   `three`/`esbuild` 是 devDependencies，`lib/client.js` 与 `lib/model-viewer.js` 都是生成物。
-- `src/tools.js` 存放 18 个 `unity_*` 工具定义（`code_*` 6 个在 `src/index.js` 里注册，
-  合计 24 个；改工具数量时四处都要一起改：`src/tools.js`、`src/index.js`、
+- `src/tools.js` 存放 19 个 `unity_*` 工具定义（`code_*` 6 个在 `src/index.js` 里注册，
+  合计 25 个；改工具数量时四处都要一起改：`src/tools.js`、`src/index.js`、
   `docs/marketplace/` 的 yml 与 README 条目描述，以及 `README.md`/`README.en.md` 的工具表）；
   `src/args.js` 负责工程解析，由 `test/args.test.js` 覆盖。
 - 工具的 `parameters`/`output.schema` 走 `src/schema.js` 的受限 DSL：`type` 只接受单一标量、
@@ -47,7 +47,8 @@
   `minimum`/`maximum` 之类的断言关键字。`node scripts/dump-tools.mjs` 是唯一会立刻报出来的检查；
   `scripts/typecheck.mjs` 只查导入与绑定，不查这些。
 - `packages/unity-bridge/` 是本仓库自己的协作 Unity 包（`com.locus.dsh-bridge`），补的是 payload
-  不暴露的编辑器侧能力（热重载分类与 detour 账本、健康阶段上报）。它通过反射挂到 payload 的
+  不暴露的编辑器侧能力（热重载分类与 detour 账本、健康阶段上报、实时值源与 prefab 覆盖）。
+  安装时由 `src/setup.js` 一并复制到 `Packages/com.locus.dsh-bridge`。它通过反射挂到 payload 的
   `RegisterExtensionMessageHandler` 上，**不要**改成 asmdef 引用（payload 的 asmdef 是
   `autoReferenced: false`，硬引用会把插件钉死在某个 payload 版本上）。
 - `tools/dsh-finish/Compiler/` 是可选 .NET 10 编译服务；`npm run build:compiler` 构建，
@@ -56,8 +57,11 @@
 - 原生的编辑器健康能力（`dsh_health` / `dsh_health_snapshot` / `dsh_main_thread_stack` /
   `dsh_set_background_hook`）由 broker 自己应答，不进 managed 队列——主线程卡死时 managed 侧
   正是答不了的那个。后台调度钩子只在 Windows 真正生效，别的平台必须报 `unsupported`。
-- `src/setup.js` 负责工程诊断与包安装，由 `test/setup.test.js` 覆盖；把
+- `src/setup.js` 负责工程诊断与包安装（Locus 包 + 协作包），由 `test/setup.test.js` 覆盖；把
   `DSH_LOCUS_PAYLOAD_DIR` 指向一个测试用的假 payload，就能避开真实 payload。
+- `src/asset-index.js` / `src/asset-index-sync.js` 是 `Library/Locus/asset-index.db` 这层持久索引
+  （`node:sqlite`，WAL）。纯读路径必须用只读连接打开——第二个进程碰 WAL 会让 Unity 崩溃；`node:sqlite`
+  在 ESM 里要靠 `installBuiltinLoader` 注入，不能直接用 `require`。
 - 安装入口是命令行 `scripts/install-unity-package.mjs`，**不是工具参数**：
   `unity_status` 的工具定义保持与上游一致（只有 `project_path`/`pipe`），
   只有诊断出「缺插件」时才会在输出里给出这条命令。不要为了装包再加参数。

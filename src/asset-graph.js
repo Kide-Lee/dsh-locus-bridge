@@ -30,6 +30,7 @@
 import { readFileSync } from 'node:fs'
 import { isAbsolute, relative, resolve, sep } from 'node:path'
 import { findScriptAttachments, scanAssets, searchAssets } from './asset-db.js'
+import { lookupReferences } from './asset-index-sync.js'
 import { withClient } from './client-pool.js'
 import { csString } from './scene-set.js'
 import { readYamlFile, queryDocument } from './yaml-lite.js'
@@ -315,14 +316,29 @@ async function projectReferences(projectRoot, assetPath, guid, limit) {
   const index = await scanAssets(projectRoot)
   const matches = []
   let truncated = false
-  for (const entry of index.assets) {
-    if (!YAML_EXTENSIONS.has(entry.ext) && entry.ext !== '.asset' && entry.ext !== '.mat') continue
-    if (!mentionsGuid(projectRoot, entry, wanted)) continue
+  // The durable index records one row per `{fileID, guid}` mapping while the
+  // project is walked, so this is a table lookup rather than "read every YAML
+  // file and search for the GUID". It falls back to the scan's bindings when
+  // `node:sqlite` is unavailable, which keeps the answer correct either way.
+  const looked = lookupReferences(projectRoot, wanted, { limit })
+  let rows = looked.references
+  if (!looked.available) {
+    rows = []
+    for (const entry of index.assets) {
+      if (!YAML_EXTENSIONS.has(entry.ext) && entry.ext !== '.asset' && entry.ext !== '.mat') continue
+      if (!mentionsGuid(projectRoot, entry, wanted)) continue
+      rows.push({ path: entry.path })
+    }
+  }
+  const seen = new Set()
+  for (const row of rows) {
+    if (seen.has(row.path)) continue
+    seen.add(row.path)
     if (matches.length >= limit) {
       truncated = true
       break
     }
-    matches.push(entry.path)
+    matches.push(row.path)
   }
   const target = projectRelative(projectRoot, assetPath)
   const lines = [`Assets that reference ${target} (guid ${wanted}), read from the project YAML on disk:`]
@@ -332,7 +348,11 @@ async function projectReferences(projectRoot, assetPath, guid, limit) {
     for (const path of matches) lines.push(`- ${path}`)
   }
   if (truncated) lines.push(`… more than ${limit} referencing assets; raise limit to see them.`)
-  lines.push('source: project index (works with the Editor closed; open scenes were not consulted).')
+  lines.push(
+    looked.available
+      ? 'source: project index (durable reference table; works with the Editor closed).'
+      : `source: project index (file scan; durable index unavailable: ${looked.unavailable ?? 'unknown'}).`,
+  )
   return { paths: matches, total: matches.length, truncated, results: lines.join('\n') }
 }
 

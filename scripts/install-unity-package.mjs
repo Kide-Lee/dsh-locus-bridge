@@ -14,7 +14,15 @@
 
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { editorRunningError, formatSetup, inspectSetup, installPackage, manifestDependency, writeMarker } from '../src/setup.js'
+import {
+  editorRunningError,
+  formatSetup,
+  inspectSetup,
+  installCompanionPackage,
+  installPackage,
+  manifestDependency,
+  writeMarker,
+} from '../src/setup.js'
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const SELF = fileURLToPath(import.meta.url)
@@ -58,6 +66,18 @@ function main() {
       installed = installPackage(project)
       changed.push(`installed ${installed.relativeTarget} (v${installed.version})`)
       if (installed.keptSkills > 0) changed.push(`kept ${installed.keptSkills} file(s) under Editor/Skills`)
+    }
+  }
+  // The companion package has its own install condition: a project that already
+  // has the Locus package (installed by hand, or by an older dsh-locus-bridge)
+  // still needs it, and a half-copied one needs replacing.
+  if (!before.companion.complete) {
+    try {
+      const companion = installCompanionPackage(project)
+      changed.push(`installed ${companion.relativeRoot} (v${companion.version ?? 'unknown'})`)
+    } catch (error) {
+      console.error(`\nThe Locus package is in place, but the companion package could not be copied: ${error.message}`)
+      process.exitCode = 1
     }
   }
   if (!before.marker.present) {

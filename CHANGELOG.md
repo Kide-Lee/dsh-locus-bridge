@@ -2,6 +2,69 @@
 
 本文件记录 dsh-locus-bridge 的版本变更。版本号遵循 SemVer，条目按用户可见的变化归纳。
 
+## [Unreleased]
+
+### 对齐官方：常驻编译服务、真热补丁、持久化资产库、实时值、进度与取消
+
+这一轮把 1.1.0 里「能做但没做」的几项补上，并把「做不到」的四条重新核实了一遍——其中三条
+其实做得到（常驻进程、第二遍 Roslyn、SQLite 落盘），于是照做。
+
+#### 新增能力
+
+- **常驻编译服务**：`pinSidecar` / `unpinSidecar` / `readResidency`。常驻是**租约**（默认 8 小时，
+  `Library/Locus/compile-sidecar.json` 记录 pid 与心跳），不是永不退出：插件进程被换掉时没人续租，
+  进程自己退出，不会留下孤儿。编译服务另外新增 `compile/params`、`analyze/hotDiff`、
+  `compile/hotPatch` 三个 RPC。
+- **热补丁真编译**：`unity_hot_reload` 不再只是分类。它用编译服务做签名级 diff（`analyze/hotDiff`），
+  生成补丁程序集（`compile/hotPatch`），再交给编辑器侧 detour 应用；`dry_run` 仍然只分类。
+  分类规则与上游一致：只有方法/构造/访问器/字段初始化器体变了才算 hot，改签名、加减成员、改基类
+  一律 cold——错误的 hot 比要求重编译更糟。
+- **持久化资产库**：`Library/Locus/asset-index.db`（`node:sqlite`，WAL）。表结构覆盖文件戳、资产、
+  对象（`!u!<classId>` + FileID + 脚本 GUID）与引用边（`fileID` + `guid`）。重扫只 stat 变化文件；
+  只读查询用只读连接打开，避免第二个进程碰 WAL。`unity_asset_graph` 的反查改查这张表，大工程
+  不再逐文件读全文。
+- **YAML 实时值（`source: "live"`）**：`unity_yaml_read` 与 `unity_yaml_search` 都能从编辑器内存取
+  值——未保存的修改、二进制序列化的场景（本仓库测试工程就是二进制的）也能读。降级路径明确：
+  `auto` 拿不到实时值就回退磁盘并说明原因，`live` 直接报错。
+- **`unity_prefab_overrides`**：读取 Prefab 实例相对源的逐字段覆盖（值、对象引用、原始值）。
+- **离线文档导入的进度 / 取消 / 删除**：`action` 新增 `cancel`、`delete`；导入过程中每 200 页
+  报告一次进度，`status` 在另一通调用里能看到「在下载/在转换/被取消」，取消后不会留下永远不动
+  的进度条。
+- **后台钩子跨平台**：Windows 仍走 dbghelp 符号；Unix 改用「导出符号 → 模式扫描」两条路径，
+  且**只在唯一命中且符号名相邻时**才打补丁，否则如实报 unsupported 并给原因（Linux 编辑器里
+  那 6 字节签名出现 1066 次，拒绝猜测是唯一正确的行为）。
+- **协作包自动挂载**：安装 Locus 包时一并装 `Packages/com.locus.dsh-bridge`；`unity_status` 的
+  设置诊断新增 `companion_missing`（只在 Locus 包已就位时报告，避免把一次安装报成两个问题）。
+
+#### 修复（全部由真机验证抓出）
+
+- **`unity_offline_docs` 在 DSH 里不可能成功**：导入器要求注入 `fetch`，工具却从未传入，任何
+  运行时都报 `no fetch implementation available`。现在显式使用 `globalThis.fetch`。
+- **取消后状态永远停在 importing**：取消文件在场时 `docsImportState` 仍报「在跑」，界面会卡在
+  一根不动的进度条上。现在取消文件在场即 `running: false`。
+- **每个文档页标题重复两遍**：正文自带的 `<h1>` 与写入时的 `# title` 叠在一起，26660 个页面全部如此。
+- **补丁程序集三处不匹配**：方法表是 camelCase 而编辑器 DTO 是 snake_case、补丁类型在
+  `Locus.DshHotPatch` 命名空间下而查找时没有前缀、补丁类名被截短成类型短名——三者任意一处不修，
+  热补丁都会「编译成功但一条也没挂上」。
+- **空补丁**：`ProjectFacts` 用类型短名造方法键、`PatchCompiler` 用全名比对，永不相等。
+- **引擎引用缺失**：工程 `Library/ScriptAssemblies` 里没有引擎模块，补丁编译因此找不到
+  `System.Object` 与 `UnityEngine`；现在按 `ProjectVersion.txt` 去编辑器安装目录补齐（144 个引用）。
+- **`node:sqlite` 在 ESM 下不可用**：`require` 未定义被静默吞掉，索引一直悄悄降级；改为
+  `installBuiltinLoader` 注入。
+- **资产库 schema 不重建**：`user_version = 0` 的旧库不会被丢弃，读到的可能是旧表。
+- **`type` 为 undefined 时写库报错**：`node:sqlite` 不接受 undefined 绑定，整批写入被吞成
+  「不可用」。
+
+#### 验证
+
+- 全量 `node --test`：677 通过；`scripts/dump-tools.mjs`：25 个工具（19 `unity_*` + 6 `code_*`）全部
+  符合 schema 子集；`scripts/typecheck.mjs`：119 个模块。
+- 原生：`cargo test` 38 + 1 + 1 通过，`cargo build --release` 零警告。
+- 真机（Unity 2022.3.62f3）：热补丁全链路（diff → 编译 → `applied: 1`，`detourEngine: "detour"` →
+  `disposed: 1`）；离线文档完整导入（26660 页）、检索、读页、删除；YAML 实时读（二进制场景）、
+  Prefab 覆盖（100 条）、资产检索（7515 文件）、`unity_status` / `unity_recompile` 一次生命周期内
+  全部通过。
+
 ## [1.1.0] - 2026-11-16
 
 ### 官方能力补齐：热重载 / 编译服务 / 状态探针 / 团结引擎 / 离线文档

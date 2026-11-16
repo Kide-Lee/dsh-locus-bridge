@@ -69,14 +69,6 @@ pub fn unity_socket_path(project_path: &str) -> PathBuf {
     ))
 }
 
-/// Absolute state-plane path for one Unity project.
-pub fn unity_state_plane_path(project_path: &str) -> PathBuf {
-    runtime_root().join(format!(
-        "LocusNativeBrokerState_{}.shm",
-        names::project_key(project_path)
-    ))
-}
-
 /// The `unity_state_plane_name` the Windows build uses, mapped onto a path.
 ///
 /// `locus_init` hands the broker a state-plane *name* (`Local\LocusNativeBrokerState_<key>`);

@@ -212,6 +212,9 @@ public sealed class DshFinishServer
                 "shutdown" => HandleShutdown(),
                 "compile/snippet" => HandleCompileSnippet(parameters),
                 "compile/runStates" => HandleCompileRunStates(parameters),
+                "compile/params" => HandleCompileParams(parameters),
+                "analyze/hotDiff" => HandleAnalyzeHotDiff(parameters),
+                "compile/hotPatch" => HandleCompileHotPatch(parameters),
                 _ => throw new RpcMethodNotFoundException("method not found: " + method),
             };
 
@@ -252,7 +255,12 @@ public sealed class DshFinishServer
         ["roslynVersion"] = DshFinishServer.RoslynVersion,
         ["targetFramework"] = "net10.0",
         ["pid"] = Environment.ProcessId,
-        ["capabilities"] = new JsonArray("compile/snippet", "compile/runStates"),
+        ["capabilities"] = new JsonArray(
+            "compile/snippet",
+            "compile/runStates",
+            "compile/params",
+            "analyze/hotDiff",
+            "compile/hotPatch"),
     };
 
     private JsonNode HandleShutdown()
@@ -326,6 +334,71 @@ public sealed class DshFinishServer
         result["source_kind"] = "run_states";
         result["initial_state"] = request!.InitialState;
         result["state_count"] = request.States?.Length ?? 0;
+        return result;
+    }
+
+    /// <summary>
+    /// The references/defines/langversion a compile of this project would use.
+    /// Served from disk, so it answers with the editor closed.
+    /// </summary>
+    private JsonNode HandleCompileParams(JsonObject? parameters) =>
+        ProjectFacts.CompileParams(OptionalString(parameters, "project_root"));
+
+    /// <summary>
+    /// Classify a batch of edits as hot-patchable. Analysis only: nothing is
+    /// compiled, so a cold verdict costs no memory in the running editor.
+    /// </summary>
+    private JsonNode HandleAnalyzeHotDiff(JsonObject? parameters)
+    {
+        JsonArray? files = parameters?["files"] as JsonArray;
+        if (files == null)
+            throw new RpcInvalidParamsException("analyze/hotDiff needs a files array");
+        return ProjectFacts.AnalyzeHotDiff(files, OptionalString(parameters, "project_root"));
+    }
+
+    /// <summary>
+    /// Compile a patch assembly for the given edits.
+    ///
+    /// The patch is compiled body-only: each changed member is re-emitted under
+    /// a <c>__DshPatch_*</c> type with the original signature, so the patcher can
+    /// swap the method body at runtime without touching object layouts. What it
+    /// cannot do — add types or fields to the running domain — is refused here
+    /// rather than half-applied in Unity.
+    /// </summary>
+    private JsonNode HandleCompileHotPatch(JsonObject? parameters)
+    {
+        JsonArray? files = parameters?["files"] as JsonArray;
+        if (files == null || files.Count == 0)
+            throw new RpcInvalidParamsException("compile/hotPatch needs a non-empty files array");
+
+        string? projectRoot = OptionalString(parameters, "project_root");
+        JsonObject analysis = ProjectFacts.AnalyzeHotDiff(files, projectRoot);
+        if (analysis["hot"]?.GetValue<bool>() != true)
+        {
+            return new JsonObject
+            {
+                ["ok"] = false,
+                ["error"] = "the edits are not all hot-patchable; a recompile is required",
+                ["diagnostics"] = new JsonArray(),
+                ["methods"] = new JsonArray(),
+                ["analysis"] = analysis,
+            };
+        }
+
+        var edits = new List<PatchEdit>();
+        foreach (JsonNode? node in files)
+        {
+            if (node is not JsonObject file)
+                throw new RpcInvalidParamsException("each files[] entry must be an object");
+            edits.Add(new PatchEdit(
+                file["path"]?.GetValue<string>() ?? string.Empty,
+                file["oldText"]?.GetValue<string>() ?? string.Empty,
+                file["newText"]?.GetValue<string>() ?? string.Empty));
+        }
+
+        string assemblyName = "__DshPatch_" + Interlocked.Increment(ref _snippetCounter);
+        JsonObject result = PatchCompiler.Compile(edits, projectRoot, assemblyName);
+        result["analysis"] = analysis;
         return result;
     }
 

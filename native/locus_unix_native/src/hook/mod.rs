@@ -11,10 +11,17 @@
 //! 表必须与上游 `unity_bridge/background_hook.rs` 完全一致——两条路径打的是同一
 //! 批字节，谁先谁后都不该留下不一致的状态。
 //!
-//! 为什么只有 Windows：这套做法要 dbghelp 从 PDB 里解析私有的统一引擎符号。Unix
-//! 版 Unity 的 `UnityPlayer.so` 不带可解析的符号表，也不导出这两个符号；拿不到
-//! 地址就无法打补丁。所以非 Windows 平台一律返回 [`HookSnapshot::unsupported`]，
-//! **绝不**返回“已打过补丁”，因为那会让上层误以为后台执行已经生效。
+//! 符号从哪来，按平台分两条路，解析到的地址用途完全相同：
+//!
+//! - **Windows**：dbghelp 从 `unity_x64.pdb` 解析私有符号（上游同款）。
+//! - **Unix**：Unix 版 Unity 既不带 PDB 也不导出这两个符号，所以先试动态符号表
+//!   （装过调试符号的系统包时能直接命中），再用 [`symbols`] 里的模式扫描：先找
+//!   符号表文本节里名字的相邻关系，再找代码节里**唯一**一条与已知签名一致的
+//!   `mov eax, 1; ret`。扫描结果只认“唯一命中”——同一串字节在代码里出现两次就
+//!   无法判断哪个是目标，此时照实报 `Unsupported`，绝不对猜出来的地址写代码。
+//!
+//! 两条路都拿不到地址时返回 [`HookSnapshot::unsupported`]，**绝不**返回“已打过
+//! 补丁”，因为那会让上层误以为后台执行已经生效。
 //!
 //! 失败即放行：任何一步失败都保持代码页原样并返回错误，调用方（托管侧）继续用它
 //! 原来的调度路径，只是失去“失焦仍然执行”的便利。
@@ -92,12 +99,16 @@ pub fn unsupported_reason() -> String {
         String::new()
     } else {
         format!(
-            "the background scheduling hook needs Unity's PDB symbols for IsApplicationActive, \
-             which {} builds do not ship",
+            "neither Unity's symbol table nor a unique instruction-pattern match located \
+             IsApplicationActive in this {} build",
             std::env::consts::OS
         )
     }
 }
+
+/// 非 Windows 上的符号定位：符号表优先，模式扫描兜底。
+#[cfg(not(windows))]
+mod symbols;
 
 /// 当前快照。非 Windows 平台恒为 `Unsupported`——这是诚实的降级，而不是失败。
 pub fn snapshot() -> HookSnapshot {
@@ -107,7 +118,7 @@ pub fn snapshot() -> HookSnapshot {
     }
     #[cfg(not(windows))]
     {
-        HookSnapshot::unsupported(false)
+        symbols::snapshot()
     }
 }
 
@@ -122,8 +133,7 @@ pub fn set_active(active: bool) -> Result<HookSnapshot, HookSnapshot> {
     }
     #[cfg(not(windows))]
     {
-        let _ = active;
-        Err(HookSnapshot::unsupported(active))
+        symbols::set_active(active)
     }
 }
 

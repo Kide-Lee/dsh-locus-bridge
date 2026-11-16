@@ -36,8 +36,19 @@ import { editYamlText, queryDocument, readYamlFile, readYamlText, renderNode, se
 import { LockTimeout, acquireLock, lockStatus, releaseLock } from './editor-lock.js'
 import { editorHealth, enableBackgroundHook, explainUnresponsive } from './health.js'
 import { formatHotReload, hotReload } from './hotreload.js'
-import { DOCS_ROOT_NAME, docsStatus, importDocs, readDoc, searchDocs } from './docs/unity-docs.js'
+import {
+  DOCS_ROOT_NAME,
+  deleteDocs,
+  docsImportState,
+  docsStatus,
+  formatDocsProgress,
+  importDocs,
+  readDoc,
+  requestDocsCancel,
+  searchDocs,
+} from './docs/unity-docs.js'
 import { detectFlavor } from './unity-flavor.js'
+import { formatOverrides, liveSource, readLiveOverrides } from './live-source.js'
 import { compileSnippet, ensureSidecar, sidecarStatus } from './csharp/sidecar.js'
 import {
   UNITY_EXECUTE_CANCELLED,
@@ -2290,6 +2301,14 @@ const unityYamlRead = {
       default: 20,
       description: 'Maximum list items to render per sequence.',
     },
+    source: {
+      type: 'string',
+      enum: ['auto', 'disk', 'live'],
+      default: 'auto',
+      description:
+        'auto reads the live Editor when it is running and falls back to disk; disk reads only the file; ' +
+        'live requires the Editor and fails instead of falling back.',
+    },
   },
   output: {
     schema: {
@@ -2306,20 +2325,56 @@ const unityYamlRead = {
   },
   async execute(args, exec) {
     const projectRoot = resolveProjectRoot(args.project_path, exec)
+    const mode = args.source ?? 'auto'
+    const live = await resolveLiveSource(mode, projectRoot, args.path, { depth: args.depth, exec })
     const result = readYamlText(projectRoot, {
       path: args.path,
       object: args.object,
       depth: args.depth,
       maxItems: args.max_items,
+      live: live.bundle,
     })
-    return { text: result.text, path: result.path, source: result.source, total: result.total }
+    const notes = []
+    if (live.failure !== null) {
+      if (mode === 'live') return { text: `Error: ${live.failure}`, path: result.path, source: 'disk', total: result.total }
+      // Falling back silently would let a stale value pass as the live one.
+      notes.push(`(${live.failure}; showing the file on disk instead)`)
+    }
+    const text = notes.length === 0 ? result.text : `${result.text}\n\n${notes.join('\n')}`
+    return { text, path: result.path, source: result.source, total: result.total }
   },
+}
+
+/**
+ * Ask the Editor for the live snapshot when the caller allows it.
+ *
+ * `auto` never fails: a missing Editor, an old companion package, or a slow
+ * domain reload all degrade to the disk answer plus one explanatory line.
+ */
+async function resolveLiveSource(mode, projectRoot, path, { depth, exec }) {
+  if (mode === 'disk') return { bundle: null, failure: null }
+  // No file scope means "search everything", and the Editor answers for one
+  // asset at a time — there is no live project-wide read to ask for.
+  if (mode !== 'live' && (path === undefined || path === null || String(path).trim() === '')) {
+    return { bundle: null, failure: null }
+  }
+  let client = null
+  try {
+    client = await getClient(describeTarget({ projectRoot }))
+  } catch (error) {
+    return { bundle: null, failure: `live values are unavailable: ${String(error?.code ?? error?.message ?? error)}` }
+  }
+  const { live, reason } = await liveSource(client, projectRoot, path, { depth })
+  if (live === null) return { bundle: null, failure: `live values are unavailable: ${reason}` }
+  return { bundle: live, failure: null }
 }
 
 const unityYamlSearch = {
   name: 'unity_yaml_search',
   description:
-    'Search Unity serialized YAML for a value — across one file, a folder, or the whole project — without the Editor.\n\n' +
+    'Search Unity serialized YAML for a value — across one file, a folder, or the whole project.\n\n' +
+    'Pointing scope at one asset reads its values from the running Editor by default, so an edit that has not been ' +
+    'saved yet is searched too; anything wider is read from disk.\n\n' +
     'Matches are found in field values and object names, so this answers "which prefabs set speed to 12", "where is ' +
     'this GUID referenced", and "which documents mention Player". Use match_fields to restrict the search to particular ' +
     'keys (for example "m_Name" or "speed,m_MethodName").\n\n' +
@@ -2343,6 +2398,15 @@ const unityYamlSearch = {
       default: 50,
       description: 'Maximum matches to return.',
     },
+    source: {
+      type: 'string',
+      enum: ['auto', 'disk', 'live'],
+      default: 'auto',
+      description:
+        'Where the values come from. auto uses the running Editor for the file scope when it is connected; disk reads ' +
+        'only the files; live requires the Editor and fails instead of falling back. A whole-project search is always ' +
+        'disk, because a live answer only exists for one file at a time.',
+    },
   },
   output: {
     schema: {
@@ -2360,13 +2424,58 @@ const unityYamlSearch = {
     const projectRoot = resolveProjectRoot(args.project_path, exec)
     const query = String(args.query ?? '')
     if (query.trim() === '') return { text: 'Error: query is required.', matches: [], scanned: 0 }
+    const { bundle, failure } = await resolveLiveSource(args.source ?? 'auto', projectRoot, args.scope, { exec })
     const result = searchYamlFiles(projectRoot, {
       query,
       scope: args.scope,
       limit: args.limit,
       matchFields: args.match_fields,
+      live: bundle,
     })
-    return { text: result.text, matches: result.matches ?? [], scanned: result.scanned ?? 0 }
+    // Same contract as unity_yaml_read: a fallback is stated, never silent.
+    const text = failure === null ? result.text : `${result.text}\n(${failure}; searched the files on disk instead)`
+    return { text, matches: result.matches ?? [], scanned: result.scanned ?? 0 }
+  },
+}
+
+const unityPrefabOverrides = {
+  name: 'unity_prefab_overrides',
+  description:
+    'List what one prefab instance changed relative to its prefab — as Unity itself resolved it, not as the file spells it.\n\n' +
+    'The answer is the override table (path, value, and the prefab\'s own value next to it), which is what "did ' +
+    'someone tweak this object in the scene" really asks. Requires the Editor: the override set is computed by Unity ' +
+    'and cannot be reconstructed from an unsaved file.',
+  parameters: {
+    project_path: PROJECT_PATH,
+    path: { type: 'string', description: 'Project-relative path of the prefab or scene, for example Assets/Prefabs/Enemy.prefab.' },
+  },
+  output: {
+    schema: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        text: { type: 'string' },
+        path: { type: 'string' },
+        total: { type: 'integer' },
+      },
+    },
+    render: (_args, value) => [{ type: 'text', text: value.text }],
+  },
+  async execute(args, exec) {
+    const projectRoot = resolveProjectRoot(args.project_path, exec)
+    const path = String(args.path ?? '').trim()
+    if (path === '') return { text: 'Error: path is required.', path: '', total: 0 }
+    // The override table only exists in the Editor, so an unreachable Editor is
+    // the whole answer — say that instead of the raw connection diagnostic.
+    let client
+    try {
+      client = await getClient(describeTarget({ projectRoot }))
+    } catch (error) {
+      return { text: `Error: prefab overrides need a running Unity Editor (${String(error?.code ?? error?.message ?? error)}).`, path, total: 0 }
+    }
+    const result = await readLiveOverrides(client, projectRoot, path)
+    if (!result.ok) return { text: `Error: ${result.reason}`, path, total: 0 }
+    return { text: formatOverrides(result), path: result.path, total: result.overrides.length }
   },
 }
 
@@ -2523,14 +2632,25 @@ const unityRelease = {
 
 // ─── unity_offline_docs ─────────────────────────────────────────────────────
 
+/**
+ * `globalThis.fetch`, or undefined on a runtime that has none.
+ *
+ * Returned rather than assumed so the docs importer reports a network problem
+ * as a state instead of throwing through the tool boundary.
+ */
+function defaultFetch() {
+  return typeof globalThis.fetch === 'function' ? globalThis.fetch.bind(globalThis) : undefined
+}
+
 const unityOfflineDocs = {
   name: 'unity_offline_docs',
   description:
     "Unity's own offline documentation for this project's editor version, imported once from Unity's documentation " +
     'server and stored in Library/Locus/unity-docs, then searched locally.\n\n' +
     'action "import" downloads the version-matched offline package (Chinese by default, locale "en" for English), ' +
-    'converts it to Markdown and indexes it. action "status" reports which version is imported. action "search" finds ' +
-    'pages by term. action "read" returns one page.\n\n' +
+    'converts it to Markdown and indexes it. action "status" reports which version is imported and, while an import ' +
+    'runs, how far it has got. action "search" finds pages by term. action "read" returns one page. action "cancel" ' +
+    'stops an import that is running in another call, and action "delete" removes the imported documentation.\n\n' +
     'Use this instead of guessing at Unity API behaviour: the pages are the same ones Unity ships with the Editor, so ' +
     'they match the version the project actually compiles against.\n\n' +
     'The download is several hundred megabytes and needs network access; import reports network_error instead of ' +
@@ -2539,9 +2659,11 @@ const unityOfflineDocs = {
     project_path: PROJECT_PATH,
     action: {
       type: 'string',
-      enum: ['status', 'import', 'search', 'read'],
+      enum: ['status', 'import', 'search', 'read', 'cancel', 'delete'],
       default: 'status',
-      description: 'status (default), import, search, or read.',
+      description:
+        'status (default), import, search, read, cancel (stop an import that is running in another call), or delete ' +
+        '(remove the imported documentation).',
     },
     query: {
       type: 'string',
@@ -2587,6 +2709,8 @@ const unityOfflineDocs = {
     const action = args.action ?? 'status'
     const status = docsStatus(projectRoot)
     if (action === 'status') {
+      const running = docsImportState(projectRoot)
+      const progress = formatDocsProgress(running.progress)
       const lines = status.imported
         ? [
             `Unity offline docs: imported (Unity ${status.version}${status.locale ? `, ${status.locale}` : ''}), ${status.files} page(s).`,
@@ -2596,8 +2720,39 @@ const unityOfflineDocs = {
             'Unity offline docs: not imported.',
             'Run unity_offline_docs action "import" once; it downloads the package matching ProjectVersion.txt and indexes it.',
           ]
-      if (status.imported) lines.push('Search it with action "search", read a page with action "read".')
-      return { text: lines.join('\n'), action, imported: status.imported === true, state: status.imported ? 'imported' : 'absent', version: status.version ?? '', results: [] }
+      // An import in flight is the single most useful thing status can report:
+      // it explains why the docs are still absent on the second call.
+      // A cancel that is still on disk means either an import that is winding
+      // down or one whose process already died mid-flight; both read as "not
+      // running", which is the honest answer to "are the docs coming?".
+      if (running.running && progress !== null) lines.push(`Import in progress: ${progress}.`)
+      else if (running.cancelRequested) lines.push(`A cancel stopped the import${progress !== null ? ` during ${progress}` : ''}; the docs are not being imported.`)
+      else if (running.progress && progress !== null) lines.push(`Last import stopped during: ${progress} (no import is running now).`)
+      if (running.cancelRequested && running.running) lines.push('A cancel has been requested; the running import stops at its next checkpoint.')
+      if (status.imported) lines.push('Search it with action "search", read a page with action "read", remove it with "delete".')
+      return {
+        text: lines.join('\n'),
+        action,
+        imported: status.imported === true,
+        state: running.running ? 'importing' : status.imported ? 'imported' : 'absent',
+        version: status.version ?? '',
+        results: [],
+      }
+    }
+    if (action === 'cancel') {
+      const running = docsImportState(projectRoot)
+      const result = requestDocsCancel(projectRoot)
+      const text = running.running && formatDocsProgress(running.progress) !== null
+        ? `Cancel requested: ${formatDocsProgress(running.progress)}. The running import stops at its next checkpoint and leaves the existing index untouched.`
+        : 'Cancel requested, but no import looks like it is running (nothing has reported progress in the last ten minutes).'
+      return { text, action, imported: status.imported === true, state: result.cancelRequested ? 'cancel_requested' : 'absent', version: status.version ?? '', results: [] }
+    }
+    if (action === 'delete') {
+      const removed = deleteDocs(projectRoot)
+      const text = removed.deleted
+        ? `Deleted the imported Unity ${removed.version}${removed.locale ? ` (${removed.locale})` : ''} documentation: ${removed.files} page(s) removed from ${DOCS_ROOT_NAME}.`
+        : 'Nothing was imported, so there was nothing to delete.'
+      return { text, action, imported: false, state: 'absent', version: '', results: [] }
     }
     if (action === 'import') {
       publish('Downloading and indexing the Unity offline documentation', exec)
@@ -2605,6 +2760,15 @@ const unityOfflineDocs = {
         locale: args.locale,
         version: args.version,
         signal: exec?.signal,
+        // Node ships fetch globally from 18 on, but naming it explicitly keeps
+        // the dependency visible: the import is the only networked tool here,
+        // so a missing global has to read as "no network stack", not as a
+        // mysterious "no fetch implementation available" from three files down.
+        fetchImpl: defaultFetch(),
+        onProgress: (event) => {
+          const progress = formatDocsProgress(event)
+          if (progress !== null) publish(`Unity offline docs: ${progress}`, exec)
+        },
       })
       const lines = []
       if (result.state === 'imported') {
@@ -2612,6 +2776,8 @@ const unityOfflineDocs = {
         lines.push('Search it with unity_offline_docs action "search".')
       } else if (result.state === 'up_to_date') {
         lines.push(`Unity ${result.version} documentation is already imported (${result.files} page(s)).`)
+      } else if (result.state === 'cancelled') {
+        lines.push('The import was cancelled; the existing index (if any) is untouched.')
       } else if (result.state === 'unsupported_version') {
         lines.push(
           `Unity ${result.version ?? args.version ?? '(unknown)'} has no offline documentation package. ` +
@@ -2649,7 +2815,7 @@ const unityOfflineDocs = {
       const text = `# ${page.title} (${page.path})\n\n${page.markdown}`
       return { text, action, imported: true, state: 'imported', version: status.version ?? '', results: [] }
     }
-    return { text: `Error: action must be status, import, search or read; got '${action}'.`, action: String(action), imported: false, state: 'error', version: '', results: [] }
+    return { text: `Error: action must be status, import, search, read, cancel or delete; got '${action}'.`, action: String(action), imported: false, state: 'error', version: '', results: [] }
   },
 }
 
@@ -2670,6 +2836,7 @@ export const toolDefinitions = [
   unityAssetSearch,
   unityYamlRead,
   unityYamlSearch,
+  unityPrefabOverrides,
   unityLock,
   unityRelease,
   unityOfflineDocs,

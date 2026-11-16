@@ -134,13 +134,86 @@ public static class ReferenceSet
         }
 
         // ScriptAssemblies first: the project's own compiled types, which is
-        // what a snippet most often touches.
+        // what a snippet most often touches. It does NOT contain the engine
+        // itself, though — `UnityEngine.CoreModule` and friends live in the
+        // editor install — so the editor's managed assemblies are appended
+        // after it. Returning ScriptAssemblies alone compiled every snippet
+        // against a world with no `GameObject` in it.
+        var paths = new List<string>();
         string scriptAssemblies = Path.Combine(root, "Library", "ScriptAssemblies");
-        List<string>? dlls = DllsIn(scriptAssemblies);
-        if (dlls.Count > 0)
-            return dlls;
+        paths.AddRange(DllsIn(scriptAssemblies));
+        string versionFile = Path.Combine(root, "ProjectSettings", "ProjectVersion.txt");
+        if (File.Exists(versionFile))
+        {
+            try
+            {
+                foreach (string line in File.ReadLines(versionFile))
+                {
+                    string trimmed = line.Trim();
+                    if (!trimmed.StartsWith("m_EditorVersion:", StringComparison.Ordinal))
+                        continue;
+                    string? version = trimmed["m_EditorVersion:".Length..].Trim();
+                    if (string.IsNullOrEmpty(version))
+                        break;
+                    foreach (string editorRoot in EditorInstallRoots())
+                    {
+                        string managed = Path.Combine(editorRoot, version, "Editor", "Data", "Managed", "UnityEngine");
+                        paths.AddRange(DllsIn(managed));
+                        if (paths.Count > 0 && Directory.Exists(managed))
+                            break;
+                    }
+                    break;
+                }
+            }
+            catch
+            {
+                // An unreadable version file just means tier 2 stays project-only.
+            }
+        }
 
-        return null;
+        return paths.Count > 0 ? paths : null;
+    }
+
+    /// <summary>
+    /// Candidate roots that hold Unity editor installs, in the order Unity Hub
+    /// looks: the per-user Hub location first, then the platform defaults and
+    /// finally `UNITY_EDITOR_PATH`.
+    /// </summary>
+    private static IEnumerable<string> EditorInstallRoots()
+    {
+        string? explicitPath = Environment.GetEnvironmentVariable("UNITY_EDITOR_PATH");
+        if (!string.IsNullOrWhiteSpace(explicitPath))
+        {
+            // Pointing at one editor install: its parent is the version root.
+            yield return Path.GetFullPath(Path.Combine(explicitPath, "..", ".."));
+        }
+
+        string? home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        if (!string.IsNullOrEmpty(home))
+        {
+            string hub = Path.Combine(home, "Unity", "Hub", "Editor");
+            if (OperatingSystem.IsMacOS())
+                yield return Path.Combine(home, "Applications", "Unity", "Hub", "Editor");
+            else
+                yield return hub;
+        }
+
+        if (OperatingSystem.IsWindows())
+        {
+            yield return @"C:\Program Files\Unity\Hub\Editor";
+            yield return @"C:\Program Files\Unity\Editor";
+            yield return @"C:\Program Files (x86)\Unity\Hub\Editor";
+        }
+        else if (OperatingSystem.IsMacOS())
+        {
+            yield return "/Applications/Unity/Hub/Editor";
+        }
+        else
+        {
+            string? opt = "/opt/unity/editors";
+            if (Directory.Exists(opt))
+                yield return opt;
+        }
     }
 
 

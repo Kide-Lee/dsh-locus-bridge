@@ -49,7 +49,8 @@ pub enum StackError {
 }
 
 impl StackError {
-    /// broker 协议里的稳定错误码。
+    /// broker 协议里的稳定错误码（当前由 host_config 侧内联，这里保留映射以免两边漂移）。
+    #[allow(dead_code)]
     pub fn code(&self) -> &'static str {
         match self {
             // 与 host_config::errors::STACK_FAILED 同值：托管侧与客户端已经认这个码。
@@ -167,6 +168,8 @@ pub enum Verdict {
 }
 
 impl Verdict {
+    /// 诊断 JSON 里的取值（序列化走 derive 时已给出 `busy|waiting|unknown`）。
+    #[allow(dead_code)]
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Busy => "busy",
