@@ -29,24 +29,29 @@ dsh-locus-bridge 是一个 **DeepSeek harness 插件**。它能让 DSH 直接扮
 dsh plugin --profile <profile> add github:Kide-Lee/dsh-locus-bridge
 ```
 
-重启 DSH 后，模型会看到 11 个以 `unity_` 开头的工具，外加 6 个 `code_*` C# 分析工具（可用
+重启 DSH 后，模型会看到 18 个以 `unity_` 开头的工具，外加 6 个 `code_*` C# 分析工具（可用
 `DSH_LOCUS_CSHARP=0` 关闭后者）。
 
 ## 工具
 
 | 工具 | 作用 | 底层指令 |
 |---|---|---|
-| `unity_status` | 连接检查、编辑器状态（editing/playing/playing_paused）、打开的场景、capabilities、域重载状态；连不上时自动诊断，缺插件时给出安装命令 | `status` / `bridge_capabilities` / `get_reload_state` |
+| `unity_status` | 连接检查、编辑器状态（editing/playing/playing_paused）、打开的场景、capabilities、域重载状态、编辑器发行版（Unity / 团结引擎）与响应性；连不上时自动诊断，缺插件时给出安装命令 | `status` / `bridge_capabilities` / `get_reload_state` / `dsh_health` |
 | `unity_execute` | 在 Unity 主线程编译并执行 C# 方法体（`print`/`printJson`/`ctx.Progress`/`ctx.WaitFrame`），逃生口 | `status` → `begin_edit_session` → `execute_code` + 250ms `execute_code_progress` →（取消）`cancel_execute_code` → `end_edit_session` |
 | `unity_run_states` | 用 C# 状态机跨帧驱动 Unity（`start`/`update`/`end`），长观察没有 30 秒空闲看门狗；输出 ≤100k token 内联，100k–1M 落盘 `Library/Locus/RunStates`，更大报错 | `status` → `run_states` |
 | `unity_play_mode` | 切换到 Play/Edit 模式并等待生效 | `status` → `set_editor_status` → 轮询 `status` |
-| `unity_console_log` | 读取 Unity Console（按级别合并去重） | `unity_get_console_log` |
-| `unity_recompile` | 编译 + 域重载 + 跨断线等待收敛；`editor_status` 必填且须与实况一致；`sync: none/targeted/full` 控制资产导入 | `request_recompile` → 断线 → 重连 → 轮询 `get_compile_result` |
+| `unity_console_log` | 读取 Unity Console（按级别合并去重）；`source: "editorLog"` 时改为读 `Editor.log` 尾部，编辑器连不上也能答 | `unity_get_console_log`（或本地 `Editor.log`） |
+| `unity_recompile` | 编译 + 域重载 + 跨断线等待收敛；`mode: auto` 先判定能否热补丁，`scripts` 走 `request_script_reload` 快速重载；`editor_status` 必填且须与实况一致；`sync: none/targeted/full` 控制资产导入 | `request_recompile` → 断线 → 重连 → 轮询 `get_compile_result`（或 `request_script_reload`） |
 | `unity_test` | 发现并运行 Unity Test Framework 测试，等待结构化结果（`list` / `run`） | `unity_test_list` / `unity_test_start` → 250ms `unity_test_status` →（取消）`unity_test_cancel` |
 | `unity_asset` | 资产序列化读取；带 revision 守卫的原子编辑（`set` 与数组操作）；undo；reload | `asset_api`（read / apply_batch / disk_reload） |
-| `unity_asset_graph` | 资产引用图与脚本用法：`references` / `dependencies` / `usages` | 生成的 `execute_code`（按 `.meta` 的 GUID 比对序列化字段） |
+| `unity_asset_graph` | 资产引用图与脚本用法：`references` / `dependencies` / `usages`；有工程索引时标 `source: "project"`，否则退回已打开场景并标 `open-scene` | 资产索引 / 生成的 `execute_code`（按 `.meta` 的 GUID 比对序列化字段） |
 | `unity_capture` | 截取 Game / Scene / 编辑器窗口，图像直接随结果返回（`ImageBlock`），一次调用即可看见 | `capture_viewport` + `attachments.saveImage` |
 | `unity_scene` | 场景对象检索（`search` 按名称、`find` 按组件类型）、属性树读取、原子 `set`、单事务 `batch` 与 `undo` | `search_scene_objects` / `property_tree_read` / 生成的 `execute_code` |
+| `unity_hot_reload` | 判定改过的脚本能否热补丁（只改方法/构造/访问器体）而非编译域重载，并列出补丁需要的成员 | `dsh_hot_reload_classify`（协作包扩展消息） |
+| `unity_asset_search` | 基于 `.meta` 的全工程资产索引：类型、名字、目录、GUID，并报告缺 `.meta` 与重复 GUID；编辑器关着也能答 | 本地索引 `Library/Locus/dsh-asset-db` |
+| `unity_yaml_read` / `unity_yaml_search` | 直接读写 Unity YAML（`.unity` / `.prefab` / `.asset`），按 scope 与字段收窄，不必打开场景 | 本地解析 |
+| `unity_lock` / `unity_release` | 跨会话的协作编辑器锁，带持有者、等待/试拿语义与过期判定 | 锁文件（进程消失即过期） |
+| `unity_offline_docs` | 导入 Unity 官方离线文档（中/英，版本按工程解析）并检索、读页；同时提供 `unity-offline-docs` 技能 | 本地文档树 `Library/Locus/unity-docs` |
 
 `unity_execute` 与 `unity_test action:"run"` 还接受宿主注入的 `async` 参数，语义与 Locus 一致：`sync`（默认）等待结果；`async` 立即返回 job id，不发送完成通知，用 `job_output` 读取；`notify` 立即返回，并在完成时自动投递结果。job 由 DSH 的 jobs 管理，`job_kill` 可以取消，生命周期限于当前 Session；后台只让 agent 继续，不绕开 Unity 主线程，也不解除 `unity_execute` 的 30 秒无输出限制和工具自身的 `timeout`。`unity_run_states` 按官方行为保持同步。
 
@@ -261,6 +266,14 @@ DSH 设置里有一个 **Unity 桥接** 页（`settings.section`，id `dsh-locus
   桌面端可以同时连着同一个编辑器，响应回到发起请求的那条连接。
 - **重编译会跨断线继续。** 域重载会在调用中途断开连接，客户端会重连并接着轮询 operation id，
   而不是报一个传输错误。
+- **编辑器侧新增能力放在独立包 `com.locus.dsh-bridge` 里。** `payload/locus_unity/` 是逐字的上游副本
+  （`npm run check:payload` 一旦不一致就失败），所以热重载的 detour 账本、健康阶段上报这些新东西
+  装在 `packages/unity-bridge/`，通过反射挂到 payload 的扩展消息通道上。
+- **有两处能力是本机实现而非上游实现，能力边界因此不完全相同。** 后台调度钩子只在 Windows 真正
+  打补丁（需要 Unity 的 PDB 私有符号）；卡死诊断在 Linux/macOS 上用 `ptrace` 抓寄存器并沿帧指针链
+  走栈，只能给出它证明得了的托管帧，抓不到就明说抓不到。两者都宁可报 `unsupported` 也不假装成功。
+- **编译服务是可选件。** `npm run build:compiler` 构建插件自带的 .NET 10 Roslyn 进程；没装 .NET 或
+  没构建时，工具会如实报不可用并退回编辑器内编译，不会在运行时下载 SDK。
 
 ## 开发
 
@@ -272,6 +285,7 @@ npm run validate           # 工具定义 + 静态检查 + 两个 bundle 是否�
 npm run pack:release       # 发布 ZIP；先检查 Locus 是否最新、最新 DSH 是否兼容
 npm run build:client       # 由 src/client/plugin.js 生成 lib/client.js（右栏面板）
 npm run build:viewer       # 由 src/model-viewer/viewer.js 生成 lib/model-viewer.js（three.js 查看器）
+npm run build:compiler     # 构建可选的 .NET 10 编译服务（tools/dsh-finish/Compiler）
 npm run build:native       # Linux/macOS 的 broker（Rust）
 npm run test:live          # 工具面：对着真实编辑器端到端，见 scripts/live-smoke.mjs
 npm run test:live:sidebar  # 右栏路由：真 HTTP + 真 Unity，见 scripts/live-sidebar.mjs

@@ -9,7 +9,7 @@ import {
   executePayload,
   isNotExecuted,
   isReloading,
-  nonPublicAccessPreamble,
+  NON_PUBLIC_ACCESS_LIMITATION,
   parseStatusMessage,
   resolveNonPublicAccess,
   splitCapabilities,
@@ -242,9 +242,13 @@ test('resolveNonPublicAccess mirrors upstream: omitted is true, global switch al
   assert.throws(() => resolveNonPublicAccess('true'), /must be a boolean when provided/)
 })
 
-test('nonPublicAccessPreamble imports each assembly the bridge can reach', () => {
-  assert.equal(
-    nonPublicAccessPreamble(),
-    'using __LocusNonPublicAccess.Assembly-CSharp;\nusing __LocusNonPublicAccess.Assembly-CSharp-Editor;',
-  )
+// `enable_non_public_access` is a compile-server capability upstream. This
+// bridge compiles snippets with the editor's own Roslyn, so the only honest
+// surface is a stated limitation — never a `using` for a namespace no Unity
+// assembly defines (that used to break every snippet with CS0246).
+test('the non-public access limitation names the mechanism this bridge lacks', () => {
+  assert.match(NON_PUBLIC_ACCESS_LIMITATION, /IgnoresAccessChecksTo/)
+  assert.match(NON_PUBLIC_ACCESS_LIMITATION, /reflection/)
+  assert.doesNotMatch(NON_PUBLIC_ACCESS_LIMITATION, /__LocusNonPublicAccess/)
+  assert.equal(typeof nonPublicAccessPreamble, 'undefined')
 })

@@ -2,9 +2,66 @@
 
 本文件记录 dsh-locus-bridge 的版本变更。版本号遵循 SemVer，条目按用户可见的变化归纳。
 
-## [Unreleased]
+## [1.1.0] - 2026-11-16
 
-### 与 Locus 官方对齐：工具权限契约
+### 官方能力补齐：热重载 / 编译服务 / 状态探针 / 团结引擎 / 离线文档
+
+工具面从 17 个增加到 24 个（18 个 `unity_*` + 6 个 `code_*`）。
+
+#### 新增工具
+
+- **`unity_hot_reload`**：判定一批改过的 `.cs` 能否热补丁（只改方法/构造/访问器体）还是必须编译域重载，
+  并列出补丁需要的成员标识。纯文件级词法判定 + 编辑器侧 detour 账本核对，**不**编译补丁程序集。
+- **`unity_recompile` 新增 `mode`**（`auto` / `compile` / `scripts`，默认 `compile`）：`auto` 先分类再决定，
+  能热补丁就报 `hot`；`scripts` 走 `request_script_reload` 的快速重载，明确说明它不代表收敛。
+- **`unity_asset_search`**：基于 `.meta` 的全工程资产索引（GUID、类型、路径），编辑器关着也能答，
+  并报告缺 `.meta` 与重复 GUID。
+- **`unity_yaml_read` / `unity_yaml_search`**：直接读/搜 Unity YAML（`.unity` / `.prefab` / `.asset`），
+  scope 与 match_fields 可收窄，不需要打开场景。
+- **`unity_lock` / `unity_release`**：跨会话的协作锁，带持有者与等待/试拿两种语义，
+  存在进程已消失时自动视为过期而不是永久卡住。
+- **`unity_offline_docs`**：导入 Unity 官方离线文档（中文/英文，版本按工程当前编辑器版本解析），
+  并在导入后按关键词检索与读页。同时注册一个 `unity-offline-docs` 技能，让模型知道能查官方文档。
+
+#### 变化的工具
+
+- **`unity_status`**：新增编辑器发行版（Unity / 团结引擎 Tuanjie，读 `ProjectVersion.txt`，编辑器没开也能答）、
+  响应性（`responsive` / `phase` / `diagnosis`，来自原生状态探针），输出新增 `flavor` / `version` /
+  `responsive` / `phase` / `diagnosis`。旧 broker 缺这项能力时降级为「无结论」，不会让状态查询失败。
+- **`unity_console_log`**：新增 `source`（`console` / `editorLog`）。编辑器连不上时也能读 `Editor.log`
+  尾部，并区分「这个工程的日志」与「别的工程的日志」。
+- **`unity_asset_graph`**：`references` / `usages` 不再强制要求先打开场景——有工程索引时走索引并标
+  `source: "project"`，降级到已打开场景时标 `source: "open-scene"`。
+- **`unity_execute`**：失败路径在开启编译服务时追加编辑器外的编译检查（`Compile check (off-editor …)`），
+  直接回答「是不是我的代码编不过」。
+
+#### 修复（真机验证发现）
+
+- **`unity_execute` 的 `enable_non_public_access` 曾让每个片段都编不过**：桥会在片段前插
+  `using __LocusNonPublicAccess.<程序集>;`，而没有任何 Unity 程序集定义这个命名空间，所以开着
+  默认设置时一律 `CS0246`。上游这项能力由编译服务用 `IgnoresAccessChecksTo` 实现，桥用编辑器自带
+  Roslyn 根本做不到；现在片段按原样发送，并在结果后附一句明确的能力限制（私有成员请用反射）。
+- **`unity_hot_reload` 曾把分类结果整条丢掉**：编辑器回的是 `source_path`（与 payload 的
+  `HotPatchMethodDto` 一致），而桥只认 `path`，于是明明分类成功却报「没有给出编辑脚本」。
+  现在两种写法都认，回归测试用编辑器的真实字段名。
+- **`unity_yaml_read` 对二进制资产的说法**：AssetBundle 序列化的场景/预制体不是文本 YAML，
+  提示语现在说明「这个资产不是文本 YAML」，而不是误导性的「文件没有 --- 头」。
+
+#### 新增能力与基础设施
+
+- **编译服务（.NET 10 CoreCLR sidecar）**：`tools/dsh-finish/Compiler`，独立 Roslyn 进程，不连 Unity 就能编
+  `unity_execute` 的代码片段与 `run_states` 定义。每工作区一个进程、空闲 600 秒回收、上限 8 个，
+  缺 .NET 时**如实报不可用**并回退编辑器路径，绝不静默下载 SDK。构建入口 `npm run build:compiler`。
+- **原生状态探针 / 卡死诊断 / 后台钩子**（`native/locus_unix_native/`）：`dsh_health` 由原生 broker 自己答
+  （主线程卡死时 managed 侧正是答不了的那个），三档探针 + CPU + 存活判定；卡死时抓主线程栈并给
+  「Stuck at」结论，抓不到就明说抓不到。新增 `dsh_set_background_hook`，非 Windows 诚实报 `unsupported`。
+- **协作 Unity 扩展包 `com.locus.dsh-bridge`**（`packages/unity-bridge/`）：热重载分类/detour 账本、
+  健康阶段上报、JSON 读写。通过反射挂到 payload 的扩展消息通道上，payload 保持逐字上游副本。
+- **团结引擎识别**：`ProjectVersion.txt` 与编辑器窗口标题两路识别，`unity_status` 报告发行版。
+- **设置页**新增三个开关（默认关，各自有代价）：编译服务、后台调度钩子、离线文档。
+
+
+#### 与 Locus 官方对齐：工具权限契约
 
 - `unity_execute` 的 `readonly` 恢复为**必填**（官方 schema 即如此），并删掉描述里不存在的「recording mode」说法：
   只读调用跳过桥接的 edit session，写操作必须显式声明 `readonly: false`。
@@ -17,6 +74,30 @@
   比对——它们都会落盘/保存场景，不能再在任意编辑器状态下写入。`unity_asset` 新增 `request_editor_status` 参数。
 - `unity_asset` / `unity_scene` / `unity_test` 的 `action` 描述明确标出哪些动作会写（`apply`/`undo`、
   `set`/`batch`/`undo`、`run`），替代官方把读写拆成不同工具时由工具名承载的那层语义。
+
+### 兼容性与分发（1.1.0）
+
+- 运行环境不变：Node >= 22.12，`@deepseek-ai/dsh` `>=0.2.1-alpha.2 <0.3.0-0`，Unity 2021.3+（团结引擎同样识别）。
+- **编辑器侧新增协作包 `Packages/com.locus.dsh-bridge/`**：热重载、健康探针与后台钩子开关的编辑器端实现。
+  它通过反射接入 Locus 桥（`RegisterExtensionMessageHandler`），不引用 `Locus.Editor` 程序集，因此不绑定
+  某个 payload 构建；`payload/locus_unity/` 保持上游逐字副本，未作任何修改。
+- **可选 .NET 10 编译服务**：源码在 `tools/dsh-finish/Compiler/`，用 `npm run build:compiler` 构建；
+  未构建或没有 .NET 时全部工具照常走 Unity 自带 Roslyn，只是少了编辑器外编译检查与热补丁分类的签名级信息。
+- **原生 broker 新增模块**：`native/locus_unix_native/src/{hook,state_probe,hang}/`（状态探针、卡死诊断、
+  后台调度钩子）。Linux 上后台钩子如实报告 `unsupported`，不伪造成功。
+- 发布 ZIP 包含 Unity payload 与安装脚本；npm tarball 仍不含 `payload/`。
+- 验证：全量测试 **638 通过 / 0 失败**（`node --test --test-concurrency=1 "test/*.test.js"`），
+  原生 `cargo test` 34 + 1 + 1 通过，编译服务自检 9 通过，`dump-tools` / `typecheck`（114 模块）/
+  客户端与查看器 bundle 校验通过；并在真实 Unity 2022.3.62f3 编辑器上逐项验证了全部新增与变更工具
+  （状态与发行版、健康探针、后台钩子、`unity_execute`、Console 日志回退、`unity_recompile mode=scripts`、
+  热重载分类、资产索引、YAML 读取与检索、协作锁、离线文档状态、工程引用图、编译服务状态）。
+
+### 升级说明（1.1.0）
+
+- 工具数从 17 增至 24（18 个 `unity_*` + 6 个 `code_*`），既有工具参数保持兼容，仅新增可选参数。
+- 若在 1.0.0 下依赖过 `unity_execute` 的私有成员访问：该能力从未真正生效（见上方修复），升级后会在结果里
+  明确说明限制，请改用反射访问非公开成员。
+- 设置页新增三个开关（编译服务、后台钩子、离线文档），默认关闭，按需打开。
 
 ## [1.0.0] - 2026-11-14
 

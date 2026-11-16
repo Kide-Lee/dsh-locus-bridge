@@ -421,7 +421,16 @@ export function registerAssetRoutes(webCtx, { env = process.env, onFeaturesChang
               id: skill.id,
               title: skill.title,
               hint: skill.hint,
+              // "This plugin can build and run code for this skill", unchanged:
+              // true only when `compile_skill_package` has sources to compile.
+              // A skill can need the Editor (`requiresUnity`) without shipping
+              // anything to compile — `view` and `debugger` are documents only.
               executable: skill.unity !== undefined,
+              // What actually works, per capability. The graphics skill teaches
+              // both the Frame Debugger and RenderDoc, and only the Frame
+              // Debugger half ships (no Python helpers, no RenderDoc). One
+              // boolean could not say that, which is why it is a map.
+              capabilities: capabilityMap(skill),
               enabled: stored.skills[skill.id] === true,
             })),
           })
@@ -1083,6 +1092,26 @@ function numberParam(url, name) {
   if (raw === null || raw === '') return undefined
   const number = Number(raw)
   return Number.isFinite(number) ? number : undefined
+}
+
+/**
+ * The capabilities a skill actually has here, as `{<capability>: boolean}`.
+ *
+ * `capabilities` in the catalog is the authored answer (what ships and what
+ * does not); a skill that declares none but does carry C# sources works as a
+ * whole, which is reported as `{compile: true}`. A skill that ships nothing to
+ * compile gets `{}` — an empty map, never `false` — so the settings page can
+ * tell "nothing to run" apart from "declared and unavailable".
+ *
+ * This is deliberately *not* the `executable` flag next to it: `executable`
+ * answers "can the plugin build code for this skill", which a document-only
+ * skill answers with no. Do not merge the two — `requiresUnity` says the
+ * instructions need an Editor, not that the plugin ships an assembly.
+ */
+function capabilityMap(skill) {
+  if (skill.capabilities !== undefined) return { ...skill.capabilities }
+  if (skill.unity !== undefined) return { compile: true }
+  return {}
 }
 
 function sendJson(res, status, payload) {

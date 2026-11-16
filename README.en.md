@@ -50,7 +50,7 @@ You can also install straight from GitHub:
 dsh plugin --profile <profile> add github:Kide-Lee/dsh-locus-bridge
 ```
 
-After restarting DSH, the model sees 11 tools whose names start with `unity_`, plus 6 `code_*` C# analysis tools (disable the latter with
+After restarting DSH, the model sees 18 tools whose names start with `unity_`, plus 6 `code_*` C# analysis tools (disable the latter with
 `DSH_LOCUS_CSHARP=0`).
 
 ### Editor prerequisites
@@ -134,17 +134,22 @@ The 15 MB tree stays out of the npm tarball but ships inside the release ZIP at 
 
 | Tool | What it does | Underlying commands |
 |---|---|---|
-| `unity_status` | Connection check, editor state (editing/playing/playing_paused), open scenes, capabilities, domain reload state; diagnoses a missing package/broker/marker automatically, and prints the install command when the package is absent | `status` / `bridge_capabilities` / `get_reload_state` |
+| `unity_status` | Connection check, editor state (editing/playing/playing_paused), open scenes, capabilities, domain reload state, editor edition (Unity / Tuanjie) and responsiveness; diagnoses a missing package/broker/marker automatically, and prints the install command when the package is absent | `status` / `bridge_capabilities` / `get_reload_state` / `dsh_health` |
 | `unity_execute` | Compile and execute a C# method body on the Unity main thread (`print`/`printJson`/`ctx.Progress`/`ctx.WaitFrame`), the escape hatch | `status` → `begin_edit_session` → `execute_code` + 250ms `execute_code_progress` → (cancel) `cancel_execute_code` → `end_edit_session` |
 | `unity_run_states` | Drive Unity across frames with a C# state machine (`start`/`update`/`end`) and no 30-second idle watchdog for long observations; output up to 100k tokens is inline, 100k–1M is saved under `Library/Locus/RunStates`, and larger output is refused | `status` → `run_states` |
 | `unity_play_mode` | Switch to Play/Edit mode and wait for it to take effect | `status` → `set_editor_status` → poll `status` |
-| `unity_console_log` | Read the Unity Console (merged and deduplicated by level) | `unity_get_console_log` |
-| `unity_recompile` | Compile + domain reload + wait across the disconnect for convergence; `editor_status` is required and must match the live state; `sync: none/targeted/full` controls asset import | `request_recompile` → disconnect → reconnect → poll `get_compile_result` |
+| `unity_console_log` | Read the Unity Console (merged and deduplicated by level); `source: "editorLog"` reads the tail of `Editor.log` instead, which works with the Editor closed | `unity_get_console_log` (or the local `Editor.log`) |
+| `unity_recompile` | Compile + domain reload + wait across the disconnect for convergence; `mode: auto` first decides whether a hot patch suffices, `scripts` uses the `request_script_reload` fast path; `editor_status` is required and must match the live state; `sync: none/targeted/full` controls asset import | `request_recompile` → disconnect → reconnect → poll `get_compile_result` (or `request_script_reload`) |
 | `unity_test` | Discover and run Unity Test Framework tests, waiting for structured results (`list` / `run`) | `unity_test_list` / `unity_test_start` → 250ms `unity_test_status` → (cancel) `unity_test_cancel` |
 | `unity_asset` | Read serialized assets; revision-guarded atomic edits (`set` and array operations); undo; reload | `asset_api` (read / apply_batch / disk_reload) |
-| `unity_asset_graph` | Asset reference graph and script usages: `references` / `dependencies` / `usages` | generated `execute_code` (GUID comparison against serialized fields) |
+| `unity_asset_graph` | Asset reference graph and script usages: `references` / `dependencies` / `usages`; answers from the project index (`source: "project"`) and degrades to the open scene (`open-scene`) | asset index / generated `execute_code` (GUID comparison against serialized fields) |
 | `unity_capture` | Capture the Game / Scene view or an Editor window, with the image attached to the result (`ImageBlock`) — visible in one call | `capture_viewport` + `attachments.saveImage` |
 | `unity_scene` | Scene object search (by name, and `find` by component type), property tree read, atomic `set`, single-transaction `batch` and `undo` | `search_scene_objects` / `property_tree_read` / generated `execute_code` |
+| `unity_hot_reload` | Decide whether edited scripts can be hot-patched (method/ctor/accessor bodies only) instead of recompiling with a domain reload, and list the members a patch needs | `dsh_hot_reload_classify` (companion-package extension message) |
+| `unity_asset_search` | Project-wide asset index from `.meta` files: type, name, folder, GUID, plus missing `.meta` and duplicate GUIDs; works with the Editor closed | local index at `Library/Locus/dsh-asset-db` |
+| `unity_yaml_read` / `unity_yaml_search` | Read and search Unity YAML (`.unity` / `.prefab` / `.asset`) narrowed by scope and field, without opening the scene | local parsing |
+| `unity_lock` / `unity_release` | Cooperative editor lock across sessions, with holder, wait/try semantics and stale-holder detection | lock file (a vanished process is stale) |
+| `unity_offline_docs` | Import the official Unity documentation offline (zh/en, version resolved from the project), then search and read pages; also contributes a `unity-offline-docs` skill | local docs tree at `Library/Locus/unity-docs` |
 
 `unity_execute` and `unity_test action:"run"` also accept a host-injected `async` argument with Locus's semantics: `sync` (the default) waits for the result; `async` returns a job id immediately, sends no completion notice, and leaves the result for `job_output`; `notify` returns immediately and has the completion delivered automatically. Jobs are owned by the DSH jobs service, can be cancelled with `job_kill`, and live only in this Session. Running in the background only frees the agent: the work still runs on Unity's main thread and keeps the 30-second no-output limit and the tool's own `timeout`. `unity_run_states` stays synchronous, matching upstream.
 
@@ -394,6 +399,17 @@ current is reused from the editor's cache.
   connection that issued the request.
 - **Recompilation continues across the disconnect.** A domain reload breaks the connection mid-call; the client
   reconnects and keeps polling the operation id instead of reporting a transport error.
+- **Editor-side additions live in a separate package, `com.locus.dsh-bridge`.** `payload/locus_unity/` is a
+  verbatim upstream copy (`npm run check:payload` fails on any divergence), so the hot-reload detour ledger and
+  the health phase reporting ship in `packages/unity-bridge/` and attach to the payload's extension-message
+  channel through reflection.
+- **Two capabilities are implemented locally, so the boundaries differ.** The background scheduling hook only
+  patches for real on Windows (it needs Unity's private PDB symbols); hang diagnosis on Linux/macOS captures
+  registers with `ptrace` and walks the frame pointer chain, reporting only the managed frames it can prove and
+  saying so when it cannot capture any. Both report `unsupported` rather than pretending.
+- **The compile sidecar is optional.** `npm run build:compiler` builds the bundled .NET 10 Roslyn process;
+  without .NET or without the build, the tools report it unavailable and fall back to in-editor compilation,
+  never downloading an SDK at runtime.
 
 ## Development
 
@@ -405,6 +421,7 @@ npm run validate           # tool definitions + static checks + both bundle fres
 npm run pack:release       # release ZIP; checks latest Locus and latest DSH first
 npm run build:client       # generate lib/client.js from src/client/plugin.js (the Sidebar panel)
 npm run build:viewer       # generate lib/model-viewer.js from src/model-viewer/viewer.js (three.js viewer)
+npm run build:compiler     # build the optional .NET 10 compile sidecar (tools/dsh-finish/Compiler)
 npm run build:native       # the Linux/macOS broker (Rust)
 npm run test:live          # tools: end-to-end against a real editor, see scripts/live-smoke.mjs
 npm run test:live:sidebar  # sidebar routes: real HTTP + real Unity, see scripts/live-sidebar.mjs

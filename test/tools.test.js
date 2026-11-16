@@ -70,7 +70,10 @@ test('unity_execute runs a snippet and keeps an edit session for writes', async 
         execContext(),
       )
       assert.equal(result.cancelled, false)
-      assert.equal(result.output, 'ran: print(Application.dataPath);')
+      // The global setting defaults to on, so the honest limitation note rides
+      // along with the result even though the snippet itself ran.
+      assert.match(result.output, /^ran: print\(Application\.dataPath\);\n\n/)
+      assert.match(result.output, /IgnoresAccessChecksTo/)
       const order = seen.map((request) => request.type)
       assert.ok(order.indexOf('begin_edit_session') < order.indexOf('execute_code'))
       assert.ok(order.indexOf('end_edit_session') > order.indexOf('execute_code'))
@@ -130,9 +133,13 @@ test('unity_execute applies enable_non_public_access: preamble when on, verbatim
         { code: 'print(3);', request_editor_status: 'editing', readonly: true, enable_non_public_access: true },
         execContext(),
       )
-      assert.match(codes[0], /^using __LocusNonPublicAccess\.Assembly-CSharp;\nusing __LocusNonPublicAccess\.Assembly-CSharp-Editor;\nprint\(1\);/)
-      assert.match(codes[1], /^print\(2\);/)
-      assert.match(codes[2], /^using __LocusNonPublicAccess\.Assembly-CSharp;/)
+      // The snippet reaches Unity exactly as written in every case: the bridge
+      // cannot emit an IgnoresAccessChecksTo allow-list, so it must not inject
+      // a `using` for a namespace that does not exist either.
+      assert.match(codes[0], /^print\(1\);\n/)
+      assert.match(codes[1], /^print\(2\);\n/)
+      assert.match(codes[2], /^print\(3\);\n/)
+      for (const code of codes) assert.doesNotMatch(code, /__LocusNonPublicAccess/)
     },
     {
       onMessage: (request) => {

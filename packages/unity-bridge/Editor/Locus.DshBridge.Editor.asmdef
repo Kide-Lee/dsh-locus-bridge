@@ -1,0 +1,21 @@
+{
+    "name": "Locus.DshBridge.Editor",
+    "rootNamespace": "Locus.DshBridge",
+    "references": [],
+    "includePlatforms": [
+        "Editor"
+    ],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [
+        "Locus.Roslyn.dll",
+        "Locus.Json.dll",
+        "Locus.Detour.dll",
+        "Locus.HotReload.Runtime.dll"
+    ],
+    "autoReferenced": false,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": false
+}

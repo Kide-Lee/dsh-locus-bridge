@@ -23,7 +23,8 @@ import { csharpToolDefinitions } from './csharp/tools.js'
 import { shutdownCsharpPool } from './csharp/lsp-pool.js'
 import { registerAssetRoutes } from './sidebar/routes.js'
 import { onSettingsChanged, readSettings, resolveFeatures } from './settings.js'
-import { createDomainSkillProvider } from './skills/provider.js'
+import { createDomainSkillProvider, invalidateSkillCatalog } from './skills/provider.js'
+import { createOfflineDocsSkillProvider } from './docs/skill-provider.js'
 import { toRegistryDefinition } from './schema.js'
 import { withAsyncParameter } from './background.js'
 
@@ -165,11 +166,27 @@ export function apply(ctx) {
   // `inject` rather than a required dependency: a composition without the skill
   // registry must still get every other plane.
   ctx.inject(['skills'], (skillCtx) => {
-    let disposeProvider = null
-    const syncSkills = () => {
-      if (disposeProvider !== null) {
-        const dispose = disposeProvider
-        disposeProvider = null
+    const disposers = []
+    // The `control` handle of each live registration: its `invalidate()` is the
+    // supported way to tell DSH a catalog is stale, and it only works through the
+    // handle the *current* registration was created with.
+    const controls = []
+    const register = (factory) => {
+      const dispose = skillCtx.skills.registerProvider((control) => {
+        controls.push(control)
+        return factory(control)
+      })
+      disposers.push(dispose)
+      return dispose
+    }
+
+    // The domain skills are re-registered on every settings change: `enabled` is
+    // read once per provider, so a stale copy must not survive a settings write.
+    let disposeDomain = null
+    const syncDomain = () => {
+      if (disposeDomain !== null) {
+        const dispose = disposeDomain
+        disposeDomain = null
         try {
           dispose()
         } catch {
@@ -178,23 +195,38 @@ export function apply(ctx) {
       }
       const stored = readSettings()
       if (!Object.values(stored.skills).some(Boolean)) return
-      disposeProvider = skillCtx.skills.registerProvider(
-        () => createDomainSkillProvider({ enabled: stored.skills }),
+      // `features` is a thunk, not a snapshot: the provider re-asks on every
+      // catalog read, so switching the Unity plane off stops advertising the
+      // skills that need it without waiting for another re-registration.
+      disposeDomain = register((control) =>
+        createDomainSkillProvider({ enabled: stored.skills, control, features: () => effectiveFeatures() }),
       )
     }
-    syncSkills()
-    const stop = onSettingsChanged(syncSkills)
+    syncDomain()
+
+    // The offline documentation skill has no per-skill switch: it appears while
+    // a version-matched index is imported for the workspace, and that is decided
+    // inside the provider (`enabled: null` means "let the docs decide"). Its
+    // catalog only changes when an import finishes, which the tool reports, so it
+    // is registered once and never re-created.
+    register(() => createOfflineDocsSkillProvider({ enabled: null }))
+
+    const stop = onSettingsChanged(() => {
+      syncDomain()
+      // The catalog DSH already collected advertises the previous switch state;
+      // drop it so the next model step sees the new list.
+      for (const control of controls) invalidateSkillCatalog(control)
+    })
     skillCtx.effect(() => () => {
       stop()
-      if (disposeProvider !== null) {
-        const dispose = disposeProvider
-        disposeProvider = null
+      for (const dispose of disposers.splice(0)) {
         try {
           dispose()
         } catch {
           // Disposal during teardown is best effort.
         }
       }
+      controls.length = 0
     })
   })
 

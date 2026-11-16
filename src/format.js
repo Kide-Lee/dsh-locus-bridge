@@ -3,7 +3,19 @@
 import { CAPABILITIES, splitCapabilities } from './protocol.js'
 
 /** Render a `status` result (or a failed connection attempt). */
-export function formatStatus({ connected, status, scenes = [], pipe, projectRoot, capabilities = [], reloadState = null, error }) {
+export function formatStatus({
+  connected,
+  status,
+  scenes = [],
+  pipe,
+  projectRoot,
+  capabilities = [],
+  reloadState = null,
+  error,
+  flavor = null,
+  version = null,
+  health = null,
+}) {
   const lines = []
   if (connected) {
     lines.push(`Unity Editor: connected (${status})`)
@@ -11,6 +23,12 @@ export function formatStatus({ connected, status, scenes = [], pipe, projectRoot
     lines.push('Unity Editor: disconnected')
   }
   if (projectRoot) lines.push(`Project: ${projectRoot}`)
+  // The edition changes what the editor supports (Tuanjie tracks Unity 2022.3),
+  // so it belongs next to the project line, not buried in a capabilities list.
+  if (flavor) {
+    const name = flavor === 'tuanjie' ? '团结引擎 (Tuanjie)' : 'Unity'
+    lines.push(`Editor edition: ${name}${version ? ` ${version}` : ''}`)
+  }
   if (pipe) lines.push(`Pipe: ${pipe}`)
   if (connected && scenes.length > 0) {
     lines.push(`Scenes: ${scenes.join(', ')}`)
@@ -33,6 +51,9 @@ export function formatStatus({ connected, status, scenes = [], pipe, projectRoot
     if (reloadState.domain_generation) parts.push(`domain ${String(reloadState.domain_generation).slice(0, 8)}`)
     if (parts.length > 0) lines.push(`Reload state: ${parts.join(', ')}`)
   }
+  // Health only speaks when it has evidence: a broker without the state probe
+  // reports nothing rather than an empty "responsive" claim.
+  if (health && health.diagnosis) lines.push(`Health: ${health.diagnosis}`)
   if (error) lines.push(`Reason: ${error}`)
   // No generic "install the package" hint here: the caller appends the project's
   // actual diagnosis, which names the missing piece instead of listing all three.

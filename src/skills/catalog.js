@@ -2,8 +2,8 @@
 //
 // These are the upstream Locus knowledge documents that carry domain facts DSH
 // has no equivalent for: Unity PlayerLoop/Tick debugging, profiler sampling,
-// graphics diagnostics, UI Toolkit devtools, and the Locus View SDK. The
-// documents that only duplicate DSH's own preset/skill/plugin surface
+// graphics diagnostics, UI Toolkit devtools, and building panels with Unity's own
+// Editor APIs. The documents that only duplicate DSH's own preset/skill/plugin surface
 // (`ask-locus`, `create-agent`, `create-skill`, `plugin`, `dream`, `grill`,
 // `connect-software`, `merge`, `review-context`) are deliberately not shipped.
 //
@@ -13,8 +13,17 @@
 // capability sources (`unity.files`): those are compiled inside the connected
 // editor with the bridge's own `compile_skill_package` command and are what
 // makes `using Locus.Skills;` available to `unity_execute`. The remaining
-// executable assets (the Python RenderDoc helpers and the Locus frontend
-// runtime) are not shipped — see NOTICE.
+// executable assets (the Python RenderDoc helpers) are not shipped — see NOTICE.
+//
+// Each entry also declares what the model needs to know before choosing it:
+//
+//   `requiresUnity`  the document's instructions only work with a connected
+//                    editor, so the provider hides it from the model (while
+//                    keeping it user-invocable) when the unity feature is off.
+//   `capabilities`   which halves of a multi-tool skill actually work here. A
+//                    skill that says "capture a frame with RenderDoc" while this
+//                    plugin ships no RenderDoc is a broken promise, so the false
+//                    entries are appended to the description as a caveat.
 //
 // Nothing here is written to the user's workspace: the provider serves these
 // bodies from the installed package, so a skill follows the plugin version
@@ -31,18 +40,25 @@ export const DOMAIN_SKILLS = Object.freeze([
     title: 'Unity Debugger',
     hint: 'PlayerLoop/Tick positioning, cross-frame conditions, paused inspection, native thread stacks.',
     upstream: 'knowledge/skill/debugger.md',
+    requiresUnity: true,
   }),
   Object.freeze({
     id: 'profiler',
     title: 'Unity Profiler',
     hint: 'Bounded CPU/GPU/memory/GC samples, baseline comparison, marker call paths, memory snapshots.',
     upstream: 'knowledge/skill/profiler.md',
+    requiresUnity: true,
   }),
   Object.freeze({
     id: 'graphics-debugger',
     title: 'Unity Graphics Debugger',
     hint: 'Frame Debugger events and render targets, RenderDoc capture/replay, passes, buffers, pipeline state.',
     upstream: 'skills/graphics-debugger/SKILL.md',
+    requiresUnity: true,
+    // The Frame Debugger half is self-contained C# compiled into the Editor; the
+    // RenderDoc half needs helpers this plugin does not ship. Saying so per
+    // capability is what lets the settings page and the model agree.
+    capabilities: Object.freeze({ frameDebugger: true, renderDoc: false }),
     unity: Object.freeze({
       // Package id used by `compile_skill_package`; the sources declare
       // `namespace Locus.Skills`, so one assembly per skill keeps them isolated.
@@ -61,6 +77,7 @@ export const DOMAIN_SKILLS = Object.freeze([
     title: 'UI Toolkit DevTools',
     hint: 'Unity 6.3+ UI Toolkit layout, style and interaction debugging in the Editor and Play Mode.',
     upstream: 'skills/ui-toolkit/SKILL.md',
+    requiresUnity: true,
     unity: Object.freeze({
       files: Object.freeze([
         'unity/Editor/UIToolkitApi.cs',
@@ -71,14 +88,25 @@ export const DOMAIN_SKILLS = Object.freeze([
   }),
   Object.freeze({
     id: 'view',
-    title: 'Locus View',
-    hint: 'Build Locus View panels: Vue UI, inspector, table, board and graph editors.',
+    title: 'Unity Editor Windows',
+    hint: 'Build tool windows in the Editor: IMGUI/UI Toolkit panels, inspector, table and graph views.',
     upstream: 'skills/view/SKILL.md',
+    requiresUnity: true,
   }),
 ])
 
-/** The skills that carry executable Unity sources. */
+/** The skills that carry executable Unity sources (`compile_skill_package`). */
 export const UNITY_SKILLS = Object.freeze(DOMAIN_SKILLS.filter((skill) => skill.unity !== undefined))
+
+/**
+ * The skills whose instructions need a connected Editor.
+ *
+ * These are hidden from the model when the unity feature is off — a document
+ * about `unity_execute` that cannot run is worse than no document — but stay
+ * user-invocable, because the settings page lists them and the human may be
+ * about to start the Editor.
+ */
+export const UNITY_DEPENDENT_SKILLS = Object.freeze(DOMAIN_SKILLS.filter((skill) => skill.requiresUnity === true))
 
 /**
  * One skill's Markdown, exactly as the provider serves it.

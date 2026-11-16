@@ -12,7 +12,7 @@
 //   * The tree comes from `property_tree_read`, i.e. Unity's own SerializedProperty
 //     walk with display names, enum options, ranges and foldouts — the same
 //     source `LocusPropertyTree` exposes. It is NOT a YAML re-implementation.
-//   * Edits go one property at a time through `property_tree_write`, which is
+//   * Edits go one property at a time through `property_tree_apply`, which is
 //     what the Locus inspector does (`unityPropertyApi.write`), and they are
 //     in-memory edits that dirty the object. Saving is a separate, explicit
 //     action, exactly like pressing Ctrl+S in the editor.
@@ -181,6 +181,12 @@ const zh = Object.freeze({
   settingsPreferences: '其它',
   settingsFrameCache: '把预览帧缓存到工程里',
   settingsFrameCacheHint: '把渲染出的预览帧写到工程的 Library/Locus/asset-preview-cache。关闭后每次都要重新渲染，但工程目录不会因浏览而增长。',
+  settingsCompileSidecar: '用 .NET 编译服务代替 Unity 编译',
+  settingsCompileSidecarHint: '把 snippet/状态机编译交给独立的 .NET 10 进程（tools/dsh-finish/Compiler）。首次使用会构建它，之后编译不再占用编辑器主线程；关掉就走编辑器自带的编译路径。',
+  settingsBackgroundHook: '后台加速（编辑器失焦时仍然跑）',
+  settingsBackgroundHookHint: '在 Windows 上给编辑器打补丁，使其失去焦点时仍持续处理命令队列，后台长任务因此不会卡住。Unix 版 broker 如实报告不支持，开关不会假装生效。',
+  settingsOfflineDocs: '允许导入 Unity 官方离线文档',
+  settingsOfflineDocsHint: '允许 unity_offline_docs 从 Unity 文档服务器下载与工程版本匹配的离线包（数百 MB），转换后存到工程的 Library/Locus/unity-docs。关闭后只能搜索已导入的内容。',
   settingsNonPublicAccess: '允许访问私有/内部成员',
   settingsNonPublicAccessHint: '对应官方的全局 Hot Reload & Compile 开关，是 unity_execute 的 enable_non_public_access 的全局半边：调用可以收窄，不能越过这里放宽。关闭后即使调用把该参数设为 true 也不会生效。',
   settingsSaveFailed: '没有保存成功',
@@ -303,6 +309,12 @@ const en = Object.freeze({
   settingsPreferences: 'Other',
   settingsFrameCache: 'Cache preview frames inside the project',
   settingsFrameCacheHint: 'Writes rendered preview frames under the project’s Library/Locus/asset-preview-cache. Off re-renders every time, but browsing never grows the project directory.',
+  settingsCompileSidecar: 'Compile with the .NET compile server instead of Unity',
+  settingsCompileSidecarHint: 'Hands snippet and run-states compilation to a separate .NET 10 process (tools/dsh-finish/Compiler). The first use builds it; afterwards compiling no longer occupies the editor main thread. Off uses the editor’s own compile path.',
+  settingsBackgroundHook: 'Background acceleration (keep running unfocused)',
+  settingsBackgroundHookHint: 'Patches the editor on Windows so it keeps draining its command queue while unfocused, which is what makes long background work finish. The Unix broker reports it as unsupported rather than pretending the switch worked.',
+  settingsOfflineDocs: 'Allow the Unity offline documentation import',
+  settingsOfflineDocsHint: 'Lets unity_offline_docs download the documentation package matching the project version (several hundred MB) and convert it into the project’s Library/Locus/unity-docs. Off still searches whatever is already imported.',
   settingsNonPublicAccess: 'Allow access to private and internal members',
   settingsNonPublicAccessHint: 'The global half of unity_execute’s enable_non_public_access, matching Locus’s global Hot Reload & Compile setting: a call may narrow it, never widen it past this. Off means a call asking for true has no effect.',
   settingsSaveFailed: 'Not saved',
@@ -2312,6 +2324,33 @@ export function createLocusAssetPlugin(require) {
           checked: preferences.nonPublicAccess !== false,
           busy: busy === 'preferences.nonPublicAccess',
           onChange: (value) => void apply('preferences', 'nonPublicAccess', value),
+        }),
+        // The three capabilities that cost something the user did not ask for
+        // yet: a separate .NET compiler process, a patch to the editor's own
+        // scheduling, and a several-hundred-megabyte documentation download.
+        h(SwitchRow, {
+          id: 'compileSidecar',
+          label: t('settingsCompileSidecar'),
+          hint: t('settingsCompileSidecarHint'),
+          checked: preferences.compileSidecar === true,
+          busy: busy === 'preferences.compileSidecar',
+          onChange: (value) => void apply('preferences', 'compileSidecar', value),
+        }),
+        h(SwitchRow, {
+          id: 'backgroundHook',
+          label: t('settingsBackgroundHook'),
+          hint: t('settingsBackgroundHookHint'),
+          checked: preferences.backgroundHook === true,
+          busy: busy === 'preferences.backgroundHook',
+          onChange: (value) => void apply('preferences', 'backgroundHook', value),
+        }),
+        h(SwitchRow, {
+          id: 'offlineDocs',
+          label: t('settingsOfflineDocs'),
+          hint: t('settingsOfflineDocsHint'),
+          checked: preferences.offlineDocs === true,
+          busy: busy === 'preferences.offlineDocs',
+          onChange: (value) => void apply('preferences', 'offlineDocs', value),
         }),
       ),
       h(

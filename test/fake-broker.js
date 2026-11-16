@@ -337,6 +337,33 @@ export async function startFakeBroker({ onMessage, tcp = false, unix = false } =
       return sides?.get('client') ?? clientStream
     },
     /**
+     * Push one unsolicited broker event to every connected client, exactly as
+     * the real broker does for `status-changed`, `console-log-entry`,
+     * `reload-complete` and friends: an envelope with `type` set to the event
+     * name and no `reply_to`, so it lands on the client's event stream.
+     */
+    emit: (eventType, payload = {}) => {
+      if (typeof eventType !== 'string' || eventType === '') {
+        throw new TypeError('emit(eventType, payload): eventType must be a non-empty string')
+      }
+      broadcast({ type: eventType, ...payload })
+      return clients.size
+    },
+    /**
+     * Same envelope, but only to the first connected client (or to
+     * `clients[index]`). Use it to prove that an event addressed to one client
+     * does not leak into another, without depending on connection order.
+     */
+    emitToOnly: (eventType, payload = {}, index = 0) => {
+      if (typeof eventType !== 'string' || eventType === '') {
+        throw new TypeError('emitToOnly(eventType, payload, index): eventType must be a non-empty string')
+      }
+      const socket = [...clients][index]
+      if (!socket || socket.destroyed) return false
+      socket.write(JSON.stringify({ type: eventType, ...payload }) + '\n')
+      return true
+    },
+    /**
      * Test seam: after `socket.destroy()` (a simulated domain reload), accept
      * new connections on a fresh client-side stream exposed by `stream`.
      */

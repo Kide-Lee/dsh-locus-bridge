@@ -26,12 +26,15 @@ use std::os::raw::c_int;
 
 pub mod api;
 pub mod broker;
+mod hang;
 mod heartbeat;
+pub mod hook;
 pub mod host_config;
 mod mono_names;
 mod names_unix;
 mod outbox;
 mod server;
+pub mod state_probe;
 mod state_plane;
 
 use broker::HostConfig;
@@ -353,8 +356,17 @@ pub unsafe extern "C" fn locus_set_compile_result(
 /// reports "unavailable" and the managed side keeps its other scheduling path.
 #[no_mangle]
 pub extern "C" fn locus_set_background_active(active: c_int) -> c_int {
-    let _ = active;
-    -1
+    // Returns the patched symbol count (0 when restoring) or -1; the managed
+    // side treats -1 as "fails open, keep the current scheduling".
+    match hook::set_active(active != 0) {
+        Ok(snapshot) => snapshot.symbol_count as c_int,
+        Err(snapshot) => {
+            if let Some(error) = snapshot.error {
+                eprintln!("[locus-native] background hook set_active failed: {error}");
+            }
+            -1
+        }
+    }
 }
 
 /// Open the persistent overlay client. The desktop overlay control channel is a

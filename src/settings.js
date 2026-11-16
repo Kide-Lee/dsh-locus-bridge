@@ -84,12 +84,22 @@ export const DEFAULT_SKILLS = Object.freeze(
  * ("also governed by the global Hot Reload & Compile setting"). It follows the
  * same rule as upstream: a call may narrow the switch, never widen it past the
  * user's preference.
+ *
+ * `compileSidecar`, `backgroundHook` and `offlineDocs` default to off because
+ * each one costs something the user did not ask for yet: the sidecar builds and
+ * runs a separate .NET process, the background hook patches the editor's own
+ * scheduling on Windows, and the documentation import downloads hundreds of
+ * megabytes. A default-on switch for any of them would spend that on a session
+ * that never uses the feature.
  */
 export const DEFAULT_PREFERENCES = Object.freeze({
   frameCache: true,
   workspacePath: '',
   unityProject: '',
   nonPublicAccess: true,
+  compileSidecar: false,
+  backgroundHook: false,
+  offlineDocs: false,
 })
 
 /** Preferences whose value is a string; every other preference is a boolean. */

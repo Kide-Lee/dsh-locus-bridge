@@ -1,0 +1,13 @@
+{
+  "name": "com.locus.dsh-bridge",
+  "displayName": "Locus DSH Bridge",
+  "version": "1.0.0",
+  "description": "Editor extensions the dsh-locus-bridge plugin adds beside the Locus Unity package: hot reload, editor health snapshots and compile-status reporting.",
+  "license": "GPL-3.0-or-later",
+  "unity": "2021.3",
+  "keywords": [
+    "locus",
+    "dsh",
+    "editor"
+  ]
+}

@@ -17,6 +17,7 @@
 
 import { randomUUID } from 'node:crypto'
 import { getClient } from './client-pool.js'
+import { hotReload } from './hotreload.js'
 import { LocusError } from './locus-client.js'
 import { BROKER_ERRORS } from './protocol.js'
 
@@ -65,6 +66,146 @@ export function assertRecompileableStatus(status) {
     )
   }
   if (status !== 'editing') throw new Error(`Unity Editor status is "${status}"; wait for a connected editor.`)
+}
+
+/**
+ * How `unity_recompile` reaches the disk→domain step (contracts.md §2.3).
+ *
+ *   compile — `request_recompile`: the classic full request, optionally syncing
+ *             assets first.
+ *   scripts — `request_script_reload`: Unity reimports changed scripts and
+ *             compiles on the next delayCall (payload LocusBridge.cs:1974-1993,
+ *             which answers `reload_requested`). No asset sync, no diagnostics
+ *             register: it says "asked", not "converged".
+ *   auto    — classify the edited paths with `unity_hot_reload` first, and only
+ *             fall through to `compile` when a change needs a real compile (or
+ *             when nothing at all is hot-patchable).
+ */
+const RECOMPILE_MODES = Object.freeze(['auto', 'compile', 'scripts'])
+
+function assertRecompileMode(mode) {
+  if (!RECOMPILE_MODES.includes(mode)) {
+    throw new Error(`Invalid mode '${mode}'. Allowed values: ${RECOMPILE_MODES.join(', ')}.`)
+  }
+}
+
+/** Request body for the payload's `request_script_reload` (§2.3). */
+export function scriptReloadPayload({ paths = [], reason = '', operationId } = {}) {
+  // The payload reads only the reason today (`request_script_reload` uses it
+  // for the Console line) but forwarding paths/operationId costs nothing and
+  // keeps the two paths' request shapes parallel.
+  return JSON.stringify({ schema: 1, paths, reason: reason || 'dsh-locus-bridge recompile', operationId })
+}
+
+/**
+ * Ask Unity to reimport changed scripts and compile, without waiting for a
+ * convergence verdict.
+ *
+ * Deliberately NOT routed through {@link recompile}'s convergence loop: this
+ * message is fire-and-forget by design (the payload schedules the reload on a
+ * delayCall), so there is no compile register to poll and pretending otherwise
+ * would report a compile that may never have started.
+ *
+ * @returns {{mode:'scripts', status:'reload_requested', message:string,
+ *   operationId:string, startedAt:number, elapsedMs:number, adopted:false}}
+ */
+export async function requestScriptReload(target, options = {}) {
+  const {
+    paths = [],
+    reason = '',
+    operationId = `dsh-${randomUUID()}`,
+    signal,
+    onPhase = () => {},
+    startTimeoutMs = DEFAULT_START_TIMEOUT_MS,
+  } = options
+  if (signal?.aborted) throw new Error('cancelled')
+  const changed = normalizeChangedPaths(paths, target.projectRoot ?? options.projectRoot)
+  onPhase('Requesting a script recompile')
+  const startedAt = Date.now()
+  const client = await getClient(target)
+  const response = await client.request('request_script_reload', scriptReloadPayload({ paths: changed, reason, operationId }), {
+    timeoutMs: startTimeoutMs,
+  })
+  if (!response?.ok) throw new LocusError(String(response?.error ?? 'request_script_reload failed'))
+  const message = String(response.message ?? '').trim() || 'reload_requested'
+  onPhase('Unity scheduled the script reload')
+  return {
+    mode: 'scripts',
+    status: message === 'reload_requested' ? 'reload_requested' : message,
+    message,
+    operationId,
+    startedAt,
+    elapsedMs: Date.now() - startedAt,
+    adopted: false,
+  }
+}
+
+/**
+ * `unity_recompile` with a mode (§2.3).
+ *
+ * `mode: 'auto'` classifies first: a change that is entirely hot-patchable is
+ * reported as such and nothing is recompiled; anything else (or an empty path
+ * list, where there is nothing to classify) falls through to the normal
+ * compile. Classification failures never block the compile — a bridge that
+ * predates `dsh_hot_reload_*` answers "unknown message type", and the classic
+ * path must keep working in that case.
+ *
+ * @param {{projectRoot?: string, pipe?: string}} target
+ * @param {object} options  everything {@link recompile} accepts, plus `mode`
+ * @returns {Promise<object>} recompile's result, extended with `mode` and, for
+ *   `auto`, the `classification` that decided the outcome
+ */
+export async function runRecompile(target, options = {}) {
+  const mode = options.mode ?? 'compile'
+  assertRecompileMode(mode)
+
+  if (mode === 'scripts') return requestScriptReload(target, options)
+
+  if (mode !== 'auto') return { ...(await recompile(target, options)), mode: 'compile' }
+
+  let classification = null
+  let classificationError = null
+  const paths = normalizeChangedPaths(options.paths ?? [], target.projectRoot ?? options.projectRoot)
+  if (paths.length > 0) {
+    try {
+      classification = await hotReload(target, { paths, dryRun: true, signal: options.signal, onPhase: options.onPhase })
+    } catch (error) {
+      // Abort must not be swallowed into a compile.
+      if (options.signal?.aborted || error?.message === 'cancelled') throw error
+      classificationError = error?.message ?? String(error)
+    }
+  }
+
+  if (classification && classification.needCompile.length === 0 && classification.hot.length > 0) {
+    return {
+      mode: 'hot',
+      status: 'hot',
+      message: 'every edited path is hot-patchable; nothing was recompiled',
+      operationId: null,
+      elapsedMs: 0,
+      adopted: false,
+      classification,
+    }
+  }
+
+  const result = await recompile(target, options)
+  return { ...result, mode: 'compile', classification, classificationError }
+}
+
+/** Render the classification part of a `mode: 'auto'` outcome, or '' when there was none. */
+export function formatClassification(classification, classificationError = null) {
+  if (classificationError) return `Hot reload classification was unavailable (${classificationError}); the compile ran anyway.`
+  if (!classification) return ''
+  const lines = []
+  for (const entry of classification.needCompile) {
+    lines.push(`  needs compile: ${entry.path}${entry.reason ? ` — ${entry.reason}` : ''}`)
+  }
+  for (const entry of classification.failed) {
+    lines.push(`  not classifiable: ${entry.path}${entry.error ? ` — ${entry.error}` : ''}`)
+  }
+  const hotPaths = new Set(classification.hot.map((entry) => entry.path))
+  for (const path of hotPaths) lines.push(`  hot-patchable: ${path}`)
+  return lines.length > 0 ? lines.join('\n') : ''
 }
 
 /** Keep only project-relative asset paths Locus accepts in a recompile request. */

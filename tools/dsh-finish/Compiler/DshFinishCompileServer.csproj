@@ -1,0 +1,52 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    DshFinishCompileServer — the .NET sidecar that compiles Unity snippets for
+    `unity_execute` on CoreCLR, so a compile never goes through Unity's own
+    Roslyn (which would pay a domain reload per attempt).
+
+    Derived from Locus/locus_compile_server/LocusCompileServer.csproj (upstream
+    GPL-3.0-or-later, see NOTICE). Deliberately standalone: it does NOT import
+    the upstream checkout, so `dotnet build` works from a plain clone of this
+    repository without ./Locus/.
+
+    Offline story: the only NuGet dependency is Microsoft.CodeAnalysis.CSharp
+    5.6.0. A machine that has built this project (or the upstream server) once
+    keeps the package in its NuGet cache, and every later build restores from
+    that cache without network. src/csharp/sidecar.js never downloads an SDK:
+    it invokes whatever `dotnet` the host already has and reports
+    SidecarUnavailable(code: 'no_dotnet') when there is none.
+  -->
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <AssemblyName>DshFinishCompileServer</AssemblyName>
+    <RootNamespace>Locus.DshFinish.Compiler</RootNamespace>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <!-- English-only Roslyn resources: compiler diagnostics are parsed by
+         agents verbatim, so they must not follow the host locale. -->
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+    <Deterministic>true</Deterministic>
+    <!-- The server is spawned by Node on demand; no build-time publish step. -->
+    <PublishSingleFile>false</PublishSingleFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="5.6.0" />
+  </ItemGroup>
+
+  <!--
+    The three shared sources live in this folder (copied from upstream with an
+    attribution header) rather than being linked out of ./Locus/, so the project
+    is self-contained.
+  -->
+  <ItemGroup>
+    <Compile Remove="bin/**" />
+    <Compile Remove="obj/**" />
+  </ItemGroup>
+
+</Project>

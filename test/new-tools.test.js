@@ -270,11 +270,14 @@ test('references compile the guid into a scene scan and report the attach points
   assert.match(requests[0], /MonoScript\.FromMonoBehaviour/)
 })
 
-test('references without a file to search inside explains the missing scope', async () => {
-  await assert.rejects(
-    () => tools.unity_asset_graph.execute({ action: 'references', path: 'Assets/Prefabs/Player.prefab' }, ctx()),
-    /references needs the scene or prefab to search inside/,
-  )
+test('references without a file to search inside answers from the project index', async () => {
+  // No broker, no file_path: the on-disk index answers instead of refusing, and
+  // says so, because "no references among the open scenes" and "no references in
+  // the project" are different answers.
+  const result = await tools.unity_asset_graph.execute({ action: 'references', path: 'Assets/Prefabs/Player.prefab' }, ctx())
+  assert.equal(result.guid, '0123456789abcdef0123456789abcdef')
+  assert.match(result.text, /read from the project YAML on disk/)
+  assert.match(result.text, /source: project index/)
 })
 
 test('usages list attach points for the script guid', async () => {
@@ -580,7 +583,20 @@ test('every declared output property is allowed by its own schema', () => {
   // below are the union over every action each tool can take, so a newly added
   // action has to declare what it returns here.
   const returns = {
-    unity_status: { text: '', connected: false, status: '', scenes: [], pipe: '' },
+    // flavor/version come from ProjectVersion.txt; responsive/phase/diagnosis
+    // only when the broker has the state probe.
+    unity_status: {
+      text: '',
+      connected: false,
+      status: '',
+      scenes: [],
+      pipe: '',
+      flavor: '',
+      version: '',
+      responsive: false,
+      phase: '',
+      diagnosis: '',
+    },
     unity_execute: { output: '', cancelled: false, maxMainThreadBlockedMs: 0 },
     unity_run_states: { text: '' },
     unity_play_mode: { text: '', status: '' },
@@ -589,11 +605,19 @@ test('every declared output property is allowed by its own schema', () => {
     unity_test: { text: '', status: '', total: 0, passed: 0, failed: 0, skipped: 0 },
     // read → snapshot, apply → undo
     unity_asset: { text: '', revision: '', snapshot: {}, undo: {} },
-    unity_asset_graph: { text: '', guid: '' },
+    // `source` says whether the answer came from the open scene or the on-disk index
+    unity_asset_graph: { text: '', guid: '', source: '' },
     // image is present only when the attachment store accepted the capture
     unity_capture: { text: '', path: '', image: {} },
     // batch → undo
     unity_scene: { text: '', undo: { kind: 'scene-batch', writes: [] } },
+    unity_hot_reload: { text: '', hot: [], needCompile: [], failed: [], supported: true },
+    unity_asset_search: { text: '', total: 0, partial: false, assets: [] },
+    unity_yaml_read: { text: '', path: '', source: '', total: 0 },
+    unity_yaml_search: { text: '', matches: [], scanned: 0 },
+    unity_lock: { text: '', action: '', held: false, acquired: false, holder: '', path: '' },
+    unity_release: { text: '', released: true, holder: '' },
+    unity_offline_docs: { text: '', action: '', imported: false, state: '', version: '', results: [] },
   }
   for (const definition of toolDefinitions) {
     const schema = definition.output?.schema

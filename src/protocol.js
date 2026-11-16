@@ -94,19 +94,26 @@ export function executePayload(code, { executionId, timeoutMs } = {}) {
 // ─── enable_non_public_access ────────────────────────────────────────────────
 
 /**
- * The namespace a snippet imports to reach assembly-internal members.
+ * Upstream implements non-public access entirely on the **compiler** side: its
+ * compile server compiles the snippet with `MetadataImportOptions.All`, an
+ * `IgnoresAccessChecksTo` allow-list over the reference set and (in the
+ * production mode) `SkipVerification`. It never prepends anything to the
+ * snippet source — and the in-editor Roslyn path has no such mechanism at all.
  *
- * Upstream's compile server emits the snippet assembly with an
- * `IgnoresAccessChecksTo` allow-list (`NonPublicAccessProbeMode::SkipVerification`).
- * This bridge cannot emit one, so the `using` is the part of the feature that
- * still carries meaning: with it, a snippet names anything the project
- * assemblies expose and a genuine cross-assembly internal reference fails with
- * Roslyn's own CS0122 instead of a misleading success.
+ * This bridge compiles snippets in the editor, so it cannot offer the
+ * capability. It must therefore not fake it either: an earlier version
+ * prepended `using __LocusNonPublicAccess.<assembly>;` lines, which no Unity
+ * assembly defines, so every snippet failed to compile (CS0246) while the
+ * argument claimed the opposite. The honest behaviour is what upstream does
+ * when its compile server is unavailable: report the limitation and compile the
+ * snippet as written (`enable_non_public_access` is accepted for schema
+ * compatibility and the private access itself stays unavailable).
  */
-export const NON_PUBLIC_ACCESS_NAMESPACE = '__LocusNonPublicAccess'
-
-/** Assemblies a snippet may address this way when the switch is on. */
-export const NON_PUBLIC_ACCESS_USER_ASSEMBLIES = ['Assembly-CSharp', 'Assembly-CSharp-Editor']
+export const NON_PUBLIC_ACCESS_LIMITATION =
+  'Private and internal members are not accessible from snippets in this bridge: it compiles them ' +
+  "with the editor's own Roslyn, which has no IgnoresAccessChecksTo allow-list (upstream needs its " +
+  'CoreCLR compile server for that). The snippet is compiled exactly as written; use reflection for ' +
+  'non-public members.'
 
 /**
  * Resolve upstream's `resolve_tool_non_public_access`: an omitted parameter
@@ -125,13 +132,6 @@ export function resolveNonPublicAccess(value, { globalEnabled = true } = {}) {
   return Boolean(globalEnabled) && requested
 }
 
-/**
- * Namespaces a non-public-access snippet has to import: one `using` per
- * assembly the bridge can reach that way.
- */
-export function nonPublicAccessPreamble() {
-  return NON_PUBLIC_ACCESS_USER_ASSEMBLIES.map((assembly) => `using ${NON_PUBLIC_ACCESS_NAMESPACE}.${assembly};`).join('\n')
-}
 
 /** Editor status values (`editing`, `playing`, `playing_paused`), plus `disconnected` for clients. */
 export const EDITOR_STATUSES = Object.freeze(['editing', 'playing', 'playing_paused'])

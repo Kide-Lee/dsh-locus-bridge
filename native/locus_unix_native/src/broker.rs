@@ -37,6 +37,20 @@ pub(crate) const EXECUTION_PROGRESS_MAX_BYTES: usize = 64 * 1024;
 
 pub(crate) const NO_CLIENT: u64 = 0;
 
+// ── Editor-health commands ─────────────────────────────────────────────────
+//
+// These are answered by the native broker itself (not routed to the managed
+// executor) on purpose: their entire value is answering *while* the editor main
+// thread is wedged, which is exactly when the managed side cannot reply.
+/// 三档状态探针 + 后台钩子状态。
+pub(crate) const HEALTH_REQUEST: &str = "dsh_health";
+/// 编辑器侧上报阶段标记（`EditorApplication.update` 驱动）。
+pub(crate) const HEALTH_SNAPSHOT_REQUEST: &str = "dsh_health_snapshot";
+/// 抓一次主线程栈；抓不到就明确失败，绝不返回空栈当成功。
+pub(crate) const MAIN_THREAD_STACK_REQUEST: &str = "dsh_main_thread_stack";
+/// 开/关后台调度钩子。message 是 `1`/`0`；非 Windows 宿主报 unsupported 而不是假装成功。
+pub(crate) const SET_BACKGROUND_HOOK_REQUEST: &str = "dsh_set_background_hook";
+
 pub(crate) fn now_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -357,6 +371,123 @@ impl Broker {
         }
     }
 
+    /// `dsh_health`：三档状态探针 + 后台钩子快照。
+    ///
+    /// 刻意**不**检查 `unavailable_error()`：编辑器 reload / 未就绪 / 正在退出时
+    /// 客户端最需要这些数据。探针自己每一档都会声明是否可用，不可用时给出原因，
+    /// 所以这里不会假装知道得比实际更多。
+    /// 打开/关闭后台调度钩子。返回值就是钩子快照——托管侧据此报告"有没有真的打上"，
+    /// 而不是假定请求成功。（上游同名能力走 `locus_set_background_active` 导出函数；
+    /// 这里多给一条请求通道，让远端客户端也能改，而不只是在编辑器进程内。）
+    pub(crate) fn respond_set_background_hook(&self, client: u64, id: &str, message: &str) {
+        let active = matches!(message.trim(), "1" | "true" | "on");
+        // `set_active` 的 Err 只表示"没打上"，两种情况都必须如实回给调用方：
+        // Unsupported 是这台机器没有这项能力（重试无用），Failed 是尝试后回滚了。
+        let snapshot = match crate::hook::set_active(active) {
+            Ok(snapshot) | Err(snapshot) => snapshot,
+        };
+        let body = serde_json::to_string(&snapshot).unwrap_or_else(|_| "{}".to_string());
+        if snapshot.state == crate::hook::HookState::Failed {
+            self.respond_error(
+                client,
+                id,
+                &format!(
+                    "background hook failed: {}",
+                    snapshot.error.clone().unwrap_or_default()
+                ),
+            );
+            return;
+        }
+        // Unsupported 也走 ok：请求本身被理解了，只是这台宿主做不到。
+        self.respond_ok(client, id, Some(body));
+    }
+
+    pub(crate) fn respond_health(&self, client: u64, id: &str) {
+        // SAFETY of the sample: main_thread_stall_ms reads only atomics.
+        let heartbeat_age_ms = self.main_thread_stall_ms();
+        let heartbeat = crate::state_probe::HeartbeatMark {
+            sequence: self.heartbeat_sequence.load(Ordering::Relaxed),
+        };
+        let mut probe = crate::state_probe::StateProbe::new();
+        let report = probe.probe(self.process_id, heartbeat_age_ms, heartbeat);
+        let payload = serde_json::json!({
+            "pid": report.pid,
+            "processPath": self.process_path,
+            "observedAtMs": now_ms(),
+            "managedState": managed_state::name(self.managed_state()),
+            "editorStatus": self.editor_status.lock().map(|s| s.clone()).unwrap_or_default(),
+            "domainGeneration": self.generation.load(Ordering::SeqCst),
+            "mainThreadId": self.main_thread_id,
+            "mainThreadHeartbeatSeq": heartbeat.sequence,
+            "heartbeatAgeMs": if heartbeat_age_ms >= 0 { Some(heartbeat_age_ms) } else { None },
+            "supported": report.supported,
+            "unresponsive": report.unresponsive || self.main_thread_unresponsive(),
+            "phase": report.phase,
+            "cpuPercent": report.cpu_percent,
+            "cpuWindowMs": report.cpu_window_ms,
+            "liveness": report.liveness,
+            "tiers": report.tiers,
+            "notes": report.notes,
+            "backgroundHook": crate::hook::snapshot(),
+            "stackSupport": crate::hang::stack_support(),
+        });
+        self.respond_ok(client, id, Some(payload.to_string()));
+    }
+
+    /// `dsh_health_snapshot`：记下编辑器侧阶段；坏帧返回错误但保留上一帧。
+    pub(crate) fn respond_health_snapshot(&self, client: u64, id: &str, body: &str) {
+        match crate::state_probe::record_phase(body) {
+            Ok(()) => self.respond_ok(client, id, Some("{\"recorded\":true}".to_string())),
+            Err(error) => {
+                // 明说坏在哪，但不要把它当成“探针坏了”。
+                eprintln!("[locus-native] rejected dsh_health_snapshot: {}", error.describe());
+                self.respond_error(client, id, errors::INVALID_REQUEST);
+            }
+        }
+    }
+
+    /// `dsh_main_thread_stack`：抓主线程栈。
+    ///
+    /// 平台/权限做不到时返回 `ok:true` + `status:"unavailable"`：这是“没有证据”，
+    /// 不是协议错误，客户端据此只说“抓不到栈”，而不是编一个栈出来。
+    pub(crate) fn respond_main_thread_stack(&self, client: u64, id: &str) {
+        let heartbeat_age_ms = self.main_thread_stall_ms();
+        let cpu = cached_cpu_percent(self.process_id);
+        let diagnosis = crate::hang::capture_main_thread_stack(
+            self.process_id,
+            Some(self.main_thread_id),
+            heartbeat_age_ms,
+            cpu,
+        );
+        match serde_json::to_string(&diagnosis) {
+            Ok(payload) => self.respond_ok(client, id, Some(payload)),
+            Err(error) => {
+                eprintln!("[locus-native] failed to encode stack diagnosis: {error}");
+                self.respond_error(client, id, errors::STACK_FAILED);
+            }
+        }
+    }
+
+    /// 每/秒一次的观察循环顺带采一次 CPU：CPU 差分需要一段窗口，卡死发生时
+    /// 再开始采是等不到的，所以平时就把上一次采样留在 [`cpu_sampler`] 里。
+    fn observe_cpu(&self) {
+        let heartbeat = crate::state_probe::HeartbeatMark {
+            sequence: self.heartbeat_sequence.load(Ordering::Relaxed),
+        };
+        let mut sampler = match cpu_sampler().lock() {
+            Ok(sampler) => sampler,
+            Err(_) => return,
+        };
+        match sampler.observe(self.process_id, heartbeat) {
+            Ok(Some(activity)) => {
+                store_cpu_percent(self.process_id, Some(activity.percent));
+            }
+            Ok(None) => {}
+            // 采样失败（平台不支持 / 权限）就保持“未知”，不写 0 冒充“空闲”。
+            Err(_) => {}
+        }
+    }
+
     pub(crate) fn respond_status(&self, client: u64, id: &str) {
         if let Some(code) = self.unavailable_error() {
             self.respond_error(client, id, code);
@@ -505,6 +636,9 @@ impl Broker {
             "replyBacklogLimitBytes": REPLY_BYTE_LIMIT,
             "clients": self.clients_status_json(observed_at_ms),
             "requestDeadlineMs": REQUEST_DEADLINE_MS,
+            // 后台钩子状态：与 dsh_health 用的是同一份快照，Windows 之外恒为
+            // unsupported，从不声称已打补丁。
+            "backgroundHook": crate::hook::snapshot(),
             "events": events,
             "cursor": cursor,
         })
@@ -910,6 +1044,8 @@ impl Broker {
             if age.is_some_and(|age| age.is_zero()) {
                 self.last_heartbeat_ms.store(now_ms(), Ordering::Relaxed);
             }
+            // 和心跳同一个节奏采 CPU：卡死时才采是拿不到差分的（见 cpu_sampler）。
+            self.observe_cpu();
             if self.main_thread_unresponsive() {
                 self.reject_stalled_queue();
             }
@@ -1162,6 +1298,46 @@ impl Broker {
 /// Same threshold as the Windows heartbeat observer.
 pub(crate) const UNRESPONSIVE_AFTER_MS: i64 = 30_000;
 
+// ── CPU 采样缓存 ───────────────────────────────────────────────────────────
+//
+// CPU 差分至少要一个采样窗口（500 ms）。卡死发生当下才开始采，第一次必然拿不到
+// 结论，所以观察循环平时就每秒采一次，这里只留“最近一次结论”。
+// 采样失败时保持“未知”（None），绝不写 0 —— 0% 会被读成“主线程空闲”。
+
+fn cpu_sampler() -> &'static Mutex<crate::state_probe::CpuSampler> {
+    static SAMPLER: std::sync::OnceLock<Mutex<crate::state_probe::CpuSampler>> = std::sync::OnceLock::new();
+    SAMPLER.get_or_init(|| Mutex::new(crate::state_probe::CpuSampler::new()))
+}
+
+/// 最近一次结论所在的进程号：pid 被复用后旧数据必须作废。
+static CPU_SAMPLE_PID: AtomicU32 = AtomicU32::new(0);
+static CPU_PERCENT_MILLIS: AtomicI64 = AtomicI64::new(-1);
+
+/// 读取缓存里的 CPU 占用；进程号对不上或从未采成就返回 `None`。
+pub(crate) fn cached_cpu_percent(pid: u32) -> Option<f64> {
+    if CPU_SAMPLE_PID.load(Ordering::Relaxed) != pid {
+        return None;
+    }
+    let millis = CPU_PERCENT_MILLIS.load(Ordering::Relaxed);
+    if millis < 0 {
+        return None;
+    }
+    Some(millis as f64 / 1000.0)
+}
+
+pub(crate) fn store_cpu_percent(pid: u32, percent: Option<f64>) {
+    match percent {
+        Some(percent) if percent.is_finite() && percent >= 0.0 => {
+            CPU_SAMPLE_PID.store(pid, Ordering::Relaxed);
+            CPU_PERCENT_MILLIS.store((percent * 1000.0).round() as i64, Ordering::Relaxed);
+        }
+        _ => {
+            CPU_SAMPLE_PID.store(pid, Ordering::Relaxed);
+            CPU_PERCENT_MILLIS.store(-1, Ordering::Relaxed);
+        }
+    }
+}
+
 fn current_thread_id() -> u32 {
     #[cfg(target_os = "linux")]
     {
@@ -1201,6 +1377,12 @@ pub(crate) fn handle_line(broker: &Arc<Broker>, client: u64, line: &[u8]) {
         "status" => broker.respond_status(client, id),
         "bridge_capabilities" => broker.respond_ok(client, id, Some(broker.capabilities_string())),
         REQUEST_STATE_REQUEST => broker.respond_request_state(client, id, message),
+        // 编辑器健康：由原生 broker 自己答，不进 managed 队列 —— 主线程卡死时
+        // managed 侧正是答不了的那个。
+        HEALTH_REQUEST => broker.respond_health(client, id),
+        HEALTH_SNAPSHOT_REQUEST => broker.respond_health_snapshot(client, id, message),
+        MAIN_THREAD_STACK_REQUEST => broker.respond_main_thread_stack(client, id),
+        SET_BACKGROUND_HOOK_REQUEST => broker.respond_set_background_hook(client, id, message),
         _ if kind == execution.cancel => {
             broker.signal_execution_cancel(message);
             if route_to_managed(broker, client, id, kind, message, trimmed).is_err() {

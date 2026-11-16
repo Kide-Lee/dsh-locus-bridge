@@ -17,7 +17,7 @@
 | 字段 | 取值与理由 |
 |---|---|
 | `category` | `dev`（Development & Runtime）。库里 4 个 Unity 条目都在 `tools`，但那几行走的是 MCP 或官方 unity CLI，卖点是"加工具"；本插件接管的是编译 / 域重载 / Play 循环，属于运行时。分类选偏了不会被打回，维护者会直接改 |
-| `description.en` | 必填。只写代码里能核实的事实：7 个 `unity_*` 工具、主线程 C# 执行、域重载、revision 守卫、场景属性树 |
+| `description.en` | 必填。只写代码里能核实的事实：18 个 `unity_*` 工具（另加 6 个 `code_*`，合计 24 个）、主线程 C# 执行、域重载、revision 守卫、场景属性树 |
 | `description.zh` | 可选（缺了维护者会补），但本仓库本来就是中文项目，直接给出更省事 |
 | `icon` / `tarball` / `screenshots` | 全部可选。见下方"还能做但没做的" |
 
@@ -94,8 +94,9 @@ protocol, so the agent can drive a Unity editor directly (no MCP server in betwe
 - `dsh.bundle`: declared at the repository root (`cordis.patch.yml`), so
   `dsh plugin --profile <p> add github:Kide-Lee/dsh-locus-bridge` installs a working
   bundle with no manual patch edit.
-- 7 tools: unity_status / unity_execute / unity_play_mode / unity_console_log /
-  unity_recompile / unity_asset / unity_scene.
+- 11 tools: unity_status / unity_execute / unity_run_states / unity_play_mode /
+  unity_console_log / unity_recompile / unity_test / unity_asset / unity_asset_graph /
+  unity_capture / unity_scene (plus 6 `code_*` C# analysis tools, 17 in total).
 - Windows named pipe and Unix domain socket transports; the Linux/macOS broker port
   lives in `native/locus_unix_native/` (GPL-3.0-or-later, derived from upstream
   Locus — see NOTICE).
@@ -112,8 +113,9 @@ One entry, one file. READMEs untouched.
 
 真被打回，最常见的两条是：
 
-1. **描述不属实。** 描述会被当作对本插件的声明去对着代码核。写了"7 个工具"就要真有 7 个，
-   提到某个命令就要能跑。当前描述只列了能在 `src/tools.js` 里点清的 7 个工具签名。
+1. **描述不属实。** 描述会被当作对本插件的声明去对着代码核。写了"18 个工具"就要真有 18 个，
+   提到某个命令就要能跑。当前描述只列了能在 `src/tools.js` 里点清的 18 个 `unity_*`
+   工具签名（`code_*` 的 6 个在 `src/index.js` 注册，所以总数是 17）。
 2. **动了别人的条目。** 一个 PR 只该改自己那一行，这正是 README 改为生成的原因。
 
 ## 六、还能做但没做的（都不影响收录）

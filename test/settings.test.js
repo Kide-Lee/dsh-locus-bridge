@@ -147,10 +147,19 @@ test('non-boolean and unknown switches are not coerced', () => {
     'workspacePath',
     'unityProject',
     'nonPublicAccess',
+    'compileSidecar',
+    'backgroundHook',
+    'offlineDocs',
   ])
   // The global half of `enable_non_public_access` defaults on, exactly as the
   // upstream tool schema does, and a non-boolean falls back to it.
   assert.equal(settings.preferences.nonPublicAccess, true)
+  // The three expensive capabilities default off: each spends something the
+  // user did not ask for (a .NET process, a patch to the editor, a large
+  // download), so opting in has to be deliberate.
+  assert.equal(settings.preferences.compileSidecar, false)
+  assert.equal(settings.preferences.backgroundHook, false)
+  assert.equal(settings.preferences.offlineDocs, false)
 })
 
 test('a workspace path round-trips and survives a hand-edited sibling', (t) => {

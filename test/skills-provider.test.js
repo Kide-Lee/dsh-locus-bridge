@@ -11,12 +11,14 @@ import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 
-import { DOMAIN_SKILLS } from '../src/skills/catalog.js'
+import { DOMAIN_SKILLS, UNITY_DEPENDENT_SKILLS } from '../src/skills/catalog.js'
 import {
   PROVIDER_NAME,
   SKILL_RANK,
   __resetSkillProviderCacheForTest,
   createDomainSkillProvider,
+  describe,
+  invalidateSkillCatalog,
   parseSkillDocument,
   skillDocument,
   workspaceHasUnityProject,
@@ -86,7 +88,7 @@ test('the catalog lists all five skills in a workspace holding a Unity project',
     assert.equal(candidate.provider, PROVIDER_NAME)
     assert.equal(candidate.source, 'runtime')
     assert.equal(candidate.rank, SKILL_RANK)
-    assert.equal(candidate.invocation.modelInvocable, true)
+    assert.equal(candidate.invocation.modelInvocable, true, 'every shipped skill is Unity-dependent, so unity on means invocable')
     assert.equal(candidate.invocation.userInvocable, true)
     assert.ok(candidate.description.length > 20)
     assert.equal(candidate.path, undefined, 'an in-memory skill has no file path')
@@ -137,4 +139,61 @@ test('loading a candidate returns the instruction body', async (t) => {
   assert.doesNotMatch(definition.content, /^---/)
 
   assert.equal(await provider.get({ locator: 'no-such-skill' }, {}), undefined)
+})
+
+test('with the unity feature off the skills stay user-invocable but leave the model catalog', async (t) => {
+  __resetSkillProviderCacheForTest()
+  const { root } = workspace(t, { unity: true })
+  // features() is the host's effective settings, so a test can flip it live.
+  let unity = false
+  const provider = createDomainSkillProvider({ features: () => ({ unity }) })
+
+  const candidates = await provider.list({ cwd: root })
+  assert.equal(candidates.length, DOMAIN_SKILLS.length, 'they are still offered to a human')
+  for (const candidate of candidates) {
+    assert.equal(candidate.invocation.modelInvocable, false, `${candidate.name} needs unity_execute`)
+    assert.equal(candidate.invocation.userInvocable, true)
+  }
+  // get() applies the same policy: a model that skipped the catalog still cannot pick it up.
+  const definition = await provider.get({ locator: 'debugger' }, { cwd: root })
+  assert.ok(definition)
+  assert.equal(definition.invocation.modelInvocable, false)
+  assert.equal(definition.invocation.userInvocable, true)
+
+  unity = true
+  assert.deepEqual(
+    (await provider.list({ cwd: root })).map((entry) => entry.invocation.modelInvocable),
+    UNITY_DEPENDENT_SKILLS.map(() => true),
+    'turning the feature back on restores the model catalog',
+  )
+})
+
+test('an aborted registration lists nothing', async (t) => {
+  __resetSkillProviderCacheForTest()
+  const { root } = workspace(t, { unity: true })
+  const control = new AbortController()
+  const provider = createDomainSkillProvider({ control })
+  assert.equal((await provider.list({ cwd: root })).length, DOMAIN_SKILLS.length)
+
+  control.abort()
+  assert.deepEqual(await provider.list({ cwd: root }), [], 'a disposed registration must not answer')
+})
+
+test('invalidateSkillCatalog forwards to the registry only when it is wired up', () => {
+  let calls = 0
+  invalidateSkillCatalog({ invalidate: () => { calls += 1 } })
+  invalidateSkillCatalog({ signal: new AbortController().signal })
+  invalidateSkillCatalog(null)
+  assert.equal(calls, 1)
+})
+
+test('the graphics-debugger description admits that RenderDoc capture is missing', () => {
+  const graphics = skillDocument('graphics-debugger')
+  const described = describe(DOMAIN_SKILLS.find((skill) => skill.id === 'graphics-debugger'), graphics)
+  assert.ok(described.startsWith(graphics.description), 'the shipped description is kept')
+  assert.match(described, /RenderDoc capture is not available here; only the Frame Debugger works\./)
+
+  // A skill with no missing capability is described by its own frontmatter, unchanged.
+  const debuggerSkill = DOMAIN_SKILLS.find((skill) => skill.id === 'debugger')
+  assert.equal(describe(debuggerSkill, skillDocument('debugger')), skillDocument('debugger').description)
 })

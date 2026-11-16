@@ -15,6 +15,7 @@ import { join } from 'node:path'
 import { LocusClient, LocusError } from './locus-client.js'
 import { BROKER_ERRORS, isReloading } from './protocol.js'
 import { resolvePipeName } from './pipe-name.js'
+import { explainUnresponsive } from './health.js'
 
 const RECONNECT_ATTEMPTS = 5
 const RECONNECT_BACKOFF_MS = [100, 200, 400, 800, 1_000]
@@ -157,6 +158,22 @@ const READY_POLL_MS = 500
  * other tool fail for the following second or two — the failure a caller sees
  * looks permanent even though the editor is merely reloading.
  */
+/**
+ * Attach the editor's actual state to a failure the caller cannot explain.
+ *
+ * A timeout while Unity is stuck looks exactly like a slow request; the state
+ * probe is the only thing that can say which it was. The explanation is appended
+ * to the message rather than replacing it, because the original error ("request
+ * timed out", "managed side is reloading") is still the primary fact — and a
+ * probe that is unavailable must not turn a working error path into a second
+ * failure, so anything thrown here is swallowed.
+ */
+function decorate(error) {
+  const explanation = explainUnresponsive(error)
+  if (explanation) error.message = `${error.message} ${explanation}`
+  return error
+}
+
 export async function withClient(target, fn, { exclusive = false } = {}) {
   const deadline = Date.now() + TRANSIENT_READY_WAIT_MS
   let client = await getClient(target)
@@ -174,8 +191,8 @@ export async function withClient(target, fn, { exclusive = false } = {}) {
       // every tool except recompile failing right after a compile.
       const reloadBoundary = isReloading(error.code)
       const retryable = !exclusive && (error.notExecuted || transportLoss || reloadBoundary)
-      if (!retryable || attempt >= TRANSIENT_RETRY_ATTEMPTS) throw error
-      if (Date.now() >= deadline) throw error
+      if (!retryable || attempt >= TRANSIENT_RETRY_ATTEMPTS) throw decorate(error)
+      if (Date.now() >= deadline) throw decorate(error)
       // Wait for the bridge to actually become ready, not a fixed nap: a domain
       // reload lasts as long as it lasts, and retrying into the same window just
       // burns the attempt budget (3 quick retries finished in ~1s and reported

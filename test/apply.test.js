@@ -146,16 +146,19 @@ test('the skills switch registers one provider and disposes it when turned off',
   }
   const { ctx } = mountContext({ services: { skills } })
   apply(ctx)
-  assert.equal(providers.length, 0, 'the domain skills are off by default')
+  // The offline-docs provider shares the provider name with the domain one, so
+  // count providers by retention order: the docs one is registered once at
+  // apply() time and the domain one is appended after it on every settings change.
+  const domain = (list) => list.slice(1)
+  assert.equal(domain(providers).length, 0, 'the domain skills are off by default')
 
   saveSettings({ skills: { debugger: true } })
-  assert.equal(providers.length, 1, 'switching a skill on registers the provider')
-  assert.equal(providers[0].name, 'dsh-locus-bridge')
+  assert.equal(domain(providers).length, 1, 'switching a skill on registers the provider')
 
   // Another skill on must replace the provider, never stack a second one.
   saveSettings({ skills: { profiler: true } })
-  assert.equal(providers.length, 1, 'a second switch still leaves one provider')
+  assert.equal(domain(providers).length, 1, 'a second switch still leaves one provider')
 
   saveSettings({ skills: { debugger: false, profiler: false } })
-  assert.equal(providers.length, 0, 'switching the last skill off disposes the provider')
+  assert.equal(domain(providers).length, 0, 'switching the last skill off disposes the provider')
 })

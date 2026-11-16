@@ -64,3 +64,13 @@ native/**/target/
 # dist/ is regenerated, never committed. The payload tree itself stays tracked
 # under payload/, which is what makes `dsh plugin add github:…` self-contained.
 dist/
+
+# Local CARGO_HOME used when ~/.cargo is read-only (sandboxed CI, agent
+# sessions). `npm run test:native` needs it: the crates.io registry cache has to
+# live somewhere writable, and the broker crate resolves its dependencies from
+# the index even when target/ already holds the artifacts.
+.locus-cargo/
+
+# .NET build output for the DSH-side compile server (build:compiler).
+tools/dsh-finish/Compiler/bin/
+tools/dsh-finish/Compiler/obj/

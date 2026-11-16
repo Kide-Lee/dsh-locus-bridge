@@ -27,11 +27,60 @@ upstream repository. **Modified** for POSIX hosts:
   (`src/state_plane.rs`);
 - Mono symbol resolution uses `dlopen`/`dlsym` instead of
   `GetModuleHandle`/`GetProcAddress` (`src/mono_names.rs`);
-- WebView2, GPU render transport and the in-process background hook have no
-  Unix counterpart and return the platform's "unavailable" values (`src/lib.rs`).
+- WebView2 and the GPU render transport have no Unix counterpart and return the
+  platform's "unavailable" values (`src/lib.rs`);
+- the in-process background scheduling hook (`src/hook/`) patches the same two
+  `Unity!IsApplicationActive*` entry points with the same `mov eax,1; ret` bytes
+  as upstream `unity_bridge/background_hook.rs`, but only on Windows: the patch
+  needs Unity's PDB symbols for private engine functions, and a Unix
+  `UnityPlayer.so` exports neither the symbols nor a parseable table. Non-Windows
+  hosts report `unsupported` instead of claiming a patch;
+- the state probe and hang diagnosis (`src/state_probe/`, `src/hang/`) replace
+  upstream's out-of-process `state_probe.rs` / `hang_diagnosis.rs` with an
+  in-process equivalent: T1 phase freshness, T2 CPU from `/proc/<pid>/stat` or
+  `proc_pidinfo`, T3 liveness, and a `ptrace` register capture that walks the
+  frame pointer chain. Where upstream returns a native stack, this port returns
+  the managed frames it can prove and says so; it never fabricates a frame.
 
 The C ABI exported by the library is unchanged, so the unmodified upstream
 managed plugin binds it on Linux as it does on Windows.
+
+### `packages/unity-bridge/` — companion Unity package
+
+**Original work.** A second Unity package (`com.locus.dsh-bridge`) that adds the
+editor-side half of capabilities `payload/locus_unity/` does not expose. It is a
+separate package on purpose: `payload/` is a verbatim upstream copy and
+`npm run check:payload` fails the moment it diverges, so anything new has to live
+alongside it instead of inside it.
+
+It reaches the bridge by reflection (`Locus.LocusBridge, Locus.Editor` and
+`RegisterExtensionMessageHandler`) rather than a project reference, because the
+payload's asmdef is `autoReferenced: false` and a hard reference would pin one
+payload build. Nothing here is copied from Locus: the hot-reload ledger, the
+classifier, the health phase tracker and the JSON writer are written for this
+project. The message-type names (`dsh_hot_reload_*`, `dsh_health`,
+`dsh_health_snapshot`) are this project's own, which is why they cannot collide
+with the desktop client's protocol.
+
+### `tools/dsh-finish/Compiler/` — .NET compile sidecar
+
+**Original work**, with two files copied from upstream and marked as such in
+their own headers:
+
+- `Shared/LocusSnippetLoopGuard.cs` and `Shared/LocusSnippetExpressionMode.cs`
+  are upstream `locus_unity/Editor/ExecuteCodeAsync/*.cs`, copied **unmodified
+  apart from the attribution header**. They keep the off-editor compile path
+  guarding loops and treating trailing expressions exactly as the in-editor path
+  does, so the two compilers cannot disagree about a snippet's shape.
+- Everything else (`Program.cs`, `StdioTransport.cs`, `SnippetCompiler.cs`,
+  `RunStateSource.cs`, `ReferenceSet.cs`, `DiagnosticText.cs`, `SelfTest.cs`) is
+  written for this project. The sidecar speaks its own LSP-framed JSON protocol
+  over stdio; it does not reuse upstream's `locus_compile_server` sources, which
+  are tied to upstream's Rust client.
+
+The sidecar is built on demand by `npm run build:compiler`; the assembly it needs
+(`Microsoft.CodeAnalysis.CSharp` 5.x) is fetched from NuGet at build time, so the
+offline path is "warm cache or no sidecar", never a silent download at runtime.
 
 ### `native/locus-native-protocol/` — wire protocol crate
 

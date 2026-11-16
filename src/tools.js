@@ -30,7 +30,15 @@ import {
 import { buildApplyRequest, readAsset, reloadAssets } from './asset-api.js'
 import { findCodeUsages, findReferences } from './asset-graph.js'
 import { buildCaptureRequest, captureContent, captureViewport, commitImage, assertImageCapableRoute, formatCapture, readablePath } from './capture.js'
-import { consoleLogMessage, formatConsoleLog } from './console.js'
+import { consoleLogMessage, formatConsoleLog, formatEditorLog, readEditorLogEntries } from './console.js'
+import { formatAssetSearch, searchAssets } from './asset-db.js'
+import { editYamlText, queryDocument, readYamlFile, readYamlText, renderNode, searchYamlFiles } from './yaml-lite.js'
+import { LockTimeout, acquireLock, lockStatus, releaseLock } from './editor-lock.js'
+import { editorHealth, enableBackgroundHook, explainUnresponsive } from './health.js'
+import { formatHotReload, hotReload } from './hotreload.js'
+import { DOCS_ROOT_NAME, docsStatus, importDocs, readDoc, searchDocs } from './docs/unity-docs.js'
+import { detectFlavor } from './unity-flavor.js'
+import { compileSnippet, ensureSidecar, sidecarStatus } from './csharp/sidecar.js'
 import {
   UNITY_EXECUTE_CANCELLED,
   assertRequestedStatus,
@@ -54,11 +62,16 @@ import {
   EDITOR_STATUS_DISCONNECTED,
   EDITOR_STATUSES,
   EXECUTE_IDLE_LIMIT_MS,
-  nonPublicAccessPreamble,
+  NON_PUBLIC_ACCESS_LIMITATION,
   resolveNonPublicAccess,
 } from './protocol.js'
 import { beginUndoCheckpoint, endUndoCheckpoint, recordWrite } from './undo.js'
-import { recompile, readReloadState, assertRecompileableStatus } from './recompile.js'
+import {
+  assertRecompileableStatus,
+  formatClassification,
+  readReloadState,
+  runRecompile,
+} from './recompile.js'
 import { ensureSkillActivation } from './skills/activation.js'
 import { formatSceneTree, parseTree, readRequest, searchRequest, searchSceneObjects } from './scene.js'
 import {
@@ -171,25 +184,22 @@ async function assertWriteStatus(target, requested, action) {
 }
 
 /**
- * Apply upstream's `enable_non_public_access` to a `unity_execute` snippet.
+ * Read upstream's `enable_non_public_access` argument for a `unity_execute`
+ * snippet.
  *
- * Upstream hands the switch to its compile server, which emits the snippet
- * assembly with `NonPublicAccessProbeMode::SkipVerification` — an
- * `IgnoresAccessChecksTo` allow-list. This bridge compiles the snippet with
- * Roslyn inside the editor and cannot emit that list, so the switch has to mean
- * something honest here:
+ * Upstream implements the feature in its compile server: the snippet assembly
+ * is emitted with `MetadataImportOptions.All` plus an `IgnoresAccessChecksTo`
+ * allow-list (`NonPublicAccessProbeMode::SkipVerification`). This bridge
+ * compiles snippets with the editor's own Roslyn, which has no such hook, so
+ * the argument cannot unlock anything. It is still validated (a non-boolean is
+ * a caller error, and the global Hot Reload & Compile switch wins) and the
+ * limitation is reported alongside the result instead of being silently
+ * pretended; the snippet itself is sent exactly as written.
  *
- *   - omitted or `true`: keep the enumeration the global Hot Reload & Compile
- *     setting asks for. The leading `using`s put the snippet on the same
- *     footing as the compile server for the naming half of the feature (a type
- *     or member another assembly exposes), so an assembly-internal reference
- *     that Roslyn cannot verify fails with its own CS0122 error instead of a
- *     misleading success.
- *   - `false`: the caller asserts there is nothing to relax, which is exactly
- *     what this bridge does anyway, so the snippet runs unprefixed.
  * @param code - normalized snippet source.
  * @param value - raw `enable_non_public_access` argument.
- * @returns The snippet, with the preamble when the feature is requested.
+ * @returns `{ code, limitation }` where `limitation` is a note to surface when
+ *   the feature was asked for, or `null` when it was not.
  */
 function applyNonPublicAccess(code, value) {
   let enabled
@@ -198,8 +208,7 @@ function applyNonPublicAccess(code, value) {
   } catch (error) {
     throw new Error(error.message, { cause: error })
   }
-  if (!enabled) return code
-  return `${nonPublicAccessPreamble()}\n${code}`
+  return { code, limitation: enabled ? NON_PUBLIC_ACCESS_LIMITATION : null }
 }
 
 /**
@@ -247,7 +256,9 @@ const unityStatus = {
   name: 'unity_status',
   description:
     'Check the Locus connection to the Unity Editor and report its state (editing / playing / playing_paused, ' +
-    `open scenes, broker capabilities, domain generation / convergence serial). ${CONNECTION_DESCRIPTION}`,
+    'open scenes, broker capabilities, domain generation / convergence serial), the editor edition (Unity or 团结引擎 / ' +
+    'Tuanjie) read from ProjectVersion.txt, and — when the broker supports the state probe — whether the editor is ' +
+    `actually responsive and what it is doing. ${CONNECTION_DESCRIPTION}`,
   parameters: {
     project_path: PROJECT_PATH,
     pipe: {
@@ -265,6 +276,14 @@ const unityStatus = {
         status: { type: 'string' },
         scenes: { type: 'array', items: { type: 'string' } },
         pipe: { type: 'string' },
+        // Empty string / false mean "not determined", which keeps every output
+        // field a single scalar type: the authored schema language only allows
+        // unions through `oneOf`, and a nullable scalar is not worth that.
+        flavor: { type: 'string', description: 'unity, tuanjie, or empty when ProjectVersion.txt is unreadable.' },
+        version: { type: 'string' },
+        responsive: { type: 'boolean', description: 'False when the broker has no state probe or the editor is stuck.' },
+        phase: { type: 'string' },
+        diagnosis: { type: 'string' },
       },
     },
     render: (_args, value) => [{ type: 'text', text: value.text }],
@@ -272,8 +291,11 @@ const unityStatus = {
   async execute(args, exec) {
     const projectRoot = resolveProjectRoot(args.project_path, exec)
     const target = describeTarget({ projectRoot, pipe: args.pipe })
+    // ProjectVersion.txt is on disk, so the edition is known even when no editor
+    // is running — which is exactly when "is this a Tuanjie project" gets asked.
+    const edition = detectFlavor(projectRoot)
     if (!target.pipe) {
-      return statusResult(target, false, 'disconnected', [], null, 'no pipe resolved')
+      return statusResult(target, false, 'disconnected', [], null, 'no pipe resolved', null, edition, null)
     }
     try {
       const client = await getClient(target)
@@ -281,28 +303,78 @@ const unityStatus = {
       const capabilities = client.capabilities
       let reloadState = null
       if (state.connected) reloadState = await readReloadState(target).catch(() => null)
-      const text = formatStatus({ ...state, pipe: target.pipe, projectRoot, capabilities, reloadState })
-      return statusResult(target, state.connected, state.status, state.scenes, capabilities, state.error, text)
+      const health = state.connected ? await readHealth(target) : null
+      const text = formatStatus({
+        ...state,
+        pipe: target.pipe,
+        projectRoot,
+        capabilities,
+        reloadState,
+        flavor: edition.flavor,
+        version: edition.version,
+        health,
+      })
+      return statusResult(target, state.connected, state.status, state.scenes, capabilities, state.error, text, edition, health)
     } catch (error) {
       // A failed connection is exactly when the project's own state matters:
       // report it unprompted instead of making the caller ask again.
       const text = await withDiagnosis(
-        formatStatus({ connected: false, status: 'disconnected', pipe: target.pipe, projectRoot, error: error.message }),
+        formatStatus({
+          connected: false,
+          status: 'disconnected',
+          pipe: target.pipe,
+          projectRoot,
+          error: error.message,
+          flavor: edition.flavor,
+          version: edition.version,
+        }),
         projectRoot,
         exec,
       )
-      return statusResult(target, false, 'disconnected', [], [], error.message, text)
+      return statusResult(target, false, 'disconnected', [], [], error.message, text, edition, null)
     }
   },
 }
 
-function statusResult(target, connected, status, scenes, capabilities, error, text) {
+/**
+ * Editor health, or null when the broker predates the probe.
+ *
+ * `unity_status` must keep working against an older broker/payload, so an
+ * unsupported probe degrades to "no opinion" instead of failing the status call.
+ */
+async function readHealth(target) {
+  try {
+    const health = await editorHealth(target)
+    return health?.supported === false ? null : health
+  } catch {
+    return null
+  }
+}
+
+function statusResult(target, connected, status, scenes, capabilities, error, text, edition = null, health = null) {
   return {
-    text: text ?? formatStatus({ connected, status, scenes, pipe: target.pipe, capabilities, error }),
+    text:
+      text ??
+      formatStatus({
+        connected,
+        status,
+        scenes,
+        pipe: target.pipe,
+        capabilities,
+        error,
+        flavor: edition?.flavor ?? '',
+        version: edition?.version ?? '',
+        health,
+      }),
     connected,
     status,
     scenes: scenes ?? [],
     pipe: target.pipe ?? '',
+    flavor: edition?.flavor ?? '',
+    version: edition?.version ?? '',
+    responsive: health?.responsive ?? false,
+    ...(health?.phase ? { phase: health.phase } : {}),
+    ...(health?.diagnosis ? { diagnosis: health.diagnosis } : {}),
   }
 }
 
@@ -321,6 +393,47 @@ async function withDiagnosis(text, projectRoot, exec) {
   if (!diagnosis) return text
   publish(diagnosis, exec)
   return `${text}\n\n${diagnosis}`
+}
+
+/**
+ * 编译检查的编辑器外回退：走插件自带的 .NET 编译服务（tools/dsh-finish/Compiler）。
+ *
+ * 只在设置里打开 `compileSidecar` 时才用，且只在编辑器那条路不可用时才用——它回答
+ * 的是"这段代码能不能编译、错在哪几行"，不会执行，也不认识 UnityEngine 之外的
+ * 编辑器状态。`ok: false` 是正常的编译失败（返回诊断），不是异常。
+ */
+async function sidecarDiagnosis(projectRoot, code, { usings = null, references = null } = {}) {
+  if (readSettings().preferences.compileSidecar !== true) return null
+  let status
+  try {
+    status = await sidecarStatus(projectRoot)
+  } catch {
+    return null
+  }
+  if (!status.available) return null
+  try {
+    const result = await compileSnippet(projectRoot, { code, usings, references, mode: 'unity' })
+    return { status, result }
+  } catch (error) {
+    return { status, error: error?.message ?? String(error) }
+  }
+}
+
+/** 把编译服务的诊断渲染成给人看的一段话。 */
+function formatSidecarDiagnosis(diagnosis) {
+  if (!diagnosis) return ''
+  const header = `Compile check (off-editor, Roslyn ${diagnosis.status?.dotnetVersion ?? 'sidecar'}):`
+  if (diagnosis.error) return `${header}\n  the compile sidecar failed: ${diagnosis.error}`
+  const result = diagnosis.result ?? {}
+  const diagnostics = Array.isArray(result.diagnostics) ? result.diagnostics : []
+  if (result.ok && diagnostics.length === 0) return `${header}\n  the snippet compiles cleanly.`
+  const lines = diagnostics.slice(0, 20).map((item) => {
+    const where = item.line ? ` (line ${item.line}, column ${item.column})` : ''
+    return `  ${item.severity} ${item.id}${where}: ${item.message}`
+  })
+  if (diagnostics.length > lines.length) lines.push(`  … ${diagnostics.length - lines.length} more`)
+  const verdict = result.ok ? 'compiles with warnings' : 'does not compile'
+  return `${header}\n  the snippet ${verdict}${lines.length > 0 ? ':' : '.'}${lines.length > 0 ? `\n${lines.join('\n')}` : ''}`
 }
 
 // ─── unity_execute ──────────────────────────────────────────────────────────
@@ -413,12 +526,16 @@ const unityExecute = {
     const requested = args.request_editor_status
     const timeoutMs = clampExecuteTimeout(args.timeout)
 
-    let codeWithAccess
+    let snippet
     try {
-      codeWithAccess = applyNonPublicAccess(code, args.enable_non_public_access)
+      snippet = applyNonPublicAccess(code, args.enable_non_public_access)
     } catch (error) {
       return failure(error.message)
     }
+    // The snippet is compiled by the editor's own Roslyn, so the private-access
+    // half of `enable_non_public_access` cannot be honoured; say so next to the
+    // result instead of letting the caller assume it worked.
+    const withAccessNote = (text) => (snippet.limitation ? `${text}\n\n${snippet.limitation}` : text)
 
     const run = async (runExec) => {
       try {
@@ -438,7 +555,7 @@ const unityExecute = {
         try {
           let lastPublished = 0
           const { output, progress } = await executeSnippet(client, {
-            code: codeWithAccess,
+            code: snippet.code,
             executionId: randomUUID(),
             timeoutMs,
             signal: runExec.signal,
@@ -456,7 +573,7 @@ const unityExecute = {
           let text = trimmed.length > 0 ? trimmed : 'Code executed successfully (no output).'
           const note = longBlockNote(blockedMs(progress))
           if (note) text += `\n\n${note}`
-          return { output: text, cancelled: false, maxMainThreadBlockedMs: blockedMs(progress) }
+          return { output: withAccessNote(text), cancelled: false, maxMainThreadBlockedMs: blockedMs(progress) }
         } finally {
           await session?.release()
         }
@@ -464,7 +581,12 @@ const unityExecute = {
         if (error?.message === UNITY_EXECUTE_CANCELLED || runExec.signal?.aborted) {
           return { output: 'Execution cancelled by the caller; Unity snippet stopped.', cancelled: true, maxMainThreadBlockedMs: 0 }
         }
-        return failure(asToolError(error).message)
+        const message = asToolError(error).message
+        // The snippet did not run, so the question the caller still has is
+        // "was it my code?": answer it off-editor when the user opted into the
+        // compile sidecar, instead of leaving them to ask again.
+        const diagnosis = await sidecarDiagnosis(projectRoot, code)
+        return failure(diagnosis ? `${message}\n\n${formatSidecarDiagnosis(diagnosis)}` : message)
       }
     }
 
@@ -688,9 +810,20 @@ const unityConsoleLog = {
   description:
     'Read recent Unity Console entries without asking the user to copy logs. Entries are chronological, duplicates ' +
     'are merged with a count, and the message is truncated to the newest entries. `level` and `levels` combine with OR ' +
-    `semantics; omit both for all levels. ${CONNECTION_DESCRIPTION}`,
+    'semantics; omit both for all levels.\n\n' +
+    '`source` picks where the entries come from: `console` (default) asks the running Editor through the broker; ' +
+    '`editorLog` reads the tail of `Editor.log` from disk instead, which is the only way to see why an Editor never ' +
+    `finished starting (a crashed compile, a stuck import, Safe Mode). ${CONNECTION_DESCRIPTION}`,
   parameters: {
     project_path: PROJECT_PATH,
+    source: {
+      type: 'string',
+      enum: ['console', 'editorLog'],
+      default: 'console',
+      description:
+        '`console` (default) reads the live Editor Console through the broker; `editorLog` reads the Editor.log tail ' +
+        'from disk and works with the Editor closed or unresponsive.',
+    },
     level: {
       type: 'string',
       enum: ['error', 'warn', 'info'],
@@ -718,6 +851,18 @@ const unityConsoleLog = {
     render: (_args, value) => [{ type: 'text', text: value.text }],
   },
   async execute(args, exec) {
+    const source = args.source ?? 'console'
+    if (source !== 'console' && source !== 'editorLog') {
+      return textFailure(`Invalid source '${source}'. Allowed values: console, editorLog.`)
+    }
+    if (source === 'editorLog') {
+      // Editor.log is a file, so this path needs no Editor at all: it is the
+      // fallback for exactly the cases where the broker cannot answer.
+      const projectRoot = resolveProjectRoot(args.project_path, exec)
+      const levels = args.levels ?? (args.level === undefined ? undefined : [args.level])
+      const result = await readEditorLogEntries(projectRoot, { levels, limit: args.limit })
+      return { text: formatEditorLog(result) }
+    }
     const { message } = consoleLogMessage({ level: args.level, levels: args.levels, limit: args.limit })
     const target = targetFor(args, exec)
     try {
@@ -750,7 +895,12 @@ const unityRecompile = {
     'The result `status` is one of: `ok` (compiled and reloaded), `not_needed` (assemblies already up to date), ' +
     '`superseded` (another compilation, e.g. the user\'s Ctrl+R, owns the result register) or `error` (compile ' +
     'diagnostics in `diagnostics`). `sync.mode` selects the asset import performed before compiling: `none`, ' +
-    '`targeted` (only `sync.paths`) or `full` (project refresh). ' +
+    '`targeted` (only `sync.paths`) or `full` (project refresh).\n\n' +
+    '`mode` chooses how the edit reaches the domain: `compile` (default) is the full request_recompile above; ' +
+    '`scripts` asks Unity to reimport changed scripts and compile on its next delay call — faster, but it only ' +
+    'reports that the reload was requested, not that it converged; `auto` first asks unity_hot_reload whether the ' +
+    'edited paths are hot-patchable and stays in "hot" state (status `hot`, no compile) when every one of them is, ' +
+    'falling through to `compile` otherwise. ' +
     CONNECTION_DESCRIPTION,
   parameters: {
     project_path: PROJECT_PATH,
@@ -782,6 +932,15 @@ const unityRecompile = {
     reason: {
       type: 'string',
       description: 'Free-form reason logged in the Unity Console (optional).',
+    },
+    mode: {
+      type: 'string',
+      enum: ['auto', 'compile', 'scripts'],
+      default: 'compile',
+      description:
+        'How the edit reaches the domain (default `compile`): `auto` tries hot reload first and only compiles when a ' +
+        'change needs it; `scripts` requests a script-only reload through `request_script_reload` without waiting for ' +
+        'a compile verdict.',
     },
     timeout: {
       type: 'integer',
@@ -842,7 +1001,8 @@ const unityRecompile = {
         )
       }
       assertRecompileableStatus(state.status)
-      const result = await recompile(target, {
+      const result = await runRecompile(target, {
+        mode: args.mode ?? 'compile',
         syncMode: sync.mode ?? 'none',
         paths: sync.paths ?? [],
         reason: args.reason ?? '',
@@ -850,6 +1010,32 @@ const unityRecompile = {
         onPhase: (phase) => publish(phase, exec),
         convergeTimeoutMs: timeout * 1000,
       })
+      // `mode: 'scripts'` is fire-and-forget: there is no compile register to
+      // poll, so reporting "converged" would claim a result nobody measured.
+      // `status` is Unity's own `reload_requested` acknowledgement, forwarded verbatim.
+      if (result.mode === 'scripts') {
+        return {
+          text:
+            `Unity script reload requested (${(result.elapsedMs / 1000).toFixed(1)}s). ` +
+            'Unity reimports the changed scripts and compiles on its next delay call; use unity_status (or ' +
+            'unity_recompile with mode "compile") to confirm the editor is idle before relying on new code.',
+          status: 'reload_requested',
+          operationId: result.operationId ?? '',
+          elapsedMs: result.elapsedMs,
+        }
+      }
+      if (result.status === 'hot') {
+        const detail = formatClassification(result.classification, result.classificationError)
+        return {
+          text:
+            'No compile was needed: every edited path is hot-patchable.\n' +
+            (detail ? `${detail}\n` : '') +
+            'Apply the edit with unity_hot_reload once a patch assembly exists, or rerun with mode "compile" to force a rebuild.',
+          status: 'hot',
+          operationId: '',
+          elapsedMs: result.elapsedMs ?? 0,
+        }
+      }
       const lines = []
       if (result.status === 'error') {
         lines.push('Unity recompile failed. Compiler diagnostics:')
@@ -864,6 +1050,8 @@ const unityRecompile = {
             'call unity_status (or unity_recompile again) to confirm the editor is idle before relying on new code.',
         )
       }
+      const detail = formatClassification(result.classification, result.classificationError)
+      if (detail) lines.push(`Hot reload check:\n${detail}`)
       if (result.adopted) lines.push(`Adopted an in-flight compile (operation ${result.operationId}).`)
       lines.push(`Operation: ${result.operationId} (${(result.elapsedMs / 1000).toFixed(1)}s)`)
       return {
@@ -1451,6 +1639,7 @@ const unityAssetGraph = {
       properties: {
         text: { type: 'string' },
         guid: { type: 'string' },
+        source: { type: 'string' },
       },
     },
     render: (_args, value) => [{ type: 'text', text: value.text }],
@@ -1471,7 +1660,7 @@ const unityAssetGraph = {
         // `findCodeUsages` already renders the heading and the counts from the
         // scan answer; adding another heading here duplicated it and buried the
         // results.
-        return { text: result.results, guid: result.guid }
+        return { text: result.results, guid: result.guid, source: result.source }
       }
       if (action === 'references' || action === 'dependencies') {
         const result = await findReferences(target, projectRoot, {
@@ -1480,7 +1669,7 @@ const unityAssetGraph = {
           filePath: args.file_path,
           limit: args.limit,
         })
-        return { text: result.results, guid: result.guid ?? '' }
+        return { text: result.results, guid: result.guid ?? '', source: result.source }
       }
       throw new Error(`action must be one of ${GRAPH_ACTIONS.join(', ')}.`)
     } catch (error) {
@@ -1935,6 +2124,535 @@ function formatSceneSetResult(output) {
   return output?.trim() || 'Scene edit executed (no output).'
 }
 
+// ─── unity_hot_reload ───────────────────────────────────────────────────────
+
+const unityHotReload = {
+  name: 'unity_hot_reload',
+  description:
+    'Decide whether edited script files can be patched into the running Editor without a compile and domain reload, ' +
+    'and report the method identities a patch would need.\n\n' +
+    'This tool classifies; it does not compile patch assemblies (that needs a second Roslyn pass the bridge does not ' +
+    'own). A file reported as "hot" means its edits are limited to method/constructor/accessor bodies — the kind a ' +
+    'detour can replace — so the edit CAN go live without a reload once a patch assembly exists. A file reported as ' +
+    '"needs compile" changed something structural (record/interface/enum, a field declaration, a field-like event, an ' +
+    'assembly definition) and must go through unity_recompile, whose mode "auto" makes that choice for you.\n\n' +
+    'Reads files from disk, so it works with the Editor closed; with an Editor connected the classification also ' +
+    'cross-checks the domain generation and the live detour ledger.\n\n' +
+    CONNECTION_DESCRIPTION,
+  parameters: {
+    project_path: PROJECT_PATH,
+    paths: {
+      type: 'array',
+      items: { type: 'string' },
+      description:
+        'Project-relative script paths (for example Assets/Scripts/Player.cs). Defaults to every .cs file modified since ' +
+        'the last compile result when the Editor is connected.',
+    },
+    dry_run: {
+      type: 'boolean',
+      default: false,
+      description: 'Classify only. Default false: the classification API is read-only either way, but dry_run labels the result.',
+    },
+  },
+  output: {
+    schema: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        text: { type: 'string' },
+        hot: { type: 'array', items: { type: 'object', additionalProperties: true } },
+        needCompile: { type: 'array', items: { type: 'object', additionalProperties: true } },
+        failed: { type: 'array', items: { type: 'object', additionalProperties: true } },
+        supported: { type: 'boolean' },
+      },
+    },
+    render: (_args, value) => [{ type: 'text', text: value.text }],
+  },
+  async execute(args, exec) {
+    const target = targetFor(args, exec)
+    const result = await hotReload(target, {
+      paths: Array.isArray(args.paths) ? args.paths : [],
+      dryRun: args.dry_run === true,
+      signal: exec?.signal,
+      onPhase: (phase) => publish(phase, exec),
+    })
+    return {
+      text: formatHotReload(result),
+      hot: result.hot ?? [],
+      needCompile: result.needCompile ?? [],
+      failed: result.failed ?? [],
+      supported: result.supported === true,
+    }
+  },
+}
+
+// ─── unity_asset_search ─────────────────────────────────────────────────────
+
+const unityAssetSearch = {
+  name: 'unity_asset_search',
+  description:
+    'Search the project-wide asset index built from .meta files (GUIDs, asset types, paths) without going through the ' +
+    'Editor, so it answers with the Editor closed.\n\n' +
+    'Filters combine: type (scene/prefab/material/animation/controller/script/texture/audio/shader/model/genericAsset…), ' +
+    'name (substring of the file name), under (a project-relative folder), guid (exactly 32 hex). Also reports broken ' +
+    'assets: files with no .meta and duplicate GUIDs.\n\n' +
+    'The index lives in Library/Locus/dsh-asset-db and refreshes incrementally; pass rescan to rebuild it.',
+  parameters: {
+    project_path: PROJECT_PATH,
+    type: {
+      type: 'string',
+      description: 'Asset type filter, for example scene, prefab, material, script, texture.',
+    },
+    name: {
+      type: 'string',
+      description: 'Substring of the file name, case-insensitive. Include the extension when you mean a format.',
+    },
+    under: {
+      type: 'string',
+      description: 'Project-relative folder to search inside, for example Assets/Prefabs.',
+    },
+    guid: {
+      type: 'string',
+      description: 'Exact 32-hex asset GUID (as stored in the .meta).',
+    },
+    limit: {
+      type: 'integer',
+      default: 20,
+      description: 'Maximum entries to list.',
+    },
+    rescan: {
+      type: 'boolean',
+      default: false,
+      description: 'Rebuild the index from scratch before searching.',
+    },
+  },
+  output: {
+    schema: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        text: { type: 'string' },
+        total: { type: 'integer' },
+        partial: { type: 'boolean' },
+        assets: { type: 'array', items: { type: 'object', additionalProperties: true } },
+      },
+    },
+    render: (_args, value) => [{ type: 'text', text: value.text }],
+  },
+  async execute(args, exec) {
+    const projectRoot = resolveProjectRoot(args.project_path, exec)
+    const result = await searchAssets(projectRoot, {
+      type: args.type,
+      name: args.name,
+      under: args.under,
+      guid: args.guid,
+      limit: args.limit,
+      rescan: args.rescan === true,
+    })
+    return {
+      text: formatAssetSearch(result),
+      total: result.total,
+      partial: result.partial === true,
+      assets: result.assets,
+    }
+  },
+}
+
+// ─── unity_yaml_read / unity_yaml_search ────────────────────────────────────
+
+const unityYamlRead = {
+  name: 'unity_yaml_read',
+  description:
+    "Read one Unity serialized asset (.unity, .prefab, .asset, .mat, .anim, .controller, …) through a Unity-dialect " +
+    'YAML reader, without the Editor.\n\n' +
+    'Every document keeps its `--- !u!<classId> &<fileId>` identity, so you can name one object by fileID, by class ' +
+    'name (MonoBehaviour), or by `!u!114`. Values are rendered to a configurable depth; the file is never rewritten ' +
+    'unless you edit it.\n\n' +
+    'Prefer this over reading the raw file: it tells you which document a field belongs to and hides the parts that are ' +
+    'just serialization noise.',
+  parameters: {
+    project_path: PROJECT_PATH,
+    path: {
+      type: 'string',
+      description: 'Project-relative asset path, for example Assets/Prefabs/Player.prefab.',
+    },
+    object: {
+      type: 'string',
+      description: 'Which document to show: a fileID ("114" or "-234567"), a class name ("MonoBehaviour"), or "!u!114".',
+    },
+    depth: {
+      type: 'integer',
+      default: 2,
+      description: 'Nesting depth to render.',
+    },
+    max_items: {
+      type: 'integer',
+      default: 20,
+      description: 'Maximum list items to render per sequence.',
+    },
+  },
+  output: {
+    schema: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        text: { type: 'string' },
+        path: { type: 'string' },
+        source: { type: 'string' },
+        total: { type: 'integer' },
+      },
+    },
+    render: (_args, value) => [{ type: 'text', text: value.text }],
+  },
+  async execute(args, exec) {
+    const projectRoot = resolveProjectRoot(args.project_path, exec)
+    const result = readYamlText(projectRoot, {
+      path: args.path,
+      object: args.object,
+      depth: args.depth,
+      maxItems: args.max_items,
+    })
+    return { text: result.text, path: result.path, source: result.source, total: result.total }
+  },
+}
+
+const unityYamlSearch = {
+  name: 'unity_yaml_search',
+  description:
+    'Search Unity serialized YAML for a value — across one file, a folder, or the whole project — without the Editor.\n\n' +
+    'Matches are found in field values and object names, so this answers "which prefabs set speed to 12", "where is ' +
+    'this GUID referenced", and "which documents mention Player". Use match_fields to restrict the search to particular ' +
+    'keys (for example "m_Name" or "speed,m_MethodName").\n\n' +
+    'query may be a plain substring or `re:<pattern>`.',
+  parameters: {
+    project_path: PROJECT_PATH,
+    query: {
+      type: 'string',
+      description: 'Substring to find, or `re:<regular expression>`.',
+    },
+    scope: {
+      type: 'string',
+      description: 'Project-relative file or folder to search. Defaults to the whole project.',
+    },
+    match_fields: {
+      type: 'string',
+      description: 'Comma-separated field names to restrict the match to, for example "m_Name,m_Script".',
+    },
+    limit: {
+      type: 'integer',
+      default: 50,
+      description: 'Maximum matches to return.',
+    },
+  },
+  output: {
+    schema: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        text: { type: 'string' },
+        matches: { type: 'array', items: { type: 'object', additionalProperties: true } },
+        scanned: { type: 'integer' },
+      },
+    },
+    render: (_args, value) => [{ type: 'text', text: value.text }],
+  },
+  async execute(args, exec) {
+    const projectRoot = resolveProjectRoot(args.project_path, exec)
+    const query = String(args.query ?? '')
+    if (query.trim() === '') return { text: 'Error: query is required.', matches: [], scanned: 0 }
+    const result = searchYamlFiles(projectRoot, {
+      query,
+      scope: args.scope,
+      limit: args.limit,
+      matchFields: args.match_fields,
+    })
+    return { text: result.text, matches: result.matches ?? [], scanned: result.scanned ?? 0 }
+  },
+}
+
+/**
+ * Lock holders are `string | string[] | null` in the lock module: several owners
+ * may share the lock, and nobody holding it is reported as null. The tool output
+ * declares one string, so join a list and render "nobody" as empty.
+ */
+function asHolder(holder) {
+  if (Array.isArray(holder)) return holder.join(', ')
+  return holder ?? ''
+}
+
+// ─── unity_lock / unity_release ─────────────────────────────────────────────
+
+const unityLock = {
+  name: 'unity_lock',
+  description:
+    'Take the cooperative per-project editing lock that transient Unity Editor state needs: Play/Pause/Edit switches, ' +
+    'recompiles and domain reloads, active scene and Prefab Stage changes, Selection and window focus.\n\n' +
+    'The lock lives in Library/Locus/dsh-editor.lock, is stamped with the owner, and is shared by every session ' +
+    'pointed at the same project — including sessions in other processes. A lock left behind by a process that no ' +
+    'longer exists is detected as stale and broken automatically, so a crash never wedges the project.\n\n' +
+    'mode "wait" blocks up to timeout_seconds; mode "try" returns immediately with the current holder. Re-taking a lock ' +
+    'you already hold is a no-op. Release it with unity_release or action "status" to inspect it. This lock does not ' +
+    'replace request_editor_status: it coordinates sessions, it does not change the Editor mode.',
+  parameters: {
+    project_path: PROJECT_PATH,
+    action: {
+      type: 'string',
+      enum: ['acquire', 'release', 'status'],
+      default: 'acquire',
+      description: 'acquire (default), release, or status.',
+    },
+    owner: {
+      type: 'string',
+      description: 'Name of this session. Required for acquire and release; re-using it makes the call idempotent.',
+    },
+    mode: {
+      type: 'string',
+      enum: ['wait', 'try'],
+      default: 'wait',
+      description: 'wait blocks up to timeout_seconds; try fails immediately when somebody else holds it.',
+    },
+    timeout_seconds: {
+      type: 'integer',
+      default: 300,
+      description: 'How long mode "wait" blocks before reporting LockTimeout.',
+    },
+    reason: {
+      type: 'string',
+      description: 'Short note recorded in the lock file, so a peer waiting on it knows what is happening.',
+    },
+  },
+  output: {
+    schema: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        text: { type: 'string' },
+        action: { type: 'string' },
+        held: { type: 'boolean' },
+        acquired: { type: 'boolean' },
+        holder: { type: 'string', description: 'Owner holding the lock, empty when nobody does.' },
+        path: { type: 'string' },
+      },
+    },
+    render: (_args, value) => [{ type: 'text', text: value.text }],
+  },
+  async execute(args, exec) {
+    const projectRoot = resolveProjectRoot(args.project_path, exec)
+    const action = args.action ?? 'acquire'
+    if (action === 'status') {
+      const status = await lockStatus(projectRoot)
+      const text = status.held
+        ? `Lock held by ${status.holder}${status.reason ? ` (${status.reason})` : ''} since ${new Date(status.acquiredAt ?? Date.now()).toISOString()}` +
+          `${status.stale ? ', stale (its process is gone; the next acquire breaks it)' : ''}.\nFile: ${status.path}`
+        : `No editing lock is held on this project.\nFile: ${status.path}`
+      return { text, action, held: status.held, acquired: false, holder: asHolder(status.holder), path: status.path }
+    }
+    if (action === 'release') {
+      const released = await releaseLock(projectRoot, { owner: args.owner })
+      const text = released.released
+        ? `Released the editing lock held by ${args.owner}.`
+        : `Did not release: ${released.reason ?? `the lock is held by ${released.holder}`}.`
+      return {
+        text,
+        action,
+        held: released.released !== true && released.holder !== null,
+        acquired: false,
+        holder: asHolder(released.holder),
+        path: '',
+      }
+    }
+    if (action !== 'acquire') {
+      return { text: `Error: action must be acquire, release or status; got '${action}'.`, action: String(action), held: false, acquired: false, holder: '', path: '' }
+    }
+    try {
+      const result = await acquireLock(projectRoot, {
+        owner: args.owner,
+        mode: args.mode,
+        timeoutSeconds: args.timeout_seconds,
+        reason: args.reason,
+      })
+      const text = result.acquired
+        ? `Lock acquired by ${result.holder}${result.waitedMs > 0 ? ` after ${Math.round(result.waitedMs / 1000)}s` : ''}. ` +
+          'Release it with unity_release when the transient Editor state change is done.'
+        : `Lock is held by ${result.holder}${result.holder === null ? '' : ''}; use mode "wait" to block for it.`
+      return { text, action, held: result.acquired, acquired: result.acquired, holder: asHolder(result.holder), path: '' }
+    } catch (error) {
+      if (error instanceof LockTimeout) {
+        return { text: `Error: ${error.message}`, action, held: false, acquired: false, holder: asHolder(error.holder), path: '' }
+      }
+      throw error
+    }
+  },
+}
+
+const unityRelease = {
+  name: 'unity_release',
+  description:
+    'Release the cooperative per-project editing lock for this project. Only the owner that took the lock may release ' +
+    'it: releasing a peer\'s lock is refused, because a session that could silently unlock another one would make the ' +
+    'lock worthless.\n\n' +
+    'This is a convenience alias for `unity_lock action="release"`.',
+  parameters: {
+    project_path: PROJECT_PATH,
+    owner: {
+      type: 'string',
+      description: 'Owner name that took the lock (the same string passed to unity_lock).',
+    },
+  },
+  output: {
+    schema: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        text: { type: 'string' },
+        released: { type: 'boolean' },
+        holder: { type: 'string', description: 'Owner holding the lock, empty when nobody does.' },
+      },
+    },
+    render: (_args, value) => [{ type: 'text', text: value.text }],
+  },
+  async execute(args, exec) {
+    const projectRoot = resolveProjectRoot(args.project_path, exec)
+    const released = await releaseLock(projectRoot, { owner: args.owner })
+    const text = released.released
+      ? `Released the editing lock held by ${args.owner}.`
+      : `Did not release: ${released.reason ?? `the lock is held by ${released.holder}`}.`
+    return { text, released: released.released === true, holder: asHolder(released.holder) }
+  },
+}
+
+// ─── unity_offline_docs ─────────────────────────────────────────────────────
+
+const unityOfflineDocs = {
+  name: 'unity_offline_docs',
+  description:
+    "Unity's own offline documentation for this project's editor version, imported once from Unity's documentation " +
+    'server and stored in Library/Locus/unity-docs, then searched locally.\n\n' +
+    'action "import" downloads the version-matched offline package (Chinese by default, locale "en" for English), ' +
+    'converts it to Markdown and indexes it. action "status" reports which version is imported. action "search" finds ' +
+    'pages by term. action "read" returns one page.\n\n' +
+    'Use this instead of guessing at Unity API behaviour: the pages are the same ones Unity ships with the Editor, so ' +
+    'they match the version the project actually compiles against.\n\n' +
+    'The download is several hundred megabytes and needs network access; import reports network_error instead of ' +
+    'failing when it is unavailable, and nothing is ever downloaded implicitly.',
+  parameters: {
+    project_path: PROJECT_PATH,
+    action: {
+      type: 'string',
+      enum: ['status', 'import', 'search', 'read'],
+      default: 'status',
+      description: 'status (default), import, search, or read.',
+    },
+    query: {
+      type: 'string',
+      description: 'Search terms for action "search".',
+    },
+    path: {
+      type: 'string',
+      description: 'Doc page path from a search result, for action "read" (for example Manual/class-Rigidbody.html).',
+    },
+    locale: {
+      type: 'string',
+      enum: ['zh-cn', 'en'],
+      default: 'zh-cn',
+      description: 'Documentation language to import.',
+    },
+    version: {
+      type: 'string',
+      description: 'Editor version to import, for example 2022.3 or 6000.0. Defaults to ProjectVersion.txt.',
+    },
+    limit: {
+      type: 'integer',
+      default: 20,
+      description: 'Maximum search results.',
+    },
+  },
+  output: {
+    schema: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        text: { type: 'string' },
+        action: { type: 'string' },
+        imported: { type: 'boolean' },
+        state: { type: 'string' },
+        version: { type: 'string' },
+        results: { type: 'array', items: { type: 'object', additionalProperties: true } },
+      },
+    },
+    render: (_args, value) => [{ type: 'text', text: value.text }],
+  },
+  async execute(args, exec) {
+    const projectRoot = resolveProjectRoot(args.project_path, exec)
+    const action = args.action ?? 'status'
+    const status = docsStatus(projectRoot)
+    if (action === 'status') {
+      const lines = status.imported
+        ? [
+            `Unity offline docs: imported (Unity ${status.version}${status.locale ? `, ${status.locale}` : ''}), ${status.files} page(s).`,
+            `Location: ${DOCS_ROOT_NAME} under ${projectRoot}/Library/Locus`,
+          ]
+        : [
+            'Unity offline docs: not imported.',
+            'Run unity_offline_docs action "import" once; it downloads the package matching ProjectVersion.txt and indexes it.',
+          ]
+      if (status.imported) lines.push('Search it with action "search", read a page with action "read".')
+      return { text: lines.join('\n'), action, imported: status.imported === true, state: status.imported ? 'imported' : 'absent', version: status.version ?? '', results: [] }
+    }
+    if (action === 'import') {
+      publish('Downloading and indexing the Unity offline documentation', exec)
+      const result = await importDocs(projectRoot, {
+        locale: args.locale,
+        version: args.version,
+        signal: exec?.signal,
+      })
+      const lines = []
+      if (result.state === 'imported') {
+        lines.push(`Imported Unity ${result.version} documentation (${result.locale ?? args.locale ?? 'zh-cn'}): ${result.files} page(s), ${Math.round((result.bytes ?? 0) / (1024 * 1024))} MB.`)
+        lines.push('Search it with unity_offline_docs action "search".')
+      } else if (result.state === 'up_to_date') {
+        lines.push(`Unity ${result.version} documentation is already imported (${result.files} page(s)).`)
+      } else if (result.state === 'unsupported_version') {
+        lines.push(
+          `Unity ${result.version ?? args.version ?? '(unknown)'} has no offline documentation package. ` +
+            'Unity only publishes them for released versions; check ProjectVersion.txt.',
+        )
+      } else {
+        lines.push(`Could not import the documentation: ${result.reason ?? 'the documentation server was unreachable'}.`)
+        lines.push('Nothing was changed; the existing index (if any) is untouched. Retry when the network is available.')
+      }
+      return { text: lines.join('\n'), action, imported: result.state === 'imported' || result.state === 'up_to_date', state: result.state, version: result.version ?? '', results: [] }
+    }
+    if (action === 'search') {
+      const query = String(args.query ?? '').trim()
+      if (query === '') return { text: 'Error: query is required for action "search".', action, imported: status.imported === true, state: status.imported ? 'imported' : 'absent', version: status.version ?? '', results: [] }
+      if (!status.imported) {
+        return {
+          text: 'Unity offline docs are not imported, so there is nothing to search. Run unity_offline_docs action "import" first.',
+          action,
+          imported: false,
+          state: 'absent',
+          version: '',
+          results: [],
+        }
+      }
+      const results = searchDocs(projectRoot, { query, limit: args.limit })
+      const lines = results.length === 0 ? [`No documentation page matched "${query}".`] : [`${results.length} page(s) matched "${query}":`]
+      for (const result of results) lines.push(`- ${result.path} — ${result.title}${result.snippet ? `\n    ${result.snippet}` : ''}`)
+      return { text: lines.join('\n'), action, imported: true, state: 'imported', version: status.version ?? '', results }
+    }
+    if (action === 'read') {
+      if (!status.imported) {
+        return { text: 'Unity offline docs are not imported. Run unity_offline_docs action "import" first.', action, imported: false, state: 'absent', version: '', results: [] }
+      }
+      const page = readDoc(projectRoot, { path: args.path })
+      const text = `# ${page.title} (${page.path})\n\n${page.markdown}`
+      return { text, action, imported: true, state: 'imported', version: status.version ?? '', results: [] }
+    }
+    return { text: `Error: action must be status, import, search or read; got '${action}'.`, action: String(action), imported: false, state: 'error', version: '', results: [] }
+  },
+}
+
 /** Every tool definition, in registration order. */
 export const toolDefinitions = [
   unityStatus,
@@ -1948,6 +2666,13 @@ export const toolDefinitions = [
   unityAssetGraph,
   unityCapture,
   unityScene,
+  unityHotReload,
+  unityAssetSearch,
+  unityYamlRead,
+  unityYamlSearch,
+  unityLock,
+  unityRelease,
+  unityOfflineDocs,
 ]
 
 export { shutdownPool, describeTarget }

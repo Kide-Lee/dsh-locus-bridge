@@ -243,10 +243,21 @@ test('GET /skills/state lists the package catalog and its switches', async (t) =
     const payload = await response.json()
     assert.equal(response.status, 200)
     assert.equal(payload.packages.length, 5)
+    // `executable` still means "the plugin can build code for this skill", so
+    // only the two skills that ship C# sources qualify. `requiresUnity` (every
+    // skill here) is a routing fact, not an executability one.
     assert.deepEqual(
       payload.packages.filter((entry) => entry.executable).map((entry) => entry.id),
       ['graphics-debugger', 'ui-toolkit'],
     )
+    // The old boolean could not say that the graphics skill ships only half of
+    // what it teaches, so capabilities are reported per name next to it.
+    assert.deepEqual(payload.packages.find((entry) => entry.id === 'graphics-debugger').capabilities, {
+      frameDebugger: true,
+      renderDoc: false,
+    })
+    assert.deepEqual(payload.packages.find((entry) => entry.id === 'ui-toolkit').capabilities, { compile: true })
+    assert.deepEqual(payload.packages.find((entry) => entry.id === 'view').capabilities, {}, 'nothing to compile, nothing declared missing')
     assert.equal(payload.packages.find((entry) => entry.id === 'ui-toolkit').enabled, true)
     assert.equal(payload.packages.find((entry) => entry.id === 'debugger').enabled, false)
     // No workspace, no compile target, no per-skill state: the only thing this
