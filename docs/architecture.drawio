@@ -1,0 +1,201 @@
+<mxfile host="app.diagrams.net" version="24.7.17">
+  <diagram id="dsh-locus-arch" name="架构">
+    <mxGraphModel dx="1600" dy="900" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1800" pageHeight="1420" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <mxCell id="title" value="dsh-locus-bridge · 架构总览" style="text;html=1;align=left;verticalAlign=middle;fontSize=24;fontStyle=1;fontColor=#333333;" vertex="1" parent="1">
+          <mxGeometry x="40" y="16" width="760" height="44" as="geometry" />
+        </mxCell>
+        <mxCell id="subtitle" value="DSH 作为 Locus 客户端：工具 → 传输 → Unity 编辑器，以及旁挂的编译服务、文档与本地缓存" style="text;html=1;align=left;verticalAlign=middle;fontSize=12;fontColor=#777777;" vertex="1" parent="1">
+          <mxGeometry x="40" y="58" width="1100" height="26" as="geometry" />
+        </mxCell>
+
+        <mxCell id="agent" value="&lt;div style=&quot;line-height:1.4&quot;&gt;&lt;b&gt;DSH Agent / 模型&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:10px&quot;&gt;按工具 schema 发起调用&lt;/font&gt;&lt;/div&gt;" style="rounded=1;arcSize=10;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=13;align=center;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry x="480" y="100" width="280" height="56" as="geometry" />
+        </mxCell>
+
+        <mxCell id="host" value="DSH Host 进程 · dsh-locus-bridge 插件" style="rounded=0;whiteSpace=wrap;html=1;dashed=1;fillColor=#f3f7fd;strokeColor=#6c8ebf;fontSize=14;fontStyle=1;align=left;verticalAlign=top;spacingLeft=14;spacingTop=8;" vertex="1" parent="1">
+          <mxGeometry x="200" y="180" width="1360" height="560" as="geometry" />
+        </mxCell>
+
+        <mxCell id="gTools" value="工具定义（工具注册表）" style="rounded=1;arcSize=6;whiteSpace=wrap;html=1;dashed=1;fillColor=#ffffff;strokeColor=#6c8ebf;fontSize=12;fontStyle=1;align=left;verticalAlign=top;spacingLeft=10;spacingTop=6;" vertex="1" parent="1">
+          <mxGeometry x="230" y="230" width="420" height="190" as="geometry" />
+        </mxCell>
+        <mxCell id="t1" value="&lt;b&gt;unity_* × 19&lt;/b&gt;　状态 / 执行 / 热重载 / 资产 / 场景 / YAML / 锁 / 文档" style="rounded=1;arcSize=8;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#6c8ebf;fontSize=10;align=left;spacingLeft=10;" vertex="1" parent="1">
+          <mxGeometry x="245" y="266" width="390" height="38" as="geometry" />
+        </mxCell>
+        <mxCell id="t2" value="&lt;b&gt;code_* × 6&lt;/b&gt;　符号 / 定义 / 引用 / Hover / 诊断 / 安装" style="rounded=1;arcSize=8;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#6c8ebf;fontSize=10;align=left;spacingLeft=10;" vertex="1" parent="1">
+          <mxGeometry x="245" y="310" width="390" height="38" as="geometry" />
+        </mxCell>
+        <mxCell id="t3" value="&lt;b&gt;schema.js&lt;/b&gt; 闭合参数 / 输出　·　&lt;b&gt;async&lt;/b&gt; 仅 execute / test" style="rounded=1;arcSize=8;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#6c8ebf;fontSize=10;align=left;spacingLeft=10;" vertex="1" parent="1">
+          <mxGeometry x="245" y="354" width="390" height="44" as="geometry" />
+        </mxCell>
+
+        <mxCell id="gExec" value="执行模块（Node.js）" style="rounded=1;arcSize=6;whiteSpace=wrap;html=1;dashed=1;fillColor=#ffffff;strokeColor=#6c8ebf;fontSize=12;fontStyle=1;align=left;verticalAlign=top;spacingLeft=10;spacingTop=6;" vertex="1" parent="1">
+          <mxGeometry x="680" y="230" width="420" height="190" as="geometry" />
+        </mxCell>
+        <mxCell id="m1" value="client-pool / locus-client　连接池 / 重连 / 超时" style="rounded=1;arcSize=8;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#6c8ebf;fontSize=10;align=left;spacingLeft=8;" vertex="1" parent="1">
+          <mxGeometry x="695" y="266" width="390" height="32" as="geometry" />
+        </mxCell>
+        <mxCell id="m2" value="hotreload / recompile　分类 / 补丁 / 收敛" style="rounded=1;arcSize=8;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#6c8ebf;fontSize=10;align=left;spacingLeft=8;" vertex="1" parent="1">
+          <mxGeometry x="695" y="304" width="390" height="32" as="geometry" />
+        </mxCell>
+        <mxCell id="m3" value="asset-api / scene / yaml-lite　资产 · 场景 · YAML" style="rounded=1;arcSize=8;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#6c8ebf;fontSize=10;align=left;spacingLeft=8;" vertex="1" parent="1">
+          <mxGeometry x="695" y="342" width="390" height="32" as="geometry" />
+        </mxCell>
+        <mxCell id="m4" value="asset-db / live-source / editor-lock / health / docs" style="rounded=1;arcSize=8;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#6c8ebf;fontSize=10;align=left;spacingLeft=8;" vertex="1" parent="1">
+          <mxGeometry x="695" y="380" width="390" height="32" as="geometry" />
+        </mxCell>
+
+        <mxCell id="gWeb" value="Web 侧" style="rounded=1;arcSize=6;whiteSpace=wrap;html=1;dashed=1;fillColor=#ffffff;strokeColor=#6c8ebf;fontSize=12;fontStyle=1;align=left;verticalAlign=top;spacingLeft=10;spacingTop=6;" vertex="1" parent="1">
+          <mxGeometry x="230" y="440" width="420" height="190" as="geometry" />
+        </mxCell>
+        <mxCell id="w1" value="侧栏路由 /locus/api/*" style="rounded=1;arcSize=8;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#6c8ebf;fontSize=10;align=left;spacingLeft=8;" vertex="1" parent="1">
+          <mxGeometry x="245" y="476" width="390" height="32" as="geometry" />
+        </mxCell>
+        <mxCell id="w2" value="设置页 · 能力开关与偏好" style="rounded=1;arcSize=8;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#6c8ebf;fontSize=10;align=left;spacingLeft=8;" vertex="1" parent="1">
+          <mxGeometry x="245" y="514" width="390" height="32" as="geometry" />
+        </mxCell>
+        <mxCell id="w3" value="右侧栏资产视图（lib/client.js）" style="rounded=1;arcSize=8;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#6c8ebf;fontSize=10;align=left;spacingLeft=8;" vertex="1" parent="1">
+          <mxGeometry x="245" y="552" width="390" height="32" as="geometry" />
+        </mxCell>
+        <mxCell id="w4" value="模型查看器 three.js（lib/model-viewer.js）" style="rounded=1;arcSize=8;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#6c8ebf;fontSize=10;align=left;spacingLeft=8;" vertex="1" parent="1">
+          <mxGeometry x="245" y="590" width="390" height="32" as="geometry" />
+        </mxCell>
+
+        <mxCell id="gProc" value="进程与资源" style="rounded=1;arcSize=6;whiteSpace=wrap;html=1;dashed=1;fillColor=#ffffff;strokeColor=#6c8ebf;fontSize=12;fontStyle=1;align=left;verticalAlign=top;spacingLeft=10;spacingTop=6;" vertex="1" parent="1">
+          <mxGeometry x="680" y="440" width="420" height="190" as="geometry" />
+        </mxCell>
+        <mxCell id="p1" value="DSH jobs / background　async 后台任务" style="rounded=1;arcSize=8;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#6c8ebf;fontSize=10;align=left;spacingLeft=8;" vertex="1" parent="1">
+          <mxGeometry x="695" y="476" width="390" height="32" as="geometry" />
+        </mxCell>
+        <mxCell id="p2" value="settings 读写　持久化到右侧「本地存储」" style="rounded=1;arcSize=8;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#6c8ebf;fontSize=10;align=left;spacingLeft=8;" vertex="1" parent="1">
+          <mxGeometry x="695" y="514" width="390" height="32" as="geometry" />
+        </mxCell>
+        <mxCell id="p3" value="C# LSP 池　code_* 语义分析（按需下载）" style="rounded=1;arcSize=8;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#6c8ebf;fontSize=10;align=left;spacingLeft=8;" vertex="1" parent="1">
+          <mxGeometry x="695" y="552" width="390" height="32" as="geometry" />
+        </mxCell>
+        <mxCell id="p4" value=".NET sidecar 客户端　src/csharp/sidecar.js" style="rounded=1;arcSize=8;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#6c8ebf;fontSize=10;align=left;spacingLeft=8;" vertex="1" parent="1">
+          <mxGeometry x="695" y="590" width="390" height="32" as="geometry" />
+        </mxCell>
+
+        <mxCell id="gStore" value="本地存储" style="rounded=1;arcSize=6;whiteSpace=wrap;html=1;dashed=1;fillColor=#ffffff;strokeColor=#999999;fontSize=12;fontStyle=1;align=left;verticalAlign=top;spacingLeft=10;spacingTop=6;" vertex="1" parent="1">
+          <mxGeometry x="1130" y="230" width="400" height="400" as="geometry" />
+        </mxCell>
+        <mxCell id="s1" value="&lt;b&gt;settings.json&lt;/b&gt;（v2）&lt;br&gt;%APPDATA%\locus\locus-bridge&lt;br&gt;默认值与 Locus 一致" style="rounded=1;arcSize=8;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#999999;fontSize=10;align=center;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry x="1145" y="270" width="370" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="s2" value="&lt;b&gt;asset-index.db&lt;/b&gt;（SQLite / WAL）&lt;br&gt;资产 · 对象 · 引用边" style="rounded=1;arcSize=8;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#999999;fontSize=10;align=center;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry x="1145" y="362" width="370" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="s3" value="&lt;b&gt;session-lock.json&lt;/b&gt;　协作锁&lt;br&gt;&lt;b&gt;unity-docs/&lt;/b&gt;　离线文档树" style="rounded=1;arcSize=8;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#999999;fontSize=10;align=center;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry x="1145" y="454" width="370" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="s4" value="&lt;b&gt;RunStates/&lt;/b&gt; · &lt;b&gt;asset-preview-cache/&lt;/b&gt; · &lt;b&gt;compile-sidecar.json&lt;/b&gt;" style="rounded=1;arcSize=8;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#999999;fontSize=10;align=center;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry x="1145" y="546" width="370" height="64" as="geometry" />
+        </mxCell>
+
+        <mxCell id="sidecar" value="&lt;div style=&quot;line-height:1.45&quot;&gt;&lt;b&gt;.NET 10 编译服务&lt;/b&gt;&lt;br&gt;tools/dsh-finish/Compiler&lt;br&gt;stdio JSON-RPC&lt;/div&gt;" style="rounded=1;arcSize=10;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=10;align=center;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry x="200" y="790" width="240" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="broker" value="&lt;div style=&quot;line-height:1.45&quot;&gt;&lt;b&gt;Locus 原生 broker&lt;/b&gt;&lt;br&gt;Windows 命名管道 / Unix socket&lt;br&gt;JSON 行协议&lt;/div&gt;" style="rounded=1;arcSize=10;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=10;align=center;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry x="680" y="790" width="360" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="lsp" value="&lt;div style=&quot;line-height:1.45&quot;&gt;&lt;b&gt;C# Roslyn 语言服务器&lt;/b&gt;&lt;br&gt;code_* 工具 · 约 90 MB 资产&lt;/div&gt;" style="rounded=1;arcSize=10;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=10;align=center;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry x="1080" y="790" width="240" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="docs" value="&lt;div style=&quot;line-height:1.45&quot;&gt;&lt;b&gt;Unity 文档服务器&lt;/b&gt;&lt;br&gt;docs.unity3d.com · HTTPS&lt;/div&gt;" style="rounded=1;arcSize=10;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=10;align=center;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry x="1360" y="790" width="240" height="70" as="geometry" />
+        </mxCell>
+
+        <mxCell id="gUnity" value="Unity Editor（2022.3+）" style="rounded=0;whiteSpace=wrap;html=1;dashed=1;fillColor=#f5fbf3;strokeColor=#82b366;fontSize=14;fontStyle=1;align=left;verticalAlign=top;spacingLeft=14;spacingTop=8;" vertex="1" parent="1">
+          <mxGeometry x="200" y="880" width="1360" height="340" as="geometry" />
+        </mxCell>
+        <mxCell id="payload" value="&lt;div style=&quot;line-height:1.6&quot;&gt;&lt;b&gt;Locus payload&lt;/b&gt;&lt;br&gt;com.farlocus.locus&lt;br&gt;&lt;br&gt;原生 broker 宿主&lt;br&gt;execute_code · 资产 / 场景 API&lt;br&gt;扩展消息通道&lt;/div&gt;" style="rounded=1;arcSize=8;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#82b366;fontSize=10;align=center;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry x="230" y="935" width="380" height="255" as="geometry" />
+        </mxCell>
+        <mxCell id="companion" value="&lt;div style=&quot;line-height:1.6&quot;&gt;&lt;b&gt;协作包 com.locus.dsh-bridge&lt;/b&gt;&lt;br&gt;packages/unity-bridge&lt;br&gt;&lt;br&gt;热重载分类 / detour 账本&lt;br&gt;编辑器健康阶段&lt;br&gt;live 属性树 · prefab 覆盖&lt;/div&gt;" style="rounded=1;arcSize=8;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#82b366;fontSize=10;align=center;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry x="640" y="935" width="380" height="255" as="geometry" />
+        </mxCell>
+        <mxCell id="project" value="&lt;div style=&quot;line-height:1.6&quot;&gt;&lt;b&gt;Unity 工程&lt;/b&gt;&lt;br&gt;Assets/ · Packages/&lt;br&gt;&lt;br&gt;.meta GUID&lt;br&gt;场景 / 预制体 / 资产文件&lt;/div&gt;" style="rounded=1;arcSize=8;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#82b366;fontSize=10;align=center;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry x="1050" y="935" width="380" height="255" as="geometry" />
+        </mxCell>
+
+        <mxCell id="legend" value="&lt;div style=&quot;line-height:1.7&quot;&gt;&lt;b&gt;图例&lt;/b&gt;&lt;br&gt;&lt;font color=&quot;#6c8ebf&quot;&gt;■&lt;/font&gt; DSH Host / 插件&lt;br&gt;&lt;font color=&quot;#82b366&quot;&gt;■&lt;/font&gt; Unity 编辑器 / broker&lt;br&gt;&lt;font color=&quot;#d6b656&quot;&gt;■&lt;/font&gt; 外部进程 / 服务&lt;br&gt;&lt;font color=&quot;#999999&quot;&gt;■&lt;/font&gt; 本地存储&lt;br&gt;—— 调用 / 请求&lt;br&gt;- - - 注册 / 文件读写&lt;/div&gt;" style="rounded=1;arcSize=8;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#cccccc;fontSize=9;align=left;verticalAlign=top;spacingLeft=10;spacingTop=8;" vertex="1" parent="1">
+          <mxGeometry x="1600" y="880" width="180" height="220" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e1" value="工具调用" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;endFill=1;strokeColor=#666666;strokeWidth=1.2;fontSize=9;labelBackgroundColor=#ffffff;" edge="1" parent="1" source="agent" target="gTools">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e2" value="调用" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;endFill=1;strokeColor=#666666;strokeWidth=1.2;fontSize=9;labelBackgroundColor=#ffffff;" edge="1" parent="1" source="gTools" target="gExec">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e3" value="缓存 / 锁" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;endFill=1;strokeColor=#999999;strokeWidth=1.2;dashed=1;fontSize=9;labelBackgroundColor=#ffffff;" edge="1" parent="1" source="gExec" target="gStore">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e4" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;endFill=1;strokeColor=#666666;strokeWidth=1.2;fontSize=9;labelBackgroundColor=#ffffff;" edge="1" parent="1" source="gTools" target="gWeb">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e5" value="HTTP" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;endFill=1;strokeColor=#666666;strokeWidth=1.2;fontSize=9;labelBackgroundColor=#ffffff;" edge="1" parent="1" source="gWeb" target="gExec">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="665" y="500" />
+              <mxPoint x="665" y="430" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e6" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;endFill=1;strokeColor=#666666;strokeWidth=1.2;fontSize=9;labelBackgroundColor=#ffffff;" edge="1" parent="1" source="gExec" target="gProc">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e7" value="JSON 请求 / 事件" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;endFill=1;startArrow=block;startFill=1;strokeColor=#6c8ebf;strokeWidth=1.6;fontSize=9;labelBackgroundColor=#ffffff;" edge="1" parent="1" source="gProc" target="broker">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="890" y="740" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e8" value="stdio JSON-RPC" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;endFill=1;strokeColor=#d6b656;strokeWidth=1.2;fontSize=9;labelBackgroundColor=#ffffff;" edge="1" parent="1" source="gProc" target="sidecar">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="760" y="740" />
+              <mxPoint x="320" y="740" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e9" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;endFill=1;strokeColor=#d6b656;strokeWidth=1.2;fontSize=9;labelBackgroundColor=#ffffff;" edge="1" parent="1" source="gProc" target="lsp">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1060" y="825" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e10" value="HTTPS 下载离线包" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;endFill=1;strokeColor=#d6b656;strokeWidth=1.2;fontSize=9;labelBackgroundColor=#ffffff;" edge="1" parent="1" source="m4" target="docs">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1110" y="396" />
+              <mxPoint x="1110" y="740" />
+              <mxPoint x="1480" y="740" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e11" value="命名管道 / socket" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;endFill=1;startArrow=block;startFill=1;strokeColor=#82b366;strokeWidth=1.6;fontSize=9;labelBackgroundColor=#ffffff;" edge="1" parent="1" source="broker" target="payload">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="860" y="900" />
+              <mxPoint x="510" y="900" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e12" value="扩展注册" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;endFill=1;strokeColor=#82b366;strokeWidth=1.2;fontSize=8;labelBackgroundColor=#ffffff;" edge="1" parent="1" source="payload" target="companion">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e13" value="C# API" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;endFill=1;strokeColor=#82b366;strokeWidth=1.2;fontSize=8;labelBackgroundColor=#ffffff;" edge="1" parent="1" source="companion" target="project">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
