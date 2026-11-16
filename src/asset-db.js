@@ -15,8 +15,11 @@
 // twice is a real project defect rather than a scan error — reporting it is the
 // point of `broken.duplicateGuids`.
 //
-// This is deliberately *our* index, not a mirror of upstream's SQLite one: it is
-// in-memory per process, capped, and rebuilt when the tree's mtime moves.
+// Findings live in two places: an in-memory map for the current process, and the
+// SQLite index at `Library/Locus/asset-index.db` (`asset-index.js`), which
+// survives restarts and is refreshed incrementally — only files whose size or
+// mtime moved are re-read. The database is the durable record; the in-memory map
+// only spares a rescan inside one process.
 
 import { readFileSync, readdirSync, realpathSync, statSync } from 'node:fs'
 import { join, relative, sep } from 'node:path'
