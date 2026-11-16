@@ -108,6 +108,13 @@ export function executePayload(code, { executionId, timeoutMs } = {}) {
  * when its compile server is unavailable: report the limitation and compile the
  * snippet as written (`enable_non_public_access` is accepted for schema
  * compatibility and the private access itself stays unavailable).
+ *
+ * The bundled sidecar (tools/dsh-finish/Compiler) does not provide this either.
+ * `MetadataImportOptions.All` would only make private member *metadata* visible
+ * to Roslyn; the compile would still fail on accessibility, because the
+ * `IgnoresAccessChecksTo` allow-list it would need only takes effect in a
+ * runtime that skips accessibility verification — and a snippet runs in the
+ * editor's Mono domain, which does not.
  */
 export const NON_PUBLIC_ACCESS_LIMITATION =
   'Private and internal members are not accessible from snippets in this bridge: it compiles them ' +
