@@ -2140,15 +2140,19 @@ function formatSceneSetResult(output) {
 const unityHotReload = {
   name: 'unity_hot_reload',
   description:
-    'Decide whether edited script files can be patched into the running Editor without a compile and domain reload, ' +
-    'and report the method identities a patch would need.\n\n' +
-    'This tool classifies; it does not compile patch assemblies (that needs a second Roslyn pass the bridge does not ' +
-    'own). A file reported as "hot" means its edits are limited to method/constructor/accessor bodies — the kind a ' +
-    'detour can replace — so the edit CAN go live without a reload once a patch assembly exists. A file reported as ' +
-    '"needs compile" changed something structural (record/interface/enum, a field declaration, a field-like event, an ' +
-    'assembly definition) and must go through unity_recompile, whose mode "auto" makes that choice for you.\n\n' +
-    'Reads files from disk, so it works with the Editor closed; with an Editor connected the classification also ' +
-    'cross-checks the domain generation and the live detour ledger.\n\n' +
+    'Apply edited script files to the running Editor without a compile and domain reload, by hot-patching their method ' +
+    'bodies. Works in Edit Mode and Play Mode, and typically lands in one to three seconds.\n\n' +
+    'A file reported as "hot" changed only method/constructor/accessor bodies. Those edits are compiled into a patch ' +
+    'assembly by the bundled .NET sidecar compiler and detoured into the running domain; the report says whether each ' +
+    'patch was applied, skipped, or failed, and why. A file reported as "needs compile" changed something structural ' +
+    '(record/interface/enum, a field declaration, a field-like event, an assembly definition) and must go through ' +
+    'unity_recompile, whose mode "auto" makes that choice for you.\n\n' +
+    'A patch needs a baseline: the text the loaded assembly was compiled from. The Editor supplies it for files it ' +
+    'compiled in this domain, so a file that was never part of this domain is skipped rather than patched on a guess. ' +
+    'Patches last until the next domain reload, are replaced (not stacked) when the same method is patched again, and ' +
+    'are dropped when the domain reloads; run unity_recompile after a burst of edits to make them permanent.\n\n' +
+    'Requires the .NET sidecar compiler; without it the result explains why nothing was patched. The Editor must be ' +
+    'connected: the classification reads files from disk, the apply step needs the Editor.\n\n' +
     CONNECTION_DESCRIPTION,
   parameters: {
     project_path: PROJECT_PATH,
@@ -2207,7 +2211,7 @@ const unityAssetSearch = {
     'Filters combine: type (scene/prefab/material/animation/controller/script/texture/audio/shader/model/genericAsset…), ' +
     'name (substring of the file name), under (a project-relative folder), guid (exactly 32 hex). Also reports broken ' +
     'assets: files with no .meta and duplicate GUIDs.\n\n' +
-    'The index lives in Library/Locus/dsh-asset-db and refreshes incrementally; pass rescan to rebuild it.',
+    'The index is the SQLite database Library/Locus/asset-index.db and refreshes incrementally; pass rescan to rebuild it.',
   parameters: {
     project_path: PROJECT_PATH,
     type: {

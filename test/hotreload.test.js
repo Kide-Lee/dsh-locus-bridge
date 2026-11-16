@@ -427,7 +427,7 @@ test('formatHotReload is explicit about a dry run', () => {
   // `path` spelling, the normalized shape a caller round-trips.
   const text = formatHotReload({ hot: [hotMethod({ path: 'Assets/Scripts/Player.cs' })], needCompile: [], failed: [], dryRun: true })
   assert.match(text, /Dry run: nothing was patched\./)
-  assert.doesNotMatch(text, /does not compile patch assemblies/)
+  assert.doesNotMatch(text, /patched: \d+ method/)
 })
 
 test('formatHotReload handles an empty classification', () => {
