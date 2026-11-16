@@ -390,8 +390,7 @@ ctx.tools.register(defineTool({
 | 上游能力 | 原因 |
 |---|---|
 | `[SerializeReference]` 类型检查 | `check_managed_reference_types` 需要桌面端 `asset_db` 解析「哪些序列化对象指向该类型」，管道里没有等价数据。跳过而不是近似实现。 |
-| `warm_up_in_background` 自动预热 | **已补**：`code_analysis action:"warm"`，等价于上游在编辑器打开时预加载。差的是「自动」——本插件没有「会话绑定 checkout」这个事件可挂钩。 |
-| `restart(workspace)` | **已补**：`code_analysis action:"restart"`（`restartWorkspace`），在 Unity 重新生成 `.csproj` 后使用。 |
+| `warm_up_in_background` 自动预热 | 不做自动预热：本插件没有「会话绑定 checkout」这个事件可挂钩，首次查询直接等加载完成（`openWorkspace` 内部等到 `projectInitializationComplete`）。工程文件在 `.cs` 比 `.csproj` 新时会自动重新生成，因此 Unity 重新生成项目文件后不需要额外操作。 |
 | 进程池容量上限 | 上游明确不设上限（"Other checkouts do not impose a capacity limit"），只靠空闲回收。本插件设 8 个上限，因为 DSH 是单进程宿主，需要防止单一调用方占满 .NET 堆。 |
 | `status_for_checkout` / `pool_metrics` 等 UI 面 API | 桌面端的设置面板与状态栏用，插件无对应界面。 |
 | `is_enabled` / `set_enabled` 开关 | 等价物是 `DSH_LOCUS_CSHARP` 环境变量（注册期决定）。 |

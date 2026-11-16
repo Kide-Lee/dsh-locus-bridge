@@ -583,8 +583,8 @@ test('every declared output property is allowed by its own schema', () => {
   // below are the union over every action each tool can take, so a newly added
   // action has to declare what it returns here.
   const returns = {
-    // flavor/version come from ProjectVersion.txt; responsive/phase/diagnosis
-    // only when the broker has the state probe.
+    // flavor/version come from ProjectVersion.txt; responsive and diagnosis only
+    // when the broker has the state probe.
     unity_status: {
       text: '',
       connected: false,
@@ -594,7 +594,6 @@ test('every declared output property is allowed by its own schema', () => {
       flavor: '',
       version: '',
       responsive: false,
-      phase: '',
       diagnosis: '',
     },
     unity_execute: { output: '', cancelled: false, maxMainThreadBlockedMs: 0 },
@@ -611,12 +610,10 @@ test('every declared output property is allowed by its own schema', () => {
     unity_capture: { text: '', path: '', image: {} },
     // batch → undo
     unity_scene: { text: '', undo: { kind: 'scene-batch', writes: [] } },
-    unity_hot_reload: { text: '', hot: [], needCompile: [], failed: [], supported: true },
+    unity_hot_reload: { text: '', hot: [], needCompile: [], failed: [], supported: true, patches: [] },
     unity_asset_search: { text: '', total: 0, partial: false, assets: [] },
     unity_yaml_read: { text: '', path: '', source: '', total: 0 },
     unity_yaml_search: { text: '', matches: [], scanned: 0 },
-    // live only: the override table Unity resolved for this prefab instance
-    unity_prefab_overrides: { text: '', path: '', total: 0 },
     unity_lock: { text: '', action: '', held: false, acquired: false, holder: '', path: '' },
     unity_release: { text: '', released: true, holder: '' },
     unity_offline_docs: { text: '', action: '', imported: false, state: '', version: '', results: [] },

@@ -44,8 +44,9 @@ export const inject = ['tools', 'workingDirectory']
 /**
  * Whether the C# analysis tools are registered.
  *
- * Default on: the tools are inert until `code_analysis action:"install"`, so
- * exposing them costs one catalog line each and makes the feature discoverable.
+ * Default on: the tools are inert until the first query downloads the Roslyn
+ * assets, so exposing them costs one catalog line each and makes the feature
+ * discoverable.
  * `DSH_LOCUS_CSHARP=0` removes them entirely for a profile that must not carry
  * the surface (or where no .NET runtime can ever exist).
  *

@@ -153,8 +153,6 @@ function sampleArgs(name) {
       return { file_path: 'Assets/Scripts/Player.cs', symbol: 'health', line: 5 }
     case 'code_diagnostics':
       return { file_path: 'Assets/Scripts/Player.cs', scope: 'file', min_severity: 'warning', max_results: 100 }
-    case 'code_analysis':
-      return { action: 'status' }
     default:
       return {}
   }

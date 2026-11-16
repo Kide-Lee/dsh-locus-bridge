@@ -17,10 +17,13 @@ import {
   HOT_RELOAD_MODES,
   applyHotPatch,
   classifyHotEdit,
+  detourKey,
   disposeHotPatches,
   formatHotReload,
   hotReload,
   hotReloadStatus,
+  methodKey,
+  probeDetourEngine,
 } from '../src/hotreload.js'
 import { runRecompile, scriptReloadPayload } from '../src/recompile.js'
 import { startFakeBroker } from './fake-broker.js'
@@ -82,8 +85,9 @@ writeFileSync(join(SCRIPTS, 'Notes.txt'), 'not a script')
 const TARGET = { projectRoot: PROJECT }
 
 /** Reply to one request the way the payload's extension dispatcher does. */
-function answer(socket, request, body) {
-  socket.write(JSON.stringify({ type: 'response', reply_to: request.id, ok: true, message: JSON.stringify(body) }) + '\n')
+function answer(socket, request, body, asJson = true) {
+  const message = asJson ? JSON.stringify(body) : String(body)
+  socket.write(JSON.stringify({ type: 'response', reply_to: request.id, ok: true, message }) + '\n')
   return true
 }
 
@@ -99,6 +103,59 @@ function hotMethod(overrides = {}) {
     is_static: false,
     is_ctor: false,
     ...overrides,
+  }
+}
+
+/** A compiled method in the snake_case shape the payload's DTO expects. */
+function toDto(method) {
+  return {
+    declaring_type: method.declaring_type,
+    patch_declaring_type: 'Locus.DshHotPatch.__DshPatch_Game_Player',
+    name: method.name,
+    param_type_names: method.param_type_names,
+    param_type_sigs: method.param_type_sigs,
+    is_static: method.is_static,
+    is_ctor: method.is_ctor,
+    original_assembly: null,
+  }
+}
+
+/** Refuse a request the way the payload's dispatcher does (`ok:false` + text). */
+function refuse(socket, request, error) {
+  socket.write(JSON.stringify({ type: 'response', reply_to: request.id, ok: false, error }) + '\n')
+  return true
+}
+
+/**
+ * The payload's own answers for the three hot-patch messages: `get_reload_state`
+ * (actually answered by the fake broker), `hot_reload_probe`, `hot_patch_loaded`.
+ */
+function payloadAnswers() {
+  return (request, _helpers, socket) => {
+    if (request.type === 'hot_reload_probe') {
+      return answer(socket, request, {
+        detour_ok: true,
+        detour_engine: 'detour',
+        code_optimization: 'debug',
+        domain_reload_on_play: true,
+      })
+    }
+    if (request.type === 'hot_patch_loaded') {
+      const body = JSON.parse(request.message)
+      return answer(socket, request, {
+        patch_id: body.patch_id,
+        method_count: body.methods?.length ?? 0,
+        detour_engine: 'detour',
+        inlined_method_keys: [],
+        inlined_sources: [],
+        pump_supported: true,
+        pumped_count: 0,
+        pump_skipped_count: 0,
+        pump_skipped_messages: [],
+        pump_failed_count: 0,
+      })
+    }
+    return undefined
   }
 }
 
@@ -176,41 +233,34 @@ test('classifyHotEdit flags a script that has not been imported yet', () => {
   assert.match(result.needCompile[0].reason, /no \.meta yet/)
 })
 
-// ── apply / status / dispose (editor side) ──────────────────────────────────
+// ── apply / probe / dispose (payload protocol) ─────────────────────────────
 
-test('applyHotPatch sends the patch body and reports skipped methods', async () => {
+test('applyHotPatch drives the payload\'s hot_patch_loaded', async () => {
   await withEditor(
     async ({ requests, client }) => {
       const result = await applyHotPatch(client, {
         patchId: 'patch-1',
         assemblyB64: 'AAECAwQ=',
-        methods: [hotMethod()],
+        methods: [toDto(hotMethod())],
         domainGeneration: 'gen-1',
+        sourcePath: 'Assets/Scripts/Player.cs',
       })
-      const request = requests.find((item) => item.type === 'dsh_hot_reload_apply')
+      const request = requests.find((item) => item.type === 'hot_patch_loaded')
+      assert.ok(request, 'the apply went to the payload, not to a locally registered message')
       const body = JSON.parse(request.message)
       assert.equal(body.patch_id, 'patch-1')
       assert.equal(body.assembly_b64, 'AAECAwQ=')
       assert.equal(body.domain_generation, 'gen-1')
       assert.equal(body.methods.length, 1)
-      assert.equal(body.methods[0].method_key, 'Game.Player|Update||i')
+      // param_type_names is what the payload resolves the original method with.
+      assert.deepEqual(body.methods[0].param_type_names, [])
+      assert.equal(body.methods[0].source_path, 'Assets/Scripts/Player.cs')
 
-      assert.equal(result.applied, 0)
-      assert.equal(result.skipped.length, 1)
-      assert.equal(result.skipped[0].reason, 'original method not found in the loaded assemblies')
+      assert.equal(result.applied, 1)
       assert.equal(result.detourEngine, 'detour')
+      assert.deepEqual(result.inlinedMethodKeys, [])
     },
-    {
-      onMessage: (request, _helpers, socket) => {
-        if (request.type !== 'dsh_hot_reload_apply') return undefined
-        return answer(socket, request, {
-          applied: 0,
-          skipped: [{ method_key: 'Game.Player|Update||i', reason: 'original method not found in the loaded assemblies' }],
-          detour_engine: 'detour',
-          domain_generation: 'gen-1',
-        })
-      },
-    },
+    { onMessage: payloadAnswers() },
   )
 })
 
@@ -223,43 +273,70 @@ test('applyHotPatch requires the assembly and a patch id', async () => {
   })
 })
 
-test('hotReloadStatus reports the editor detour ledger', async () => {
+test('applyHotPatch surfaces a rolled-back batch as the payload words it', async () => {
   await withEditor(
     async ({ client }) => {
-      const status = await hotReloadStatus(client)
-      assert.equal(status.detours, 1)
-      assert.deepEqual(status.patchedMethods, ['Game.Player|Update||i'])
-      assert.equal(status.lastError, null)
-      assert.equal(status.domainGeneration, 'gen-1')
+      await assert.rejects(
+        () => applyHotPatch(client, { patchId: 'p', assemblyB64: 'AA==', methods: [toDto(hotMethod())] }),
+        /hot patch apply failed \(rolled back\): original method not found/,
+      )
     },
     {
       onMessage: (request, _helpers, socket) => {
-        if (request.type !== 'dsh_hot_reload_status') return undefined
-        return answer(socket, request, {
-          detours: 1,
-          patched_methods: ['Game.Player|Update||i'],
-          domain_generation: 'gen-1',
-          entries: [{ method_key: 'Game.Player|Update||i', patch_id: 'p', engine: 'detour' }],
-        })
+        if (request.type !== 'hot_patch_loaded') return undefined
+        return refuse(socket, request, 'hot patch apply failed (rolled back): original method not found')
       },
     },
   )
 })
 
-test('disposeHotPatches sends the patch id, and nothing for "all"', async () => {
-  const seen = []
+test('probeDetourEngine reports the payload self-test', async () => {
   await withEditor(
     async ({ client }) => {
+      const probe = await probeDetourEngine(client)
+      assert.equal(probe.detourOk, true)
+      assert.equal(probe.detourEngine, 'detour')
+      assert.equal(probe.codeOptimization, 'debug')
+      assert.equal(probe.domainReloadOnPlay, true)
+    },
+    { onMessage: payloadAnswers() },
+  )
+})
+
+test('methodKey and detourKey follow the payload ledger keys', () => {
+  assert.equal(methodKey(hotMethod()), 'Game.Player|Update||i')
+  assert.equal(methodKey(hotMethod({ is_static: true, param_type_names: ['System.Int32'] })), 'Game.Player|Update|System.Int32|s')
+  assert.equal(detourKey(hotMethod({ original_assembly: 'Assembly-CSharp' })), 'Game.Player|Update||i|Assembly-CSharp')
+  assert.equal(detourKey(hotMethod()), 'Game.Player|Update||i|')
+})
+
+test('hotReloadStatus answers from the ledger and the payload generation', async () => {
+  await withEditor(
+    async ({ client }) => {
+      const status = await hotReloadStatus(client)
+      assert.equal(status.domainGeneration, 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa')
+      assert.deepEqual(status.patchedMethods, [])
+      assert.equal(status.detours, 0)
+    },
+    { onMessage: payloadAnswers() },
+  )
+})
+
+test('disposeHotPatches sends a bare target string, not JSON', async () => {
+  const seen = []
+  await withEditor(
+    async ({ requests, client }) => {
       assert.deepEqual(await disposeHotPatches(client, { patchId: 'patch-1' }), { disposed: 2 })
       assert.deepEqual(await disposeHotPatches(client), { disposed: 5 })
-      assert.deepEqual(seen, [{ patch_id: 'patch-1' }, {}])
+      assert.deepEqual(seen, ['patch-1', 'all'])
+      const dispose = requests.filter((item) => item.type === 'hot_patch_dispose')
+      assert.equal(dispose.length, 2)
     },
     {
       onMessage: (request, _helpers, socket) => {
-        if (request.type !== 'dsh_hot_reload_dispose') return undefined
-        const body = JSON.parse(request.message)
-        seen.push(body)
-        return answer(socket, request, { disposed: body.patch_id ? 2 : 5 })
+        if (request.type !== 'hot_patch_dispose') return undefined
+        seen.push(request.message)
+        return answer(socket, request, `disposed:${request.message === 'all' ? 5 : 2}`, false)
       },
     },
   )
@@ -295,7 +372,28 @@ test('hotReload skips a file the editor has no baseline for', async () => {
     assert.deepEqual(result.applied, [])
     assert.equal(result.skipped.length, 1)
     assert.match(result.skipped[0].reason, /no baseline for this file/)
-  })
+  }, { onMessage: payloadAnswers() })
+})
+
+test('hotReload refuses to patch when the payload detour engine is broken', async () => {
+  const requests = []
+  await withEditor(
+    async () => {
+      const result = await hotReload(TARGET, { paths: ['Assets/Scripts/Player.cs'] })
+      assert.match(result.patchError, /detour engine is not usable/)
+      assert.deepEqual(result.patches, [])
+      assert.match(formatHotReload(result), /not patched: the editor's detour engine is not usable/)
+    },
+    {
+      onMessage: (request, _helpers, socket) => {
+        requests.push(request.type)
+        if (request.type !== 'hot_reload_probe') return undefined
+        return answer(socket, request, { detour_ok: false, error: 'probe replacement did not take' })
+      },
+    },
+  )
+  // The probe runs before anything is compiled or sent: no patch message at all.
+  assert.deepEqual(requests.filter((type) => type.startsWith('hot_')), ['hot_reload_probe'])
 })
 
 test('formatHotReload renders hot, needs-compile and failed rows', () => {

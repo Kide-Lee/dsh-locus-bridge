@@ -23,7 +23,6 @@
     "CHANGELOG.md",
     "LICENSE",
     "NOTICE",
-    "packages/unity-bridge",
     "tools/dsh-finish/Compiler/*.cs",
     "tools/dsh-finish/Compiler/*.csproj",
     "tools/dsh-finish/Compiler/Shared/*.cs",

@@ -50,7 +50,7 @@ import {
   searchDocs,
 } from './docs/unity-docs.js'
 import { detectFlavor } from './unity-flavor.js'
-import { formatOverrides, liveSource, readLiveOverrides } from './live-source.js'
+import { liveSource } from './live-source.js'
 import { compileSnippet, ensureSidecar, sidecarStatus } from './csharp/sidecar.js'
 import {
   UNITY_EXECUTE_CANCELLED,
@@ -295,7 +295,6 @@ const unityStatus = {
         flavor: { type: 'string', description: 'unity, tuanjie, or empty when ProjectVersion.txt is unreadable.' },
         version: { type: 'string' },
         responsive: { type: 'boolean', description: 'False when the broker has no state probe or the editor is stuck.' },
-        phase: { type: 'string' },
         diagnosis: { type: 'string' },
       },
     },
@@ -415,7 +414,6 @@ function statusResult(target, connected, status, scenes, capabilities, error, te
     flavor: edition?.flavor ?? '',
     version: edition?.version ?? '',
     responsive: health?.responsive ?? false,
-    ...(health?.phase ? { phase: health.phase } : {}),
     ...(health?.diagnosis ? { diagnosis: health.diagnosis } : {}),
   }
 }
@@ -2174,8 +2172,10 @@ const unityHotReload = {
     'Apply edited script files to the running Editor without a compile and domain reload, by hot-patching their method ' +
     'bodies. Works in Edit Mode and Play Mode, and typically lands in one to three seconds.\n\n' +
     'A file reported as "hot" changed only method/constructor/accessor bodies. Those edits are compiled into a patch ' +
-    'assembly by the bundled .NET sidecar compiler and detoured into the running domain; the report says whether each ' +
-    'patch was applied, skipped, or failed, and why. A file reported as "needs compile" changed something structural ' +
+    'assembly by the bundled .NET sidecar compiler and detoured into the running domain by the Locus payload itself ' +
+    '(its native hot_patch_loaded, the same entry point the Locus desktop drives), after its own detour self-test; ' +
+    'the report says whether each patch was applied, skipped, or failed, and why. ' +
+    'A file reported as "needs compile" changed something structural ' +
     '(record/interface/enum, a field declaration, a field-like event, an assembly definition) and must go through ' +
     'unity_recompile, whose mode "auto" makes that choice for you.\n\n' +
     'A patch needs a baseline: the text the loaded assembly was compiled from. The Editor supplies it for files it ' +
@@ -2214,6 +2214,15 @@ const unityHotReload = {
           items: { type: 'object', additionalProperties: true },
           description: 'Per-file verdicts (state: hot, need-compile, failed), including hot files with no detourable body.',
         },
+        patches: {
+          type: 'array',
+          items: { type: 'object', additionalProperties: true },
+          description: 'Patch assemblies the payload loaded (id, path, applied method count), when anything was detoured.',
+        },
+        patchError: {
+          type: 'string',
+          description: 'Why nothing was patched, when the patch step could not run (no sidecar, refused detour engine).',
+        },
         supported: { type: 'boolean' },
       },
     },
@@ -2233,6 +2242,8 @@ const unityHotReload = {
       needCompile: result.needCompile ?? [],
       failed: result.failed ?? [],
       files: result.files ?? [],
+      patches: result.patches ?? [],
+      ...(result.patchError ? { patchError: result.patchError } : {}),
       supported: result.supported === true,
     }
   },
@@ -2376,7 +2387,7 @@ const unityYamlRead = {
     ) {
       return { text: 'Error: max_items must be an integer from 1 to 1024.', path: String(args.path ?? ''), source: 'disk', total: 0 }
     }
-    const live = await resolveLiveSource(mode, projectRoot, args.path, { depth: args.depth, exec })
+    const live = await resolveLiveSource(mode, projectRoot, args.path, { depth: args.depth, object: args.object, exec })
     const result = readYamlText(projectRoot, {
       path: args.path,
       object: args.object,
@@ -2398,10 +2409,10 @@ const unityYamlRead = {
 /**
  * Ask the Editor for the live snapshot when the caller allows it.
  *
- * `auto` never fails: a missing Editor, an old companion package, or a slow
+ * `auto` never fails: a missing Editor, a payload without `read_yaml`, or a slow
  * domain reload all degrade to the disk answer plus one explanatory line.
  */
-async function resolveLiveSource(mode, projectRoot, path, { depth, exec }) {
+async function resolveLiveSource(mode, projectRoot, path, { depth, object, exec }) {
   if (mode === 'disk') return { bundle: null, failure: null }
   // A live read is one asset at a time. A search without a file scope is a
   // whole-project disk walk, exactly as the tool description says, so there is
@@ -2415,7 +2426,7 @@ async function resolveLiveSource(mode, projectRoot, path, { depth, exec }) {
   } catch (error) {
     return { bundle: null, failure: `live values are unavailable: ${String(error?.code ?? error?.message ?? error)}` }
   }
-  const { live, reason } = await liveSource(client, projectRoot, path, { depth })
+  const { live, reason } = await liveSource(client, projectRoot, path, { depth, object })
   if (live === null) return { bundle: null, failure: `live values are unavailable: ${reason}` }
   return { bundle: live, failure: null }
 }
@@ -2482,7 +2493,13 @@ const unityYamlSearch = {
     if (args.limit !== undefined && (!Number.isInteger(args.limit) || args.limit < 1 || args.limit > 1000)) {
       return { text: 'Error: limit must be an integer from 1 to 1000.', matches: [], scanned: 0 }
     }
-    const { bundle, failure } = await resolveLiveSource(args.source ?? 'auto', projectRoot, args.scope, { exec })
+    // A search has no object selector, so the live text is only used when the
+    // caller named one; without it the live source explains itself and the
+    // search reads disk, exactly like `source: disk`.
+    const { bundle, failure } = await resolveLiveSource(args.source ?? 'auto', projectRoot, args.scope, {
+      object: args.object,
+      exec,
+    })
     const result = searchYamlFiles(projectRoot, {
       query,
       scope: args.scope,
@@ -2493,53 +2510,6 @@ const unityYamlSearch = {
     // Same contract as unity_yaml_read: a fallback is stated, never silent.
     const text = failure === null ? result.text : `${result.text}\n(${failure}; searched the files on disk instead)`
     return { text, matches: result.matches ?? [], scanned: result.scanned ?? 0 }
-  },
-}
-
-const unityPrefabOverrides = {
-  name: 'unity_prefab_overrides',
-  description:
-    'List what one prefab instance changed relative to its prefab — as Unity itself resolved it, not as the file spells it.\n\n' +
-    'The answer is the override table (path, value, and the prefab\'s own value next to it), which is what "did ' +
-    'someone tweak this object in the scene" really asks. Requires the Editor: the override set is computed by Unity ' +
-    'and cannot be reconstructed from an unsaved file.',
-  parameters: {
-    project_path: PROJECT_PATH,
-    path: { type: 'string', description: 'Project-relative path of the prefab or scene, for example Assets/Prefabs/Enemy.prefab.' },
-  },
-  output: {
-    schema: {
-      type: 'object',
-      additionalProperties: false,
-      properties: {
-        text: { type: 'string' },
-        path: { type: 'string' },
-        total: { type: 'integer' },
-      },
-    },
-    render: (_args, value) => [{ type: 'text', text: value.text }],
-  },
-  async execute(args, exec) {
-    const projectRoot = resolveProjectRoot(args.project_path, exec)
-    const path = String(args.path ?? '').trim()
-    if (path === '') return { text: 'Error: path is required.', path: '', total: 0 }
-    // A missing asset must not read as "this instance matches its prefab": the
-    // Editor happily returns an empty override table for a path that does not
-    // exist, and that answer would be indistinguishable from a real one.
-    if (!existsSync(join(projectRoot, path))) {
-      return { text: `Error: ${path} does not exist in ${projectRoot}.`, path, total: 0 }
-    }
-    // The override table only exists in the Editor, so an unreachable Editor is
-    // the whole answer — say that instead of the raw connection diagnostic.
-    let client
-    try {
-      client = await getClient(describeTarget({ projectRoot }))
-    } catch (error) {
-      return { text: `Error: prefab overrides need a running Unity Editor (${String(error?.code ?? error?.message ?? error)}).`, path, total: 0 }
-    }
-    const result = await readLiveOverrides(client, projectRoot, path)
-    if (!result.ok) return { text: `Error: ${result.reason}`, path, total: 0 }
-    return { text: formatOverrides(result), path: result.path, total: result.overrides.length }
   },
 }
 
@@ -2945,7 +2915,6 @@ export const toolDefinitions = [
   unityAssetSearch,
   unityYamlRead,
   unityYamlSearch,
-  unityPrefabOverrides,
   unityLock,
   unityRelease,
   unityOfflineDocs,

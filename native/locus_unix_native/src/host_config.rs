@@ -67,7 +67,7 @@ pub const COMMON: &[&str] = &[
     "broker_host_kind_v1",
     "broker_request_state_v1",
     "broker_compile_result_v1",
-    // 三档状态探针 + 后台钩子状态（`dsh_health`/`dsh_health_snapshot`/
-    // `dsh_main_thread_stack`）：Unix broker 自己应答，不依赖 managed 侧。
+    // 两档状态探针 + 后台钩子状态（`dsh_health`/`dsh_main_thread_stack`）：
+    // Unix broker 自己应答，不依赖 managed 侧。
     "broker_editor_health_v1",
 ];

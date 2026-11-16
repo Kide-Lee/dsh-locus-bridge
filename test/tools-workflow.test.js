@@ -732,22 +732,6 @@ test('unity_lock acquires and releases with a reason', async () => {
   assert.equal(released.released, true)
 })
 
-// ── unity_prefab_overrides：路径不存在必须有别于“没有覆盖” ────────────────
-
-test('unity_prefab_overrides rejects a path that does not exist', async () => {
-  const result = await tools.unity_prefab_overrides.execute({ path: 'Assets/Nope.prefab' }, ctx())
-  assert.match(result.text, /^Error: Assets\/Nope\.prefab does not exist/)
-  assert.equal(result.total, 0)
-})
-
-test('unity_prefab_overrides explains a missing Editor for a path that exists', async () => {
-  mkdirSync(join(PROJECT, 'Assets', 'Prefabs'), { recursive: true })
-  const { writeFileSync } = await import('node:fs')
-  writeFileSync(join(PROJECT, 'Assets', 'Prefabs', 'Exists.prefab'), '%YAML 1.1\n')
-  const result = await tools.unity_prefab_overrides.execute({ path: 'Assets/Prefabs/Exists.prefab' }, ctx())
-  assert.match(result.text, /need a running Unity Editor|does not exist/)
-})
-
 // ── unity_yaml_search：live 无 scope 是全工程磁盘搜索，不是参数错误 ────────
 
 test('unity_status surfaces a payload version mismatch while connected', async () => {
@@ -807,22 +791,9 @@ const HEALTHY_REPORT = {
   heartbeatAgeMs: 40,
   supported: true,
   unresponsive: false,
-  phase: {
-    supported: true,
-    freshness: 'fresh',
-    phase: 'editing',
-    since_ms: 1_700_000_000_000,
-    age_ms: 12,
-    playing: false,
-    paused: false,
-    compiling: false,
-    updating: false,
-    importing: false,
-  },
   cpuPercent: 3.5,
   liveness: { supported: true, state: 'alive', zombie: false },
   tiers: {
-    t1: { supported: true, reason: null },
     t2: { supported: true, platform: 'win32', reason: null, windowMs: 1_000 },
     t3: { supported: true, state: 'alive', zombie: false },
   },

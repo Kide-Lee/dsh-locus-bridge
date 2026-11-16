@@ -532,7 +532,7 @@ export function formatDiagnostics(result, { minSeverity = 'warning', maxResults 
       return (
         `No C# diagnostics at or above '${minSeverity}' in ${where} — but the project has no restore artifacts ` +
         '(project.assets.json), so the compiler provider reports nothing. Run `dotnet restore` for the solution ' +
-        '(or let code_analysis action "install"/a fresh query retry it) before trusting this result.'
+        '(or let a fresh query reinstall them) before trusting this result.'
       ) + refsSection
     }
     return `No C# diagnostics at or above '${minSeverity}' in ${where}.${suppressed}${refsSection}`

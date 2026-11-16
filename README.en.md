@@ -50,7 +50,7 @@ You can also install straight from GitHub:
 dsh plugin --profile <profile> add github:Kide-Lee/dsh-locus-bridge
 ```
 
-After restarting DSH, the model sees 18 tools whose names start with `unity_`, plus 6 `code_*` C# analysis tools (disable the latter with
+After restarting DSH, the model sees 18 tools whose names start with `unity_`, plus 5 `code_*` C# analysis tools (disable the latter with
 `DSH_LOCUS_CSHARP=0`).
 
 ### Editor prerequisites
@@ -145,12 +145,11 @@ The 15 MB tree stays out of the npm tarball but ships inside the release ZIP at 
 | `unity_asset_graph` | Asset reference graph and script usages: `references` / `dependencies` / `usages`; answers from the project index (`source: "project"`) and degrades to the open scene (`open-scene`) | asset index / generated `execute_code` (GUID comparison against serialized fields) |
 | `unity_capture` | Capture the Game / Scene view or an Editor window, with the image attached to the result (`ImageBlock`) — visible in one call | `capture_viewport` + `attachments.saveImage` |
 | `unity_scene` | Scene object search (by name, and `find` by component type), property tree read, atomic `set`, single-transaction `batch` and `undo` | `search_scene_objects` / `property_tree_read` / generated `execute_code` |
-| `unity_hot_reload` | Decide whether edited scripts can be hot-patched (method/ctor/accessor bodies only) instead of recompiling with a domain reload; when they can, the compile sidecar builds a patch assembly and the Editor actually detours it (`dry_run` classifies only) | `dsh_hot_reload_classify` / `dsh_hot_reload_apply` (companion package) plus sidecar `analyze/hotDiff`, `compile/hotPatch` |
+| `unity_hot_reload` | Decide whether edited scripts can be hot-patched (method/ctor/accessor bodies only) instead of recompiling with a domain reload; when they can, the compile sidecar builds a patch assembly and the Editor actually detours it (`dry_run` classifies only) | local classification plus sidecar `analyze/hotDiff`, `compile/hotPatch`; the patch lands through the payload's own `hot_patch_loaded` / `hot_patch_dispose` / `hot_reload_probe` |
 | `unity_asset_search` | Project-wide asset index from `.meta` files: type, name, folder, GUID, plus missing `.meta` and duplicate GUIDs; works with the Editor closed | durable index at `Library/Locus/asset-index.db` (SQLite, only changed files re-read) |
-| `unity_yaml_read` / `unity_yaml_search` | Read and search Unity YAML (`.unity` / `.prefab` / `.asset`) narrowed by scope and field, without opening the scene; `source: "live"` reads the Editor's in-memory values instead (unsaved edits, binary-serialized scenes) | local parsing, or `dsh_live_read` (companion package) |
+| `unity_yaml_read` / `unity_yaml_search` | Read and search Unity YAML (`.unity` / `.prefab` / `.asset`) narrowed by scope and field, without opening the scene; with an object selector, `source: "live"` reads the Editor's in-memory values instead (unsaved edits) | local parsing, or the payload's own `read_yaml` |
 | `unity_lock` / `unity_release` | Cooperative editor lock across sessions, with holder, wait/try semantics and stale-holder detection | lock file (a vanished process is stale) |
 | `unity_offline_docs` | Import the official Unity documentation offline (zh/en, version resolved from the project), then search and read pages; an import reports progress and can be cancelled or deleted; also contributes a `unity-offline-docs` skill | local docs tree at `Library/Locus/unity-docs` |
-| `unity_prefab_overrides` | Read a prefab instance's per-field overrides against its source (value, object reference, original value); says so plainly when the instance matches its prefab | `dsh_live_prefab_overrides` (companion package) |
 
 `unity_execute` and `unity_test action:"run"` also accept a host-injected `async` argument with Locus's semantics: `sync` (the default) waits for the result; `async` returns a job id immediately, sends no completion notice, and leaves the result for `job_output`; `notify` returns immediately and has the completion delivered automatically. Jobs are owned by the DSH jobs service, can be cancelled with `job_kill`, and live only in this Session. Running in the background only frees the agent: the work still runs on Unity's main thread and keeps the 30-second no-output limit and the tool's own `timeout`. `unity_run_states` stays synchronous, matching upstream.
 
@@ -167,10 +166,10 @@ exist.
 | `code_find_references` | Semantic references (overloads, generics, partials, using aliases; comments and strings excluded) |
 | `code_hover` | Signature, type and XML documentation |
 | `code_diagnostics` | Roslyn compiler errors plus Roslyn and Unity analyzers, without a Unity compile |
-| `code_analysis` | Inspect, install, warm, restart or reset the backend (`status` / `install` / `warm` / `restart` / `reset`) |
 
-The first use needs `code_analysis action:"install"`, which fetches about 90 MB (a ~60 MB Roslyn
-server; the ~30 MB runtime is skipped when the machine already has .NET 10). It can be switched off in
+The first query fetches what it needs (about 90 MB: a ~60 MB Roslyn server, and the ~30 MB runtime is
+skipped when the machine already has .NET 10), cached for later queries — the same on-demand path the
+Locus desktop app uses. It can be switched off in
 Settings, or forced off deployment-wide with `DSH_LOCUS_CSHARP=0` (a deployment switch the settings page
 cannot override).
 
@@ -293,7 +292,7 @@ DSH's Settings has a **Unity bridge** page (`settings.section`, id `dsh-locus-br
 | Switch | What turning it off does |
 |---|---|
 | **Unity control** | The eleven `unity_*` tools leave the model's tool list (the Host unregisters them; they are not merely hidden) |
-| **C# analysis** | The six `code_*` tools leave, and any Roslyn language-server processes already started are closed |
+| **C# analysis** | The five `code_*` tools leave, and any Roslyn language-server processes already started are closed |
 | **File preview** | The right-Sidebar Unity asset tab is no longer registered, and every Unity-backed `/locus/api` route answers `feature_disabled` |
 
 `preferences.frameCache` (cache preview frames inside the project) stays in `settings.json`, but the page no
@@ -400,10 +399,10 @@ current is reused from the editor's cache.
   connection that issued the request.
 - **Recompilation continues across the disconnect.** A domain reload breaks the connection mid-call; the client
   reconnects and keeps polling the operation id instead of reporting a transport error.
-- **Editor-side additions live in a separate package, `com.locus.dsh-bridge`.** `payload/locus_unity/` is a
-  verbatim upstream copy (`npm run check:payload` fails on any divergence), so the hot-reload detour ledger and
-  the health phase reporting ship in `packages/unity-bridge/` and attach to the payload's extension-message
-  channel through reflection.
+- **Editor-side work uses only messages the payload already has.** `payload/locus_unity/` is a verbatim
+  upstream copy (`npm run check:payload` fails on any divergence), so the plugin ships no Unity-side code at
+  all: hot-patch application, live values and prefab overrides all go through the payload's own messages and
+  tools, the same way the Locus desktop app does it.
 - **Two capabilities are implemented locally, so the boundaries differ.** The background scheduling hook only
   patches for real on Windows (it needs Unity's private PDB symbols); hang diagnosis on Linux/macOS captures
   registers with `ptrace` and walks the frame pointer chain, reporting only the managed frames it can prove and

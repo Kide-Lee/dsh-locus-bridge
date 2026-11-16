@@ -2,13 +2,9 @@
 //!
 //! 上游 Tauri 宿主（`Locus/src-tauri/src/unity_bridge/state_probe.rs`）用 dbghelp
 //! 在 Windows 上抓 x64 CONTEXT 并查 Unity 的 reload 符号，从而判出 domain reload
-//! 的子阶段。Linux/macOS 上没有 dbghelp，所以这里改成**三档递进**的采样，
+//! 的子阶段。Linux/macOS 上没有 dbghelp，所以这里改成**两档**采样，
 //! 每档只依赖自己真正能拿到的证据，拿不到就诚实降档：
 //!
-//! - **T1 托管阶段**：由编辑器侧（`dsh_health_snapshot`）在
-//!   `EditorApplication.update` 里打点后喂进来。broker 位于 Unity 进程内，读到的是
-//!   编辑器自己维护的连续状态，因此本档总是 `supported`；但它是“编辑器愿意说”
-//!   的证据，编辑器不报（版本不对、旁挂包缺失）时就是 `unknown`。
 //! - **T2 CPU 活动**：Linux 读 `/proc/<pid>/stat` 的 `utime+stime`，macOS 用
 //!   `proc_pidinfo(PROC_PIDTASKINFO)`，比对两次采样的差值。它区分“忙等”与“阻塞”，
 //!   是卡死诊断里唯一不需要主线程配合的证据。
@@ -30,9 +26,6 @@ use serde_json::{json, Value};
 pub const CPU_SAMPLE_WINDOW_MS: u64 = 500;
 /// 主线程心跳超过这个时间才算“卡住”（与 broker 的 `UNRESPONSIVE_AFTER_MS` 一致）。
 pub const UNRESPONSIVE_AFTER_MS: u64 = 30_000;
-/// 编辑器侧阶段标记超过这个时间没有更新就不再作为当前证据。
-pub const PHASE_FRESH_MS: u64 = 2_000;
-
 /// 平台能力检测结果：要么可用，要么给出不可用的原因（绝不假装成功）。
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct PlatformSupport {
@@ -59,14 +52,6 @@ impl PlatformSupport {
     pub fn is_supported(&self) -> bool {
         self.supported
     }
-}
-
-/// T1 档的平台能力。
-pub fn phase_support() -> PlatformSupport {
-    PlatformSupport::no(
-        "the managed phase tier needs the editor to publish dsh_health_snapshot; \
-         until it does, the phase stays unknown instead of being inferred",
-    )
 }
 
 /// T2 档在本平台是否真的能采样。
@@ -146,165 +131,6 @@ impl ProbeError {
             Self::Failed { reason } => format!("failed: {reason}"),
         }
     }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// T1：编辑器侧推来的阶段标记
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// 编辑器侧的一帧健康快照（`dsh_health_snapshot` 的正文）。
-#[derive(Clone, Debug, PartialEq, Serialize)]
-pub struct HealthSnapshot {
-    pub phase: String,
-    pub since_ms: u64,
-    pub playing: bool,
-    pub paused: bool,
-    pub compiling: bool,
-    pub updating: bool,
-    pub importing: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub modal_dialog: Option<bool>,
-}
-
-impl HealthSnapshot {
-    /// 解析编辑器侧 JSON 正文。字段缺失时按 false 处理、`phase` 缺失视为非法。
-    pub fn parse(body: &str) -> Result<Self, ProbeError> {
-        let value: Value = serde_json::from_str(body.trim()).map_err(|error| ProbeError::Failed {
-            reason: format!("health snapshot is not valid JSON: {error}"),
-        })?;
-        let phase = value
-            .get("phase")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|phase| !phase.is_empty())
-            .ok_or_else(|| ProbeError::Failed {
-                reason: "health snapshot has no phase".to_string(),
-            })?;
-        let flag = |key: &str| value.get(key).and_then(Value::as_bool).unwrap_or(false);
-        let since_ms = value
-            .get("since_ms")
-            .and_then(Value::as_u64)
-            .unwrap_or_else(now_ms);
-        Ok(Self {
-            phase: phase.to_string(),
-            since_ms,
-            playing: flag("playing"),
-            paused: flag("paused"),
-            compiling: flag("compiling"),
-            updating: flag("updating"),
-            importing: flag("importing"),
-            modal_dialog: value.get("modal_dialog").and_then(Value::as_bool),
-        })
-    }
-}
-
-/// 编辑器侧最近一次上报的阶段。
-#[derive(Debug)]
-struct PhaseSample {
-    snapshot: HealthSnapshot,
-    received_at_ms: u64,
-}
-
-fn phase_slot() -> &'static Mutex<Option<PhaseSample>> {
-    static SLOT: OnceLock<Mutex<Option<PhaseSample>>> = OnceLock::new();
-    SLOT.get_or_init(|| Mutex::new(None))
-}
-
-/// 记录编辑器侧上报的一帧阶段。非法正文返回 `ProbeError::Failed`，且**不**覆盖上一帧：
-/// 一帧坏数据不应该让探针凭空变成“未知”。
-pub fn record_phase(body: &str) -> Result<(), ProbeError> {
-    let snapshot = HealthSnapshot::parse(body)?;
-    let received_at_ms = now_ms();
-    if let Ok(mut slot) = phase_slot().lock() {
-        *slot = Some(PhaseSample {
-            snapshot,
-            received_at_ms,
-        });
-    }
-    Ok(())
-}
-
-/// 最近一次阶段上报（不论新鲜度），用于 `unknown` 时说明“最后一次看到的是什么”。
-pub fn last_phase() -> Option<(HealthSnapshot, u64)> {
-    phase_slot()
-        .lock()
-        .ok()
-        .and_then(|slot| slot.as_ref().map(|sample| (sample.snapshot.clone(), sample.received_at_ms)))
-}
-
-/// T1 结果。
-///
-/// 字段名跟协议走 camelCase（`age_ms` → `ageMs`），因为它是直接进回复 JSON 的。
-#[derive(Clone, Debug, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PhaseTier {
-    pub supported: bool,
-    /// `fresh` | `stale` | `missing`。
-    pub freshness: &'static str,
-    /// 当前阶段；只有 `fresh` 时才是结论，否则是最后一次观测。
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub phase: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub since_ms: Option<u64>,
-    /// 距上次上报的毫秒数。
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub age_ms: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub playing: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub paused: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub compiling: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub updating: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub importing: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub modal_dialog: Option<bool>,
-}
-
-/// 判断一次上报是否还能当证据：超过 [`PHASE_FRESH_MS`] 就是 stale。
-pub fn phase_is_fresh(received_at_ms: u64, now: u64) -> bool {
-    now.saturating_sub(received_at_ms) <= PHASE_FRESH_MS
-}
-
-fn read_phase_tier(now: u64) -> (PhaseTier, PlatformSupport) {
-    let support = phase_support();
-    let Some((snapshot, received_at_ms)) = last_phase() else {
-        return (
-            PhaseTier {
-                supported: true,
-                freshness: "missing",
-                phase: None,
-                since_ms: None,
-                age_ms: None,
-                playing: None,
-                paused: None,
-                compiling: None,
-                updating: None,
-                importing: None,
-                modal_dialog: None,
-            },
-            support,
-        );
-    };
-    let fresh = phase_is_fresh(received_at_ms, now);
-    (
-        PhaseTier {
-            supported: true,
-            freshness: if fresh { "fresh" } else { "stale" },
-            phase: Some(snapshot.phase),
-            since_ms: Some(snapshot.since_ms),
-            age_ms: Some(now.saturating_sub(received_at_ms)),
-            playing: Some(snapshot.playing),
-            paused: Some(snapshot.paused),
-            compiling: Some(snapshot.compiling),
-            updating: Some(snapshot.updating),
-            importing: Some(snapshot.importing),
-            modal_dialog: snapshot.modal_dialog,
-        },
-        support,
-    )
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -608,18 +434,17 @@ fn is_zombie(pid: u32) -> bool {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 汇总：三档一起看
+// 汇总：两档一起看
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// 探针结论：客户端拿到的就是这一份。
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct ProbeReport {
     pub pid: u32,
-    /// 三档里是否至少有一档给出了可用证据。
+    /// 两档里是否至少有一档给出了可用证据。
     pub supported: bool,
     /// 是否为“编辑器卡住”的结论（心跳过期且进程还在）。
     pub unresponsive: bool,
-    pub phase: PhaseTier,
     /// T2：CPU 占比。窗口不足时为 `None`，而不是 0。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cpu_percent: Option<f64>,
@@ -632,7 +457,7 @@ pub struct ProbeReport {
     pub notes: Vec<String>,
 }
 
-/// 三档探针。
+/// 两档探针。
 
 pub struct StateProbe {
     cpu: CpuSampler,
@@ -651,8 +476,6 @@ impl StateProbe {
 
     /// 采一次。`heartbeat_age_ms < 0` 表示没有心跳数据。
     pub fn probe(&mut self, pid: u32, heartbeat_age_ms: i64, heartbeat: HeartbeatMark) -> ProbeReport {
-        let now = now_ms();
-        let (phase, phase_support) = read_phase_tier(now);
         let cpu_support = cpu_support();
 
         let mut notes = Vec::new();
@@ -702,11 +525,10 @@ impl StateProbe {
         let unresponsive = !responsive_from_heartbeat
             && liveness.state == Liveness::Alive
             && !liveness.zombie
-            && (stalled || phase.phase.as_deref() == Some("unresponsive"));
+            && stalled;
 
-        let supported = phase_support.supported || cpu_support.supported || liveness.supported;
+        let supported = cpu_support.supported || liveness.supported;
         let tiers = json!({
-            "t1": { "supported": phase.support_fresh(), "reason": phase_support.reason },
             "t2": {
                 "supported": cpu_support.supported,
                 "platform": std::env::consts::OS,
@@ -724,20 +546,12 @@ impl StateProbe {
             pid,
             supported,
             unresponsive,
-            phase,
             cpu_percent,
             cpu_window_ms,
             liveness,
             tiers,
             notes,
         }
-    }
-}
-
-impl PhaseTier {
-    /// T1 在协议层“支持”，但只有收到过上报时才有证据。
-    fn support_fresh(&self) -> bool {
-        self.freshness == "fresh"
     }
 }
 
@@ -818,41 +632,6 @@ mod tests {
     }
 
     #[test]
-    fn health_snapshot_round_trips() {
-        let body = r#"{"phase":"importing","since_ms":1700000000000,"playing":true,"paused":false,"compiling":false,"updating":false,"importing":true,"modal_dialog":true}"#;
-        let snapshot = HealthSnapshot::parse(body).unwrap();
-        assert_eq!(snapshot.phase, "importing");
-        assert_eq!(snapshot.since_ms, 1_700_000_000_000);
-        assert!(snapshot.playing);
-        assert_eq!(snapshot.modal_dialog, Some(true));
-    }
-
-    #[test]
-    fn health_snapshot_defaults_missing_flags_to_false() {
-        let snapshot = HealthSnapshot::parse(r#"{"phase":"idle"}"#).unwrap();
-        assert_eq!(snapshot.phase, "idle");
-        assert!(!snapshot.playing && !snapshot.paused && !snapshot.compiling);
-        assert_eq!(snapshot.modal_dialog, None);
-        assert!(snapshot.since_ms > 0, "a missing since_ms falls back to now");
-    }
-
-    #[test]
-    fn health_snapshot_rejects_garbage_without_clearing_the_last_one() {
-        record_phase(r#"{"phase":"compiling","since_ms":5}"#).unwrap();
-        assert!(matches!(HealthSnapshot::parse("not json"), Err(ProbeError::Failed { .. })));
-        assert!(matches!(HealthSnapshot::parse(r#"{"phase":"  "}"#), Err(ProbeError::Failed { .. })));
-        let (last, _) = last_phase().expect("the good frame survives a bad one");
-        assert_eq!(last.phase, "compiling");
-    }
-
-    #[test]
-    fn phase_freshness_has_a_documented_window() {
-        assert!(phase_is_fresh(1_000, 1_000));
-        assert!(phase_is_fresh(1_000, 1_000 + PHASE_FRESH_MS));
-        assert!(!phase_is_fresh(1_000, 1_000 + PHASE_FRESH_MS + 1));
-    }
-
-    #[test]
     fn liveness_sees_the_current_process() {
         let tier = check_liveness(std::process::id()).expect("the current process is killable");
         assert_eq!(tier.state, Liveness::Alive);
@@ -913,7 +692,7 @@ mod tests {
 
     #[test]
     fn unsupported_tiers_always_carry_a_reason() {
-        for support in [phase_support(), cpu_support(), liveness_support()] {
+        for support in [cpu_support(), liveness_support()] {
             if !support.supported {
                 let reason = support.reason.unwrap_or_default();
                 assert!(!reason.is_empty(), "an unsupported tier must explain why");

@@ -457,7 +457,6 @@ test('the C# tool set matches the upstream names it ports', () => {
     'code_find_references',
     'code_hover',
     'code_diagnostics',
-    'code_analysis',
   ])
 })
 
@@ -738,14 +737,14 @@ test('a system .NET runtime satisfies the requirement without the managed copy',
   assert.match(resolved.serverDll, /Microsoft\.CodeAnalysis\.LanguageServer\.dll$/)
 })
 
-test('a missing server still fails loudly and points at install', async () => {
+test('a missing server still fails loudly and names the download', async () => {
   const root = join(sandbox, 'gate-empty')
   const env = { DSH_LOCUS_CSHARP_HOME: root }
   const { requireAssets } = await import('../src/csharp/assets.js')
   await assert.rejects(requireAssets(env, { rid: 'linux-x64' }), (error) => {
     assert.equal(error.code, 'assets_missing')
     assert.match(error.message, /missing: server, analyzers/)
-    assert.match(error.message, /action "install"/)
+    assert.doesNotMatch(error.message, /code_analysis/)
     return true
   })
 })

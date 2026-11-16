@@ -9,20 +9,19 @@
 - `src/model-viewer/` 是浏览器 three.js 模型查看器的源码，构建成独立的
   `lib/model-viewer.js`（`npm run build:viewer`）；它由侧栏按需懒加载，不进主客户端包。
   `three`/`esbuild` 是 devDependencies，`lib/client.js` 与 `lib/model-viewer.js` 都是生成物。
-- `src/tools.js` 存放 19 个 `unity_*` 工具定义（`code_*` 6 个在 `src/index.js` 里注册，
-  合计 25 个；改工具数量时四处都要一起改：`src/tools.js`、`src/index.js`、
+- `src/tools.js` 存放 18 个 `unity_*` 工具定义（`code_*` 5 个在 `src/csharp/tools.js` 里定义、
+  由 `src/index.js` 注册，合计 23 个；改工具数量时四处都要一起改：`src/tools.js`、`src/index.js`、
   `docs/marketplace/` 的 yml 与 README 条目描述，以及 `README.md`/`README.en.md` 的工具表）；
   `src/args.js` 负责工程解析，由 `test/args.test.js` 覆盖。
 - 工具的 `parameters`/`output.schema` 走 `src/schema.js` 的受限 DSL：`type` 只接受单一标量、
   `array`、`object`（必须显式写 `additionalProperties`）或 `oneOf`，**不支持** `type: [...]` 联合数组、
   `minimum`/`maximum` 之类的断言关键字。`node scripts/dump-tools.mjs` 是唯一会立刻报出来的检查；
   `scripts/typecheck.mjs` 只查导入与绑定，不查这些。
-- `packages/unity-bridge/` 是本仓库自己的协作 Unity 包（`com.locus.dsh-bridge`），补的是 payload
-  不暴露的编辑器侧能力（热重载补丁的应用与 detour 账本、健康阶段上报、实时值源与 prefab 覆盖；
-  热重载的**分类**在插件进程 `src/hotreload-classify.js`，不在这个包里）。
-  安装时由 `src/setup.js` 一并复制到 `Packages/com.locus.dsh-bridge`。它通过 asmdef 显式引用
-  `Locus.Editor` 接入 bridge（`autoReferenced: false` 不妨碍显式 `references`）；payload 缺接口时
-  是编译失败，而不是运行时悄悄失效。
+- **插件里没有任何 Unity 侧 C# 代码，也不要加**：编辑器侧一律走 payload 自带的消息。
+  热补丁应用走 `hot_patch_loaded` / `hot_patch_dispose` / `hot_reload_probe`（分类在插件进程
+  `src/hotreload-classify.js`，账本在 `src/hotreload.js`）；实时值走 `read_yaml`；prefab 覆盖读
+  磁盘 YAML 的 `m_Modifications`（即官方 `unity_yaml_read` 的 `detail: "prefab_overrides"` 语义）；
+  编辑器阶段不进 payload 能看见的接口，因此**不提供**，`unity_status` 只有 `responsive`/`diagnosis`。
 - **插件整体声明它对应的 payload 版本**，写在根 `package.json` 的 `locus` 块：`locus.version`
   是来源的上游 Locus release，`locus.payload`（`package` + `version`）是其中 `com.farlocus.locus`
   的包版本。`src/setup.js` 的 `payloadDeclaration()` / `payloadContract()` 用这份声明对照插件自带
@@ -32,10 +31,10 @@
 - `tools/dsh-finish/Compiler/` 是可选 .NET 10 编译服务；`npm run build:compiler` 构建，
   `npm run build:compiler -- --check` 校验产物是否与源码同步。缺 .NET 时它的正确行为是报
   `no_dotnet` 并让调用方退回 Unity 路径，**绝不**在运行时下载 SDK。
-- 原生的编辑器健康能力（`dsh_health` / `dsh_health_snapshot` / `dsh_main_thread_stack` /
+- 原生的编辑器健康能力（`dsh_health` / `dsh_main_thread_stack` /
   `dsh_set_background_hook`）由 broker 自己应答，不进 managed 队列——主线程卡死时 managed 侧
   正是答不了的那个。后台调度钩子只在 Windows 真正生效，别的平台必须报 `unsupported`。
-- `src/setup.js` 负责工程诊断与包安装（Locus 包 + 协作包），由 `test/setup.test.js` 覆盖；把
+- `src/setup.js` 负责工程诊断与 Locus 包安装，由 `test/setup.test.js` 覆盖；把
   `DSH_LOCUS_PAYLOAD_DIR` 指向一个测试用的假 payload，就能避开真实 payload。
 - `src/asset-index.js` / `src/asset-index-sync.js` 是 `Library/Locus/asset-index.db` 这层持久索引
   （`node:sqlite`，WAL）。纯读路径必须用只读连接打开——第二个进程碰 WAL 会让 Unity 崩溃；`node:sqlite`

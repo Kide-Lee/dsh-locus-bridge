@@ -42,9 +42,9 @@ export const FEATURE_KEYS = Object.freeze(['unity', 'csharp', 'preview'])
 /**
  * Default switches.
  *
- * Everything is on: the tools are inert until a Unity editor connects or
- * `code_analysis action:"install"` runs, so a default-off plugin would only
- * make the feature invisible.
+ * Everything is on: the tools are inert until a Unity editor connects or the
+ * first C# query runs, so a default-off plugin would only make the feature
+ * invisible.
  */
 export const DEFAULT_FEATURES = Object.freeze({ unity: true, csharp: true, preview: true })
 

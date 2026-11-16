@@ -2,9 +2,8 @@
 //! a wedged editor. Plays the same two roles as `broker_protocol.rs` (managed host
 //! + Locus client) and drives the real handlers over the real Unix socket:
 //!
-//! * `dsh_health` — tiered state probe (phase / CPU / liveness) and the
+//! * `dsh_health` — tiered state probe (CPU / liveness) and the
 //!   background-hook status; must answer even while the managed side is stuck.
-//! * `dsh_health_snapshot` — phase report fed by the editor source.
 //! * `dsh_main_thread_stack` — honest `main_thread_stack_failed` when capture is
 //!   unavailable, real frames when it is not.
 //! * the `backgroundHook` block in the broker `status` snapshot.
@@ -97,14 +96,13 @@ fn editor_health_commands_answer_without_the_managed_executor() {
 
     let mut client = Client::connect(&socket_str);
 
-    // ── dsh_health: three tiers, each honest about what it can see ──────────
+    // ── dsh_health: two tiers, each honest about what it can see ───────────
     let health = client.message("h1", "dsh_health", "");
     assert_eq!(health["pid"], std::process::id());
     assert_eq!(health["tiers"]["t3"]["state"], "alive");
     assert_eq!(health["liveness"]["state"], "alive");
-    // No phase report yet: the tier is supported but has no evidence.
-    assert_eq!(health["phase"]["freshness"], "missing");
-    assert!(health["phase"]["phase"].is_null());
+    // No managed phase report exists: the answer carries no phase at all.
+    assert!(health.get("phase").is_none(), "phase must be gone from {health}");
     // CPU may be measured or explicitly unsupported; never a fabricated 0.
     if let Some(percent) = health["cpuPercent"].as_f64() {
         assert!(percent >= 0.0);
@@ -129,25 +127,6 @@ fn editor_health_commands_answer_without_the_managed_executor() {
         assert_eq!(hook["supported"], false);
         assert_eq!(hook["state"], "unsupported");
     }
-
-    // ── dsh_health_snapshot: the editor source feeds the phase tier ─────────
-    let recorded = client.request(
-        "h2",
-        "dsh_health_snapshot",
-        r#"{"phase":"importing","since_ms":1700000000000,"playing":false,"paused":false,"compiling":false,"updating":false,"importing":true}"#,
-    );
-    assert_eq!(recorded["ok"], true);
-    let health = client.message("h3", "dsh_health", "");
-    assert_eq!(health["phase"]["freshness"], "fresh");
-    assert_eq!(health["phase"]["phase"], "importing");
-    assert_eq!(health["phase"]["importing"], true);
-    assert!(health["phase"]["ageMs"].as_u64().unwrap() < 5_000);
-
-    // A malformed frame is rejected and does not erase the last good phase.
-    let rejected = client.request("h4", "dsh_health_snapshot", "not json");
-    assert_eq!(rejected["ok"], false);
-    let health = client.message("h5", "dsh_health", "");
-    assert_eq!(health["phase"]["phase"], "importing");
 
     // ── dsh_main_thread_stack: honest failure or real frames, never silence ─
     let stack = client.request("s1", "dsh_main_thread_stack", "");

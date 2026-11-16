@@ -146,9 +146,9 @@ export async function requestScriptReload(target, options = {}) {
  * `mode: 'auto'` classifies first: a change that is entirely hot-patchable is
  * reported as such and nothing is recompiled; anything else (or an empty path
  * list, where there is nothing to classify) falls through to the normal
- * compile. Classification failures never block the compile — a bridge that
- * predates `dsh_hot_reload_*` answers "unknown message type", and the classic
- * path must keep working in that case.
+ * compile. Classification failures never block the compile — an unreadable
+ * script or a missing compile service must still leave the classic path
+ * working.
  *
  * @param {{projectRoot?: string, pipe?: string}} target
  * @param {object} options  everything {@link recompile} accepts, plus `mode`

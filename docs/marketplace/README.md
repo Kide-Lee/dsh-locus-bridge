@@ -17,7 +17,7 @@
 | 字段 | 取值与理由 |
 |---|---|
 | `category` | `dev`（Development & Runtime）。库里 4 个 Unity 条目都在 `tools`，但那几行走的是 MCP 或官方 unity CLI，卖点是"加工具"；本插件接管的是编译 / 域重载 / Play 循环，属于运行时。分类选偏了不会被打回，维护者会直接改 |
-| `description.en` | 必填。只写代码里能核实的事实：18 个 `unity_*` 工具（另加 6 个 `code_*`，合计 24 个）、主线程 C# 执行、域重载、revision 守卫、场景属性树 |
+| `description.en` | 必填。只写代码里能核实的事实：18 个 `unity_*` 工具（另加 5 个 `code_*`，合计 23 个）、主线程 C# 执行、域重载、revision 守卫、场景属性树 |
 | `description.zh` | 可选（缺了维护者会补），但本仓库本来就是中文项目，直接给出更省事 |
 | `icon` / `tarball` / `screenshots` | 全部可选。见下方"还能做但没做的" |
 

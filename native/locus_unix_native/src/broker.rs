@@ -40,10 +40,8 @@ pub(crate) const EXECUTION_PROGRESS_MAX_BYTES: usize = 64 * 1024;
 // These are answered by the native broker itself (not routed to the managed
 // executor) on purpose: their entire value is answering *while* the editor main
 // thread is wedged, which is exactly when the managed side cannot reply.
-/// 三档状态探针 + 后台钩子状态。
+/// 两档状态探针 + 后台钩子状态。
 pub(crate) const HEALTH_REQUEST: &str = "dsh_health";
-/// 编辑器侧上报阶段标记（`EditorApplication.update` 驱动）。
-pub(crate) const HEALTH_SNAPSHOT_REQUEST: &str = "dsh_health_snapshot";
 /// 抓一次主线程栈；抓不到就明确失败，绝不返回空栈当成功。
 pub(crate) const MAIN_THREAD_STACK_REQUEST: &str = "dsh_main_thread_stack";
 /// 开/关后台调度钩子。message 是 `1`/`0`；非 Windows 宿主报 unsupported 而不是假装成功。
@@ -420,7 +418,6 @@ impl Broker {
             "heartbeatAgeMs": if heartbeat_age_ms >= 0 { Some(heartbeat_age_ms) } else { None },
             "supported": report.supported,
             "unresponsive": report.unresponsive || self.main_thread_unresponsive(),
-            "phase": report.phase,
             "cpuPercent": report.cpu_percent,
             "cpuWindowMs": report.cpu_window_ms,
             "liveness": report.liveness,
@@ -430,18 +427,6 @@ impl Broker {
             "stackSupport": crate::hang::stack_support(),
         });
         self.respond_ok(client, id, Some(payload.to_string()));
-    }
-
-    /// `dsh_health_snapshot`：记下编辑器侧阶段；坏帧返回错误但保留上一帧。
-    pub(crate) fn respond_health_snapshot(&self, client: u64, id: &str, body: &str) {
-        match crate::state_probe::record_phase(body) {
-            Ok(()) => self.respond_ok(client, id, Some("{\"recorded\":true}".to_string())),
-            Err(error) => {
-                // 明说坏在哪，但不要把它当成“探针坏了”。
-                eprintln!("[locus-native] rejected dsh_health_snapshot: {}", error.describe());
-                self.respond_error(client, id, errors::INVALID_REQUEST);
-            }
-        }
     }
 
     /// `dsh_main_thread_stack`：抓主线程栈。
@@ -1378,7 +1363,6 @@ pub(crate) fn handle_line(broker: &Arc<Broker>, client: u64, line: &[u8]) {
         // 编辑器健康：由原生 broker 自己答，不进 managed 队列 —— 主线程卡死时
         // managed 侧正是答不了的那个。
         HEALTH_REQUEST => broker.respond_health(client, id),
-        HEALTH_SNAPSHOT_REQUEST => broker.respond_health_snapshot(client, id, message),
         MAIN_THREAD_STACK_REQUEST => broker.respond_main_thread_stack(client, id),
         SET_BACKGROUND_HOOK_REQUEST => broker.respond_set_background_hook(client, id, message),
         _ if kind == execution.cancel => {

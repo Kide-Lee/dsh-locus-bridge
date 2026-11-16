@@ -1,11 +1,10 @@
 // File-level hot-reload classification, in the plugin process.
 //
-// This is a port of the editor-side classifier that used to live in
-// `packages/unity-bridge/Editor/HotReload/DshHotReloadClassifier.cs`: it reads
+// This is a port of an editor-side classifier that no longer exists: it reads
 // the edited sources from disk and answers "can this file be detoured without a
 // compile, and which methods would the patch target". Doing it here removes the
-// `dsh_hot_reload_classify` round-trip and lets `unity_hot_reload`'s dry run work
-// with no Editor at all; only applying a patch still needs the bridge.
+// former `dsh_hot_reload_classify` round-trip and lets `unity_hot_reload`'s dry
+// run work with no Editor at all; applying a patch still needs the Editor.
 //
 // The rules are deliberately conservative and match upstream's HotDiff verdicts at
 // file granularity, without an old syntax tree:
@@ -185,15 +184,15 @@ export function normalizeAssetPath(projectRoot, value) {
   let path = String(value ?? '').trim().replaceAll('\\', '/')
   if (path === '') return null
   while (path.startsWith('./')) path = path.slice(2)
-  path = path.replace(/^\/+/, '')
+  // A POSIX project root is absolute too, so the leading-slash strip has to wait
+  // until an absolute path has been rebased onto the project.
+  const root = String(projectRoot ?? '').replaceAll('\\', '/').replace(/\/+$/, '')
   const lower = path.toLowerCase()
-  if (!lower.startsWith('assets/') && !lower.startsWith('packages/')) {
-    const root = String(projectRoot ?? '').replaceAll('\\', '/').replace(/\/+$/, '')
-    if (root === '') return null
-    const rootLower = root.toLowerCase()
-    if (!lower.startsWith(`${rootLower}/`)) return null
+  const rootLower = root.toLowerCase()
+  if (root !== '' && rootLower !== '/' && lower.startsWith(`${rootLower}/`)) {
     path = path.slice(root.length + 1)
   }
+  path = path.replace(/^\/+/, '')
   const relative = path.toLowerCase()
   return relative.startsWith('assets/') || relative.startsWith('packages/') ? path : null
 }

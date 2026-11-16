@@ -1,8 +1,8 @@
 // Editor health: the JS half of contracts.md §4.3.
 //
 // Everything runs against test/fake-broker.js with `onMessage` interception, so
-// no Unity editor is needed: `dsh_health`, `dsh_health_snapshot` and
-// `dsh_main_thread_stack` are answered from fixtures shaped exactly like
+// no Unity editor is needed: `dsh_health` and `dsh_main_thread_stack` are
+// answered from fixtures shaped exactly like
 // native/locus_unix_native/src/broker.rs `respond_health` answers them.
 //
 // The point of these tests is not just "the happy path parses". Half of them
@@ -59,23 +59,10 @@ function healthReport(overrides = {}) {
     heartbeatAgeMs: 40,
     supported: true,
     unresponsive: false,
-    phase: {
-      supported: true,
-      freshness: 'fresh',
-      phase: 'editing',
-      since_ms: 1_700_000_000_000,
-      age_ms: 12,
-      playing: false,
-      paused: false,
-      compiling: false,
-      updating: false,
-      importing: false,
-    },
     cpuPercent: 3.5,
     cpuWindowMs: 1_000,
     liveness: { supported: true, state: 'alive', zombie: false },
     tiers: {
-      t1: { supported: true, reason: null },
       t2: { supported: true, platform: 'linux', reason: null, windowMs: 1_000 },
       t3: { supported: true, state: 'alive', zombie: false },
     },
@@ -93,24 +80,12 @@ function healthReport(overrides = {}) {
   }
 }
 
-/** A wedged editor: heartbeat stopped, CPU pegged, phase report gone stale. */
+/** A wedged editor: the heartbeat stopped and the CPU is pegged. */
 function stuckReport(overrides = {}) {
   return healthReport({
     heartbeatAgeMs: 45_000,
     unresponsive: true,
     cpuPercent: 97.0,
-    phase: {
-      supported: true,
-      freshness: 'stale',
-      phase: 'editing',
-      since_ms: 1_699_999_900_000,
-      age_ms: 120_000,
-      playing: false,
-      paused: false,
-      compiling: false,
-      updating: false,
-      importing: false,
-    },
     ...overrides,
   })
 }
@@ -197,10 +172,8 @@ test('editorHealth reports a live editor as responsive', async () => {
       const health = await editorHealth(TARGET, { getClient })
       assert.equal(health.supported, true)
       assert.equal(health.responsive, true)
-      assert.equal(health.phase, 'editing')
       assert.equal(health.cpuPercent, 3.5)
       assert.equal(health.stuckAt, undefined, 'a healthy editor gets no stuck location')
-      assert.match(health.diagnosis, /phase editing/)
       assert.match(health.diagnosis, /heartbeat is current/)
     },
     { dsh_health: healthReport() },
@@ -214,7 +187,6 @@ test('editorHealth reports a wedged editor with the stack location', async () =>
       const health = await editorHealth(TARGET, { getClient })
       assert.equal(health.responsive, false)
       assert.equal(health.stuckAt, 'Game.Player.Tick()')
-      assert.equal(health.phase, 'editing')
       assert.equal(health.cpuPercent, 97)
       assert.match(health.diagnosis, /heartbeat stopped 45 s ago/)
       assert.match(health.diagnosis, /CPU 97% \(busy running code\)/)
@@ -279,7 +251,6 @@ test('an unsupported CPU tier is reported as unmeasurable, not as 0%', async () 
     cpuPercent: null,
     cpuWindowMs: null,
     tiers: {
-      t1: { supported: true, reason: null },
       t2: { supported: false, platform: 'darwin', reason: 'proc_pidinfo is unavailable in this sandbox', windowMs: null },
       t3: { supported: true, state: 'alive', zombie: false },
     },
@@ -298,34 +269,16 @@ test('an unsupported CPU tier is reported as unmeasurable, not as 0%', async () 
   )
 })
 
-test('a missing phase report leaves the phase unknown instead of guessing', async () => {
-  const noPhase = healthReport({
-    phase: { supported: true, freshness: 'missing' },
-  })
-  await withEditor(
-    async ({ getClient }) => {
-      const health = await editorHealth(TARGET, { getClient })
-      assert.equal(health.phase, undefined)
-      assert.equal(health.compiler.freshness, 'missing')
-      assert.match(health.diagnosis, /no phase report yet/)
-      // Responsive is still decidable from the heartbeat alone.
-      assert.equal(health.responsive, true)
-    },
-    { dsh_health: noPhase },
-  )
-})
-
 test('a report with no evidence at all yields responsive: null', () => {
-  // Nothing measured: no heartbeat, no CPU, no fresh phase. Claiming "fine" and
+  // Nothing measured: no heartbeat, no CPU sample. Claiming "fine" and
   // claiming "stuck" would both be fabricated.
   const health = composeHealth(
     normalizeHealth({
       pid: 1,
       heartbeatAgeMs: null,
       cpuPercent: null,
-      tiers: { t1: { supported: false }, t2: { supported: false }, t3: { supported: true, state: 'alive' } },
+      tiers: { t2: { supported: false }, t3: { supported: true, state: 'alive' } },
       liveness: { supported: true, state: 'alive', zombie: false },
-      phase: { supported: true, freshness: 'missing' },
       backgroundHook: { supported: false, state: 'unsupported' },
     }),
     null,
@@ -349,65 +302,6 @@ test('a zombie editor is called out even though kill(pid, 0) succeeds', () => {
   assert.match(remedy(report), /Restart Unity/)
 })
 
-test('a busy import is explained as work in progress, not as a hang', () => {
-  const importing = healthReport({
-    cpuPercent: 60,
-    phase: {
-      supported: true,
-      freshness: 'fresh',
-      phase: 'importing',
-      since_ms: 1_700_000_000_000,
-      age_ms: 5,
-      playing: false,
-      paused: false,
-      compiling: false,
-      updating: true,
-      importing: true,
-    },
-  })
-  const report = composeHealth(health(importing), null)
-  assert.equal(report.compiler.importing, true)
-  assert.match(report.diagnosis, /phase importing/)
-  assert.match(remedy(report), /still working \(importing\)/)
-
-  // Same thresholds, but the evidence now says "stuck": the phase text alone
-  // must not win over a stopped heartbeat.
-  const stale = composeHealth(
-    health({
-      ...importing,
-      heartbeatAgeMs: 60_000,
-      unresponsive: true,
-      phase: { ...importing.phase, freshness: 'stale', age_ms: 90_000 },
-    }),
-    null,
-  )
-  assert.equal(stale.responsive, false)
-  assert.match(stale.diagnosis, /last phase report is stale/)
-})
-
-test('a modal dialog is reported, because it blocks the main thread by design', () => {
-  const withDialog = healthReport({
-    cpuPercent: 0.5,
-    phase: {
-      supported: true,
-      freshness: 'fresh',
-      phase: 'editing',
-      since_ms: 1_700_000_000_000,
-      age_ms: 3,
-      playing: false,
-      paused: false,
-      compiling: false,
-      updating: false,
-      importing: false,
-      modal_dialog: true,
-    },
-  })
-  const report = composeHealth(health(withDialog), null)
-  assert.equal(report.compiler.modalDialog, true)
-  assert.match(report.diagnosis, /modal dialog is open/)
-  assert.match(remedy(report), /Answer it in the Unity window/)
-})
-
 test('editorHealth surfaces a non-JSON answer as a LocusError', async () => {
   await withEditor(
     async ({ getClient }) => {
@@ -423,22 +317,6 @@ test('editorHealth surfaces a non-JSON answer as a LocusError', async () => {
         return true
       },
     },
-  )
-})
-
-test('the compiler block carries the editor phase and its freshness', async () => {
-  await withEditor(
-    async ({ getClient }) => {
-      const health = await editorHealth(TARGET, { getClient })
-      assert.equal(health.compiler.supported, true)
-      assert.equal(health.compiler.freshness, 'fresh')
-      assert.equal(health.compiler.phase, 'editing')
-      assert.equal(health.compiler.sinceMs, 1_700_000_000_000)
-      assert.equal(health.compiler.playing, false)
-      assert.equal(health.compiler.paused, false)
-      assert.equal(health.compiler.compiling, false)
-    },
-    { dsh_health: healthReport() },
   )
 })
 
@@ -621,8 +499,7 @@ test('explainUnresponsive admits when the editor health could not be measured', 
       pid: 1,
       heartbeatAgeMs: null,
       cpuPercent: null,
-      tiers: { t1: { supported: false }, t2: { supported: false }, t3: { supported: false } },
-      phase: { supported: false, freshness: 'missing' },
+      tiers: { t2: { supported: false }, t3: { supported: false } },
       backgroundHook: { supported: false },
     }),
     null,
@@ -649,16 +526,3 @@ test('normalizeHealth rejects a malformed report instead of half-reading it', ()
   assert.throws(() => normalizeHealth('nope'), LocusError)
 })
 
-test('describeHealth never claims a phase it was not told', () => {
-  const text = describeHealth({
-    phase: { supported: true, freshness: 'missing', phase: null },
-    heartbeatAgeMs: null,
-    cpuPercent: null,
-    tiers: { t2: { supported: false } },
-    liveness: { supported: true, state: 'alive', zombie: false },
-  })
-  assert.match(text, /no phase report yet/)
-  assert.match(text, /has not heartbeat yet/)
-  assert.match(text, /CPU activity is not measurable here/)
-  assert.doesNotMatch(text, /phase editing/)
-})

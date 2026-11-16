@@ -11,10 +11,9 @@
 ## 0. 全局规则（所有线必须遵守）
 
 1. **不改 `payload/locus_unity/`**。它是 `npm run sync:payload` 的生成物，CI 里
-   `npm run check:payload` 会校验。需要编辑器侧新增能力时，写旁挂包
-   `packages/unity-bridge/`（本仓库原创 GPL 代码），通过 asmdef 显式引用
-   `Locus.Editor` 调用 `Locus.LocusBridge.RegisterExtensionMessageHandler`；
-   插件在根 `package.json` 的 `locus.payload` 声明对应的 payload 版本。
+   `npm run check:payload` 会校验。插件**不附带任何 Unity 侧代码**：编辑器侧能力只用 payload
+   已有的消息与工具，引擎里缺什么就删功能或改走磁盘/原生，而不是旁挂一个包。插件在根
+   `package.json` 的 `locus.payload` 声明对应的 payload 版本。
 2. **不改 broker wire 协议**（`native/locus-native-protocol/`）。新增编辑器侧能力
    走**扩展消息**（同进程，不经 broker）；只有非改不可时才动
    `native/locus_unix_native/`，并在 `NOTICE` 里记录为本仓库修改。
@@ -40,7 +39,7 @@
 
 | 工具 | 归属线 | 参数（除 `project_path`） | 输出 | 说明 |
 |---|---|---|---|---|
-| `unity_hot_reload` | A | `paths`(string[], 至少一个), `dry_run?`(boolean, 默认 false) | `{text, hot, needCompile, failed, files:[{path,state,reason?,method_count}], supported}` | 编辑会话内不写工程文件；`dry_run` 只跑归类器不落补丁。`files` 是逐文件结论（含无方法体的热文件）。 |
+| `unity_hot_reload` | A | `paths`(string[], 至少一个), `dry_run?`(boolean, 默认 false) | `{text, hot, needCompile, failed, files:[{path,state,reason?,method_count}], patches:[{id,path,methods,applied}], patchError?, supported}` | 编辑会话内不写工程文件；`dry_run` 只跑归类器不落补丁。`files` 是逐文件结论（含无方法体的热文件）。补丁由 payload 原生 `hot_patch_loaded` 落地，不需要旁挂包。 |
 | `unity_asset_search` | E | `type?`, `name?`, `under?`, `guid?`(32-hex), `limit?`(1..200 默认 20), `rescan?` | `{text, total, partial, assets:[{path,type,guid}]}` | 只读，无编辑器也可用；非法 `guid` 直接报错。 |
 | `unity_yaml_read` | E | `path`(必填), `object?`(fileId 或名字), `depth?`(0..4 默认 2), `max_items?`(1..1024 默认 20), `source?`('auto'\|'disk'\|'live') | `{text, path, source:'live'\|'disk', total}` | 只读。磁盘模式无编辑器也可用；`auto` 对单文件走 live 并回退磁盘。 |
 | `unity_yaml_search` | E | `query`(必填, 支持 `re:`), `scope?`(文件或目录), `match_fields?`(path\|field_name\|field_value\|type\|all), `limit?`(1..1000 默认 50), `source?` | `{text, matches:[{path, pointer, field, value}], scanned}` | 只读。单文件范围可用 live；目录/全工程只读磁盘。 |
@@ -56,51 +55,68 @@
 
 ## 2. 线 A：热重载
 
-### 2.1 编辑器侧（旁挂包，A 负责）
-目录：`packages/unity-bridge/Editor/HotReload/`，asmdef 名 `Locus.DshBridge.Editor`。
+### 2.1 编辑器侧（payload 原生，不需要旁挂包）
+热补丁的**应用**完全走 payload 自带的消息（`LocusBridge.cs` 的 `hot_patch_loaded` /
+`hot_patch_dispose` / `hot_reload_probe` 三个 case），就是 Locus 桌面端驱动的那条路：
+分类与编译在插件进程，应用在 payload 内完成，台账在驱动方。
 
-通过 asmdef 显式引用 `Locus.Editor` 注册扩展消息处理函数。热重载的**分类**在插件
-进程完成（`src/hotreload-classify.js`，只读磁盘源码）；编辑器只负责应用补丁：
-
-| 消息 | 请求 JSON | 应答 JSON |
+| 消息 | 请求 | 应答 |
 |---|---|---|
-| `dsh_hot_reload_apply` | `{patch_id, assembly_b64, methods:[…], domain_generation?}` | `{applied:number, skipped:[{method_key, reason}]}` |
-| `dsh_hot_reload_status` | `{}` | `{detours:number, patched_methods:[string], last_error?:string}` |
-| `dsh_hot_reload_dispose` | `{patch_id?}` | `{disposed:number}` |
+| `hot_patch_loaded` | `{patch_id, assembly_b64, methods:[HotPatchMethodDto], domain_generation?, message_drivers?}` | `{patch_id, method_count, detour_engine, inlined_method_keys[], inlined_sources[], pump_supported, pumped_count, pump_skipped_count, pump_skipped_messages[], pump_failed_count}` |
+| `hot_patch_dispose` | 裸字符串：`all` / 空串 / `patch_id` | 文本 `disposed:<n>` |
+| `hot_reload_probe` | 空 | `{detour_ok, detour_engine, code_optimization, domain_reload_on_play, error?}` |
+
+`HotPatchMethodDto`：`{declaring_type, patch_declaring_type, name, param_type_names,
+param_type_sigs, is_static, is_ctor, source_path, original_assembly}`，其中
+`param_type_names` 是**必需**的（payload 靠它解析重载，缺了会报
+"original method not found in the loaded assemblies"）。
+
+语义要点：
+1. **整批原子**：payload 内任一方法失败即 `RollbackHotPatch` 并回 `ok:false`
+   （`hot patch apply failed (rolled back): …`），不像旧旁挂包那样逐方法 `skipped`。
+   DSH 侧把整批失败记成该文件的 `skipped` 行，不视为「编辑器丢了」。
+2. **domain 校验**：`domain_generation` 与 payload 的 `_compileDomainGeneration` 不一致时
+   payload 拒绝；空值跳过校验。驱动方先 `get_reload_state` 取真值再发送。
+3. **重打同一方法 = 替换**：payload 的键是
+   `MethodKey = declaring_type|name|join(param_type_names)|s|i` 再加 `|original_assembly`，
+   同一键只有一条活 detour（注释称与 Rust `unity_method_key` 逐字节一致）。
+4. **台账在驱动方**：payload 的 `_hotMethodDetours` 是私有的、没有查询消息，所以
+   `src/hotreload.js` 自己按同一键规则维护台账，并在 `get_reload_state` 的
+   `domain_generation` 变化时清空（detour 随域消失，payload 也不清）。
+5. **打补丁前先自检**：`hot_reload_probe` 用两个 `[MethodImpl(NoInlining)]` 探针方法验证
+   detour 引擎（挂上得 2、dispose 后回到 1），失败就整批不打、直接报原因。
+6. **内联风险**：Release 构建里被内联的方法，detour 虽活着但调用点仍走编译体；
+   payload 在应答的 `inlined_method_keys` / `inlined_sources` 里点名，DSH 在报告里如实写出。
+
+旁挂包里的 `dsh_hot_reload_apply/status/dispose` 与 `Editor/HotReload/` 目录已删除：payload 里
+本来就有 `_hotMethodDetours`，同一条路径不留第二个实现。
 
 实现路径（按优先级）：
-1. **首选**：把**已编译的**补丁程序集交给 payload 现成的 `hot_patch_loaded` 语义。
-   我们旁挂包自己实现 detour 会与 payload 的 `_hotMethodDetours` 抢同一条路径，
-   所以要么（a）只做归类 + 调 `execute_code` 让 payload 执行 detour，要么
-   （b）自己完整实现并用**独立静态类**避免冲突。**推荐 (a)**：用
-   `compile_skill_package` 的既有能力编译补丁（它的返回 `assembly_b64` 正是
-   `hot_patch_loaded` 需要的），然后用 `execute_code` 反射调用
-   `Locus.LocusBridge.hot_patch_loaded` 的私有处理器是不可行的——它是私有方法。
-   **因此最终形态**：旁挂包自己持有 `Dictionary<MethodBase, IDisposable>`，
-   通过反射从 payload 的 `Locus.Detour.dll` 找到
-   `MonoMod.RuntimeDetour.Detour`（失败再退 `NativeDetour`）建立 detour。
-   asmdef 里虽然列了 `precompiledReferences`，Detour 仍走反射：实测把协作包整体重装后，
-   Unity 会丢失这些包内 precompiled 引用，编译期硬引用不稳定（注册与事件发送不依赖它，
-   那两处是硬引用）。两条 detour 路径互不干扰的前提是：payload 只在桌面端驱动
-   `hot_patch_loaded`，DSH 侧永不发送该消息。
+1. **首选（即当前实现）**：JS 侧直接发 payload 的 `hot_patch_loaded`。此前认为私有
+   处理器「不可达」，但 `private` 只是 C# 可见性：扩展消息走的是同一个
+   `HandleMessageAsync` 的 `default:` 分支，native broker 不做消息白名单，所以
+   `client.request('hot_patch_loaded', json)` 与桌面端完全同路。
 2. 结构变化（字段增删、签名、类型形状）→ 归类为 `needCompile`，不尝试补丁。
 
-### 2.2 JS 侧（A 负责）
+### 2.2 JS 侧
 `src/hotreload.js`：
 
 ```js
 export const HOT_RELOAD_MODES = Object.freeze(['auto', 'compile', 'scripts'])
 export function classifyHotEdit(projectRoot, paths)      // → {hot, needCompile, failed, files}（本地分类）
-export async function applyHotPatch(client, { patchId, assemblyB64, methods, domainGeneration })
-export async function hotReloadStatus(client)          // → {detours, patchedMethods, lastError}
+export async function probeDetourEngine(client)        // → {detourOk, detourEngine, codeOptimization, domainReloadOnPlay, error}
+export async function applyHotPatch(client, { patchId, assemblyB64, methods, domainGeneration, sourcePath })
+export async function hotReloadStatus(client = null)   // → {detours, patchedMethods, lastError, domainGeneration, entries}
 export async function disposeHotPatches(client, { patchId })
+export function methodKey(method) / detourKey(method)  // 与 payload 的键规则一致
 export async function hotReload(target, { paths, dryRun }) // → 汇总，供工具层直接用
 export function formatHotReload(result)                // → 给人看的多行文本
 ```
 
-约束：所有 broker 调用走 `client.request('<消息名>', JSON.stringify(payload), {timeoutMs})`；
-超时默认 60s；跨域重载窗口用 `src/recompile.js` 既有的
-`isTransientBrokerError()` 判定并可重试一次。
+约束：`hot_patch_loaded` 走 `client.request('hot_patch_loaded', json, {timeoutMs: 60_000})`；
+`hot_patch_dispose` 的 body 是裸字符串（不是 JSON）；`hot_reload_probe` 空 body。
+跨域重载窗口用 `src/protocol.js` 的三个瞬态码精确匹配（与上游
+`is_transient_broker_error` 同义）并至多重试一次。
 
 ### 2.3 与 `unity_recompile` 的联动（A 负责，Lead 接线）
 `unity_recompile(mode:'auto')`：先 `hotReload`；若 `needCompile.length > 0` 或
@@ -158,15 +174,15 @@ export function scanInstalledEditors({platform, homeDir}) // → [{flavor, versi
 ### 4.1 原生（C 负责，`native/locus_unix_native/src/`）
 - `hook/mod.rs`：`cfg(windows)` 实现 `locus_set_background_active(active)` 的补丁
   与恢复（返回打点数量，失败 -1）；非 Windows 保持 -1 并在状态里标 `Unsupported`。
-- `state_probe/mod.rs`：`probe(pid) -> StateProbeTiers {t1, t2, t3}`，T2/T3 用
-  `/proc/<pid>/stat`（Linux）/ `proc_pidinfo`（macOS）；T1 由编辑器侧阶段标记喂入。
+- `state_probe/mod.rs`：`probe(pid) -> StateProbeTiers {t2, t3}`，用
+  `/proc/<pid>/stat`（Linux）/ `proc_pidinfo`（macOS）测 CPU，用 `kill(pid, 0)` 测存活。
+  没有托管阶段档：payload 不提供阶段，编辑器是否在编译由 broker 拒绝 managed 请求体现。
 - `hang/mod.rs`：`capture_main_thread_stack(pid) -> Result<Vec<Frame>, StackError>`，
   能用 `mono_names.rs` 已解析的符号时给出托管帧（方法名 + 文件 + 行），否则
   `StackError::Unavailable`。**必须幂等、必须不阻塞主线程**。
 
-### 4.2 编辑器侧（C 负责，旁挂包 `packages/unity-bridge/Editor/Health/`）
-扩展消息 `dsh_health_snapshot` → `{phase, since_ms, playing, paused, compiling, updating, importing, modal_dialog?}`，
-由 `EditorApplication.update` 打点；`dsh_health_subscribe` 控制开关。
+### 4.2 编辑器侧
+无。健康能力全部在原生 broker（§4.1）里应答，编辑器侧不装任何旁挂包。
 
 ### 4.3 JS（C 负责）
 `src/health.js`：
@@ -174,7 +190,7 @@ export function scanInstalledEditors({platform, homeDir}) // → [{flavor, versi
 ```js
 export const UNRESPONSIVE_AFTER_MS = 30_000
 export const BUSY_CPU_PERCENT = 25.0
-export async function editorHealth(target)     // → {supported, responsive, stuckAt?, phase?, cpuPercent?, diagnosis?, backgroundHook, stateProbe, compiler}
+export async function editorHealth(target)     // → {supported, responsive, stuckAt?, cpuPercent?, diagnosis?, backgroundHook, stateProbe}
 export function explainUnresponsive(error)     // → string | null，供 client-pool 错误包装使用
 export async function enableBackgroundHook(target, enabled)
 ```
@@ -269,12 +285,11 @@ bug 修复项（E 负责）：
 | 线 | 独占目录/文件 |
 |---|---|
 | Lead | `src/tools.js`, `src/index.js`, `src/settings.js`, `src/client-pool.js`, `src/sidebar/routes.js`(除 E 的 skills/state 段), `cordis.patch.yml`, `package.json`, `CHANGELOG.md`, `README*.md`, `NOTICE` |
-| A | `packages/unity-bridge/Editor/HotReload/**`, `src/hotreload.js`, `test/hotreload.test.js`, `src/recompile.js` |
-| B | `tools/dsh-finish/Compiler/**`, `packages/unity-bridge/Editor/Compiler/**`, `src/csharp/sidecar.js`, `src/unity-flavor.js`, `test/compiler.test.js`, `test/flavor.test.js` |
-| C | `native/locus_unix_native/src/{hook,state_probe,hang}/**`, `packages/unity-bridge/Editor/Health/**`, `src/health.js`, `test/health.test.js`, `native/locus_unix_native/tests/**` |
+| A | `src/hotreload.js`, `src/hotreload-classify.js`, `test/hotreload.test.js`, `src/recompile.js` |
+| B | `tools/dsh-finish/Compiler/**`, `src/csharp/sidecar.js`, `src/unity-flavor.js`, `test/compiler.test.js`, `test/flavor.test.js` |
+| C | `native/locus_unix_native/src/{hook,state_probe,hang}/**`, `src/health.js`, `test/health.test.js`, `native/locus_unix_native/tests/**` |
 | D | `src/docs/**`, `test/unity-docs.test.js`, `test/unity-docs-skill.test.js` |
 | E | `src/asset-db.js`, `src/yaml-lite.js`, `src/editor-lock.js`, `src/console.js`, `src/asset-graph.js`, `src/skills/**`, `src/sidebar/paths.js`, `src/client/plugin.js`(仅第 15 行注释), `AGENTS.md`, `docs/marketplace/README.md`, `test/fake-broker.js`, `test/{asset-db,yaml-lite,editor-lock,console-log,skills-provider}.test.js` |
 
-`packages/unity-bridge/` 的共享骨架（`package.json`、asmdef、
-`Editor/DshBridgeBootstrap.cs`、扩展消息反射桥）由 **Lead 先写好**再分发，A/B/C 只往
-自己的子目录加文件。
+各线只改上表列出的文件；跨线的公共骨架（`src/tools.js`、`src/index.js`、`package.json`）
+由 **Lead 先写好**再分发。

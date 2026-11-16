@@ -11,11 +11,12 @@
 // positive evidence of a stall, and `null` when nothing could be observed:
 // claiming a hang we cannot see is just as dishonest as hiding one.
 //
-// The three trailing pieces of contracts.md §4.3 arrive the same way: the
-// background hook is the broker's in-process `IsApplicationActive` patch, the
-// state probe is the tiered T1/T2/T3 report, and the compiler entry is the
-// editor's own phase snapshot (`dsh_health_snapshot`), which is the only source
-// that knows *what* the editor is doing.
+// Two trailing pieces of contracts.md §4.3 arrive the same way: the background
+// hook is the broker's in-process `IsApplicationActive` patch, and the state
+// probe is the tiered T2/T3 report. There is no phase tier: Locus diagnoses a
+// hang from the native stack and CPU, and the one thing a phase snapshot added —
+// "the editor is compiling" — is already answered upstream by the broker
+// refusing managed work while it compiles.
 
 import { LocusError } from './locus-client.js'
 
@@ -37,8 +38,6 @@ export const BUSY_CPU_PERCENT = 25.0
 
 /** Requests that ask the native broker for health; none of them hit Unity code. */
 export const HEALTH_REQUEST = 'dsh_health'
-export const HEALTH_SNAPSHOT_REQUEST = 'dsh_health_snapshot'
-export const HEALTH_SUBSCRIBE_REQUEST = 'dsh_health_subscribe'
 export const MAIN_THREAD_STACK_REQUEST = 'dsh_main_thread_stack'
 /** Flip the background scheduling hook; message is `1` or `0`. */
 export const SET_BACKGROUND_HOOK_REQUEST = 'dsh_set_background_hook'
@@ -55,15 +54,12 @@ const HEALTH_TIMEOUT_MS = 5_000
 /** Flipping the hook writes a code page; it is native and fast, but not instant. */
 const HOOK_TIMEOUT_MS = 10_000
 
-/** One phase report older than this is history, not evidence of the present. */
-const PHASE_STALE_AFTER_MS = 5_000
-
 /**
  * Turn a broker error into one sentence about the editor, or `null` when the
  * error has nothing to do with the editor being wedged.
  *
  * `client-pool.js` calls this while wrapping a failed request, so the message a
- * model reads says "the editor is probably stuck in <phase>" instead of a bare
+ * model reads says "the editor is probably stuck in main-thread code" instead of a bare
  * `native_request_timed_out`. It must stay free of awaits: it runs inside an
  * error handler on a request that has already burned its timeout.
  *
@@ -120,8 +116,8 @@ export function explainUnresponsive(error) {
  * broker without a real pool; production callers pass the pool's own `getClient`.
  *
  * Result shape (attached to `unity_status` as `editorHealth`):
- *   { supported, responsive, stuckAt?, phase?, cpuPercent?, diagnosis?,
- *     backgroundHook, stateProbe, compiler }
+ *   { supported, responsive, stuckAt?, cpuPercent?, diagnosis?,
+ *     backgroundHook, stateProbe }
  *
  * `supported` is true when at least one tier could be measured. `responsive` is
  * `true` / `false` only on evidence and `null` when nothing was observed.
@@ -251,7 +247,6 @@ export function normalizeHealth(raw) {
   }
 
   const tiers = raw.tiers && typeof raw.tiers === 'object' ? raw.tiers : {}
-  const phase = raw.phase && typeof raw.phase === 'object' ? raw.phase : { supported: false, freshness: 'missing' }
   const liveness = raw.liveness && typeof raw.liveness === 'object' ? raw.liveness : { supported: false }
   const hook = normalizeHook(raw.backgroundHook)
 
@@ -271,26 +266,12 @@ export function normalizeHealth(raw) {
     unresponsive:
       raw.unresponsive === true ||
       (heartbeatAgeMs !== null && heartbeatAgeMs >= UNRESPONSIVE_AFTER_MS),
-    phase: {
-      supported: phase.supported === true,
-      freshness: typeof phase.freshness === 'string' ? phase.freshness : 'missing',
-      phase: typeof phase.phase === 'string' ? phase.phase : null,
-      sinceMs: numberOrNull(phase.since_ms ?? phase.sinceMs),
-      ageMs: numberOrNull(phase.age_ms ?? phase.ageMs),
-      playing: phase.playing === true,
-      paused: phase.paused === true,
-      compiling: phase.compiling === true,
-      updating: phase.updating === true,
-      importing: phase.importing === true,
-      modalDialog: typeof phase.modal_dialog === 'boolean' ? phase.modal_dialog : null,
-    },
     liveness: {
       supported: liveness.supported !== false,
       state: typeof liveness.state === 'string' ? liveness.state : 'unknown',
       zombie: liveness.zombie === true,
     },
     tiers: {
-      t1: tiers.t1 ?? { supported: false },
       t2: tiers.t2 ?? { supported: false },
       t3: tiers.t3 ?? { supported: false },
     },
@@ -328,27 +309,22 @@ function numberOrNull(value) {
 /**
  * Fold the probe report plus the stack diagnosis into the `editorHealth` shape.
  *
- * The three extra blocks of §4.3 map onto what was measured:
- *   `stateProbe`   – the tiered T1/T2/T3 report (what the probe could see);
- *   `compiler`     – the editor's own phase snapshot (compiling/importing/...);
+ * The extra blocks of §4.3 map onto what was measured:
+ *   `stateProbe`   – the tiered T2/T3 report (what the probe could see);
  *   `backgroundHook` – the scheduling-hook patch state.
  */
 export function composeHealth(health, stack) {
   const diagnosis = stack && typeof stack === 'object' ? stack : null
   const stuckAt = diagnosis && diagnosis.status === 'complete' ? (diagnosis.location ?? null) : null
 
-  const supported =
-    health.tiers.t1.supported === true ||
-    health.tiers.t2.supported === true ||
-    health.tiers.t3.supported === true
-  const evidence = health.heartbeatAgeMs !== null || health.cpuPercent !== null || health.phase.freshness === 'fresh'
+  const supported = health.tiers.t2.supported === true || health.tiers.t3.supported === true
+  const evidence = health.heartbeatAgeMs !== null || health.cpuPercent !== null
   const responsive = health.unresponsive === true ? false : evidence ? true : null
 
   return {
     supported,
     responsive,
     ...(stuckAt ? { stuckAt } : {}),
-    ...(health.phase.phase ? { phase: health.phase.phase } : {}),
     ...(health.cpuPercent !== null ? { cpuPercent: health.cpuPercent } : {}),
     // Heartbeat age and liveness are repeated at the top level (they also live
     // under stateProbe) so `describeHealth`/`explainUnresponsive` can read one
@@ -370,49 +346,19 @@ export function composeHealth(health, stack) {
       cpuPercent: health.cpuPercent,
       cpuWindowMs: health.cpuWindowMs,
       liveness: health.liveness,
-      phase: health.phase,
       notes: health.notes,
       stackSupport: health.stackSupport,
-    },
-    compiler: {
-      supported: health.phase.supported,
-      freshness: health.phase.freshness,
-      phase: health.phase.phase,
-      sinceMs: health.phase.sinceMs,
-      // `ageMs` is what makes "stale" mean something: without it a reader can
-      // only say "stale", not "stale by two minutes".
-      ageMs: health.phase.ageMs,
-      compiling: health.phase.compiling,
-      updating: health.phase.updating,
-      importing: health.phase.importing,
-      playing: health.phase.playing,
-      paused: health.phase.paused,
-      modalDialog: health.phase.modalDialog,
     },
   }
 }
 
 /**
- * One sentence about what the evidence says. Order matters: a stale or missing
- * phase is stated first, because every later claim is weaker without it.
+ * One sentence about what the evidence says, strongest evidence first.
  */
 export function describeHealth(health, stack = null) {
   const parts = []
-  // Same tolerance as remedy(): flat probe report or composed `editorHealth`.
-  const phaseReport = health.compiler ?? health.phase ?? {}
   const liveness = health.liveness ?? health.stateProbe?.liveness
   const tiers = health.stateProbe?.tiers ?? health.tiers ?? {}
-
-  if (phaseReport.freshness === 'fresh' && phaseReport.phase) {
-    parts.push(`phase ${phaseReport.phase}`)
-  } else if (phaseReport.freshness === 'stale') {
-    const age = phaseReport.ageMs
-    parts.push(`last phase report is stale${age === null ? '' : ` (${Math.round(age / 1000)} s old)`}`)
-  } else if (phaseReport.supported) {
-    parts.push('no phase report yet, so what the editor is doing is unknown')
-  } else {
-    parts.push('the editor phase cannot be reported on this platform')
-  }
 
   if (health.heartbeatAgeMs !== null && health.heartbeatAgeMs !== undefined) {
     if (health.heartbeatAgeMs >= UNRESPONSIVE_AFTER_MS) {
@@ -438,8 +384,6 @@ export function describeHealth(health, stack = null) {
     else if (liveness.zombie) parts.push('the editor process is a zombie')
   }
 
-  if (phaseReport.modalDialog === true) parts.push('a modal dialog is open')
-
   if (stack && stack.status === 'complete' && stack.location) {
     parts.push(`stuck at ${stack.location}`)
   } else if (health.stuckAt) {
@@ -452,28 +396,13 @@ export function describeHealth(health, stack = null) {
 /** What a human should try next, ordered by how likely it is to help. */
 export function remedy(health) {
   // Accept both shapes: the composed `editorHealth` object (which nests the
-  // probe under `stateProbe`/`compiler`) and the flat normalized probe report.
+  // probe under `stateProbe`) and the flat normalized probe report.
   const liveness = health.liveness ?? health.stateProbe?.liveness
-  const phaseReport = health.compiler ?? health.phase ?? {}
   if (liveness?.state === 'gone' || liveness?.zombie) {
     return 'Restart Unity: the process is no longer running the editor loop.'
   }
-  const phase = phaseReport.phase
-  const stale = phaseReport.freshness !== 'fresh'
-  if (phase === 'importing' || phase === 'compiling' || phase === 'updating') {
-    return `The editor is still working (${phase}). Wait for it to finish; if it has not moved in minutes, check the Console and the Editor.log.`
-  }
-  if (phase === 'reloading') {
-    return 'A script reload is in progress. Wait for it to finish; a reload that never ends usually means a compile error in the Console.'
-  }
-  if (phaseReport.modalDialog === true) {
-    return 'An editor dialog is open and blocking the main thread. Answer it in the Unity window.'
-  }
   if (health.cpuPercent !== null && health.cpuPercent >= BUSY_CPU_PERCENT) {
     return 'The editor is running code on its main thread and has not returned. Look at the stack frames for the code that is running.'
-  }
-  if (stale) {
-    return 'The editor is not reporting; check whether its window is responsive, and look at Editor.log if it is not.'
   }
   return 'The editor main thread is blocked. Look at the stack frames for what it is waiting on.'
 }

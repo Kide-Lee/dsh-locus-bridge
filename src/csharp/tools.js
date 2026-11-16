@@ -9,8 +9,6 @@
 // works in the desktop agent works here; `project_path` is the only addition,
 // because this client has no ambient "current checkout".
 
-import { assetStatus, installAssets, isPlatformSupported, platformRid } from './assets.js'
-import { poolStatus, restartWorkspace, shutdownCsharpPool, warmUpWorkspace } from './lsp-pool.js'
 import {
   displayPath,
   fileDiagnostics,
@@ -26,6 +24,7 @@ import {
   SEVERITIES,
   workspaceDiagnostics,
 } from './queries.js'
+import { assetsRoot } from './assets.js'
 import { resolveProjectRoot } from '../args.js'
 
 const PROJECT_PATH = {
@@ -58,8 +57,8 @@ const LINE_HINT = {
 }
 
 const ANALYSIS_SETUP =
-  'Requires the C# analysis assets (Roslyn language server + .NET runtime, ~90 MB on first use) and the project\'s ' +
-  'Unity-generated .sln/.csproj files. Run the code_analysis tool with action "install" once to fetch the assets; ' +
+  'Requires the C# analysis assets (Roslyn language server + .NET runtime, ~90 MB) and the project\'s ' +
+  'Unity-generated .sln/.csproj files. The first query in a profile downloads the assets once and reuses them; ' +
   'project files are generated automatically from a connected editor, or by a one-shot headless Unity run.'
 
 /** Run one query, turning setup problems into an actionable message. */
@@ -67,10 +66,10 @@ async function runQuery(action) {
   try {
     return await action()
   } catch (error) {
-    if (error?.code === 'assets_missing') {
+    if (error?.code === 'assets_missing' || error?.code === 'asset_corrupt') {
       throw new Error(
-        `${error.message} Run code_analysis with action "install" (this downloads the Roslyn server and, when no ` +
-          'system .NET 10 runtime is present, the runtime too).',
+        `${error.message} The first query downloads the Roslyn server and, when no system .NET 10 runtime is ` +
+          `present, the runtime too (~90 MB, cached under ${assetsRoot()}); retrying runs that download again.`,
       )
     }
     if (error?.code === 'project_files_missing') {
@@ -323,173 +322,6 @@ const codeDiagnostics = {
   },
 }
 
-// ─── code_analysis (status / install / reset) ───────────────────────────────
-
-const codeAnalysis = {
-  name: 'code_analysis',
-  description:
-    'Inspect or provision the C# semantic analysis backend: the Roslyn language server, the .NET runtime that hosts ' +
-    'it, and the per-workspace server processes.\n\n' +
-    '`status` (default) reports which components are on disk, what an install would download, and which workspace ' +
-    'servers are running. `install` downloads anything missing (~90 MB: the server is ~60 MB; the runtime is skipped ' +
-    'when the machine already has a .NET 10 runtime). `warm` loads the project now so the first real query is fast. ' +
-    '`restart` drops the server and loads a fresh one — use it after Unity regenerates .csproj/.sln (for example ' +
-    'after adding a script) or when analysis looks stale. `reset` closes every server without reloading.\n\n' +
-    'Nothing is downloaded implicitly: the code_* tools fail with a pointer here until `install` has run.',
-  parameters: {
-    project_path: PROJECT_PATH,
-    action: {
-      type: 'string',
-      enum: ['status', 'install', 'warm', 'restart', 'reset'],
-      description: "'status' (default), 'install', 'warm', 'restart', or 'reset'.",
-    },
-  },
-  output: {
-    schema: {
-      type: 'object',
-      additionalProperties: false,
-      properties: {
-        text: { type: 'string' },
-        ready: { type: 'boolean' },
-        missing: { type: 'array', items: { type: 'string' } },
-        workspaces: { type: 'integer' },
-      },
-    },
-    render: (_args, value) => [{ type: 'text', text: value.text }],
-  },
-  async execute(args, exec) {
-    const action = String(args.action ?? 'status')
-    const root = projectRootFor(args, exec)
-
-    if (action === 'warm' || action === 'restart') {
-      if (!isPlatformSupported()) {
-        return {
-          text: `C# analysis is not available on ${process.platform}/${process.arch}.`,
-          ready: false,
-          missing: assetStatus().missing,
-          workspaces: 0,
-        }
-      }
-      const started = Date.now()
-      let result
-      try {
-        if (action === 'restart') {
-          await restartWorkspace(root)
-          result = { warmed: true, workspace: root }
-        } else {
-          result = await warmUpWorkspace(root)
-        }
-      } catch (error) {
-        result = { warmed: false, workspace: root, error: error.message }
-      }
-      const elapsed = ((Date.now() - started) / 1000).toFixed(1)
-      return {
-        text: result.warmed
-          ? `${action === 'restart' ? 'Restarted' : 'Warmed'} the C# language server for ${root} in ${elapsed}s. ` +
-            'The next query answers from a loaded project.'
-          : `Could not ${action === 'restart' ? 'restart' : 'warm'} the C# language server: ${result.error}`,
-        ready: result.warmed,
-        missing: assetStatus().missing,
-        workspaces: poolStatus().workspaces,
-      }
-    }
-
-    if (action === 'reset') {
-      const closed = await shutdownCsharpPool()
-      return {
-        text:
-          closed.length > 0
-            ? `Closed ${closed.length} C# analysis server(s); the next query starts a fresh process.\n${closed
-                .map((entry) => `  ${entry}`)
-                .join('\n')}`
-            : 'No C# analysis server was running.',
-        ready: assetStatus().missing.length === 0,
-        missing: assetStatus().missing,
-        workspaces: 0,
-      }
-    }
-
-    if (!isPlatformSupported()) {
-      const status = assetStatus()
-      return {
-        text:
-          `C# analysis is not available on ${process.platform}/${process.arch}: the Roslyn server ships per ' +
-          '-runtime-identifier and this platform has none.`,
-        ready: false,
-        missing: status.missing,
-        workspaces: 0,
-      }
-    }
-
-    if (action === 'install') {
-      const rid = platformRid()
-      let lastPublish = 0
-      const report = await installAssets(process.env, {
-        rid,
-        onProgress: ({ received, total }) => {
-          if (!total) return
-          const now = Date.now()
-          // Throttle to roughly one message a second: a 60 MB body emits
-          // thousands of progress events.
-          if (now - lastPublish < 1_000) return
-          lastPublish = now
-          exec.publish?.(`Downloading C# analysis assets… ${Math.round((received / total) * 100)}%`)
-        },
-      })
-      return {
-        text: describeAssetReport(report, { installed: true }),
-        ready: true,
-        missing: report.missing,
-        workspaces: poolStatus().workspaces,
-      }
-    }
-
-    const status = assetStatus()
-    const pool = poolStatus()
-    const lines = [describeAssetReport(status, { installed: false }), describePool(pool)]
-    return {
-      text: lines.join('\n\n'),
-      ready: status.missing.length === 0,
-      missing: status.missing,
-      workspaces: pool.workspaces,
-    }
-  },
-}
-
-function describeAssetReport(status, { installed }) {
-  const lines = []
-  if (!status.supported) {
-    lines.push(`Platform ${process.platform}/${process.arch} has no Roslyn server build; C# analysis cannot run.`)
-    return lines.join('\n')
-  }
-  const state = status.missing.length === 0 ? 'ready' : `missing ${status.missing.join(', ')}`
-  lines.push(
-    `C# analysis assets (${status.rid}): ${state}${installed ? ' (install finished)' : ''}\n` +
-      `  root: ${status.root}\n` +
-      `  server:    ${status.server.version}  ${status.server.ready ? status.server.path : 'not installed'}\n` +
-      `  analyzers: ${status.analyzers.version}  ${status.analyzers.ready ? status.analyzers.path : 'not installed'}\n` +
-      `  runtime:   ${status.runtime.version}  ${status.runtime.ready ? status.runtime.path : 'not installed'}`,
-  )
-  if (status.missing.length > 0) {
-    const mb = Math.round(status.installBytes / (1024 * 1024))
-    lines.push(`  install downloads about ${mb} MB (action "install").`)
-  }
-  return lines.join('\n')
-}
-
-function describePool(pool) {
-  if (pool.workspaces === 0) return 'No workspace server is running (the first query starts one).'
-  const lines = [`${pool.workspaces} workspace server(s) running (cap ${pool.maxWorkspaces}):`]
-  for (const entry of pool.entries) {
-    const state = entry.connected ? (entry.loaded ? 'ready' : 'loading') : 'stopped'
-    lines.push(
-      `  ${entry.workspace}  ${state}, ${entry.openDocuments} open document(s), idle ${Math.round(entry.idleMs / 1000)}s` +
-        (entry.project?.solution ? `\n    solution: ${entry.project.solution}` : ''),
-    )
-  }
-  return lines.join('\n')
-}
-
 /** Every C# analysis tool, in registration order. */
 export const csharpToolDefinitions = [
   codeSymbolSearch,
@@ -497,7 +329,6 @@ export const csharpToolDefinitions = [
   codeFindReferences,
   codeHover,
   codeDiagnostics,
-  codeAnalysis,
 ]
 
 /** Names the C# tools register under. */

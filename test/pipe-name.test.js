@@ -131,7 +131,7 @@ test('every tool definition fits the DSH schema subset', () => {
       'unity_hot_reload',
       'unity_asset_search',
       'unity_yaml_read',
-      'unity_yaml_search', 'unity_prefab_overrides',
+      'unity_yaml_search',
       'unity_lock',
       'unity_release',
       'unity_offline_docs',
@@ -140,7 +140,6 @@ test('every tool definition fits the DSH schema subset', () => {
       'code_find_references',
       'code_hover',
       'code_diagnostics',
-      'code_analysis',
     ],
   )
 })

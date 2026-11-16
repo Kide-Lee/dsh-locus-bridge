@@ -1039,100 +1039,35 @@ function describeDiskTime(absolute) {
 }
 
 /**
- * Render one editor object from the live snapshot in the same shape the disk
- * renderer produces, so the two sources can be compared field by field.
+ * The answer of `unity_yaml_read` for a live object.
  *
- * `fields` is `[{name, type, value, reference?, size?, children?}]` from
- * `dsh_live_read`. Returns null when the snapshot has nothing for this object.
+ * The Editor's text is handed through as-is: `read_yaml` already renders the
+ * object the way Locus shows it live, and parsing then re-rendering it here
+ * would only lose fidelity. What is added is the disk context — the file's
+ * modification time — because a live answer that hides an unsaved edit is the
+ * one way this source can mislead.
  */
-export function renderLiveObject(object, { depth = 2, maxItems = 20, header = true } = {}) {
-  if (!object || !Array.isArray(object.fields)) return null
-  const lines = header ? [`# live values (${object.type ?? '?'} ${object.name ?? ''})`.trimEnd()] : []
-  const render = (fields, indent) => {
-    let shown = 0
-    for (const field of fields) {
-      if (shown >= maxItems) {
-        lines.push(`${indent}… ${fields.length - shown} more field(s) not shown`)
-        return
-      }
-      shown += 1
-      const label = indent + (field.name ?? '?')
-      let text = `${label}: ${field.value ?? ''}`.trimEnd()
-      if (field.reference) text += `  {${field.reference}}`
-      if (typeof field.size === 'number') text += `  [${field.size}]`
-      lines.push(text)
-      if (Array.isArray(field.children) && field.children.length > 0 && indent.length < depth * 2) {
-        render(field.children, `${indent}  `)
-      } else if (Array.isArray(field.children) && field.children.length > 0) {
-        lines.push(`${indent}  … ${field.children.length} child field(s) not expanded (depth ${depth})`)
-      }
-    }
-  }
-  render(object.fields, '  ')
-  return lines.join('\n')
-}
-
-/**
- * Render a live snapshot as the answer of `unity_yaml_read`.
- *
- * The Editor's objects are keyed by FileID, the same identity the disk parser
- * puts in each `--- !u!<class> &<fileID>` header, so the two can be compared
- * object by object. When the disk file is not text (an AssetBundle binary) the
- * live snapshot is not a comparison, it is the only answer there is — which is
- * why this path never reports "binary asset".
- */
-function renderLiveAsset(file, documents, live, { object = null, depth = 2, maxItems = 20 } = {}) {
-  const wanted = object === null || object === undefined ? null : String(object).trim()
-  const entries = []
-  for (const document of documents) {
-    const snapshot = live.objects?.[String(document.fileId)] ?? live.objects?.[document.liveKey]
-    if (snapshot !== undefined) entries.push({ document, snapshot })
-  }
-  for (const snapshot of Object.values(live.objects ?? {})) {
-    if (entries.some((entry) => entry.snapshot === snapshot)) continue
-    entries.push({ document: null, snapshot })
-  }
-  const lines = [
-    `Unity YAML: ${file.path} (live Unity Editor, ${entries.length} object(s); disk file last modified ${describeDiskTime(file.absolute)})`,
-  ]
-  if (documents.length === 0) {
-    lines.push('# the file on disk is not text YAML, so every value below comes from the Editor')
-  } else {
-    lines.push('# values are from the Editor, not from the file on disk')
-  }
-  let shown = 0
-  for (const { document, snapshot } of entries) {
-    if (wanted !== null && !matchesObjectIdentity(snapshot, document, wanted)) continue
-    shown += 1
-    const header = document === null
-      ? `--- ${snapshot.type ?? '?'} ${snapshot.file_id ?? ''}`.trimEnd()
-      : `--- !u!${document.classId} &${document.fileId} (${document.typeName ?? snapshot.type ?? '?'})`
-    lines.push('', header)
-    lines.push(renderLiveObject(snapshot, { depth, maxItems, header: false }))
-  }
-  if (shown === 0 && wanted !== null) lines.push('', `<no object matching "${wanted}" in the live snapshot>`)
+function renderLiveObject(file, live, { object = null } = {}) {
+  const banner = `Unity YAML: ${file.path} (live Unity Editor, object ${live.object ?? object ?? '?'}; ` +
+    `disk file last modified ${describeDiskTime(file.absolute)})`
+  // The bundle carries the text under the file it answered for, which is how a
+  // search over the same file finds it too (`live.texts[path]`).
+  const body = live.texts?.[file.path] ?? live.text ?? ''
   return {
-    text: lines.join('\n'),
+    text: [banner, `# values come from the Editor, not from ${file.path} on disk`, body].join('\n'),
     path: file.path,
     source: 'live',
-    total: shown,
+    total: 1,
     live: true,
   }
-}
-
-/** `object` selects one FileID, one `!u!<classId>` selector, or one type name. */
-function matchesObjectIdentity(snapshot, document, wanted) {
-  if (document !== null && (wanted === String(document.fileId) || wanted === `!u!${document.classId}`)) return true
-  const type = snapshot.type ?? document?.typeName
-  return typeof type === 'string' && type.toLowerCase() === wanted.toLowerCase()
 }
 
 /**
  * `unity_yaml_read`: the text for one asset (or one object inside it).
  *
- * `source` is always `'disk'` here: the live path belongs to the tool layer,
- * which owns the broker connection. Keeping the fallback in this module means
- * the tool works with no Editor running at all.
+ * `source` is `'disk'` unless a `live` bundle is passed in. Fetching that bundle
+ * belongs to the tool layer, which owns the broker connection; keeping the
+ * fallback here means the tool works with no Editor running at all.
  */
 export function readYamlText(projectRoot, { path, object, depth = 2, maxItems = 20, live = null } = {}) {
   const file = readYamlFile(projectRoot, path)
@@ -1146,7 +1081,7 @@ export function readYamlText(projectRoot, { path, object, depth = 2, maxItems = 
   }
   const documents = selected === null ? file.documents : [selected.document]
   if (live !== null) {
-    return renderLiveAsset(file, documents, live, { object, depth, maxItems })
+    return renderLiveObject(file, live, { object })
   }
   const lines = [`Unity YAML: ${file.path} (disk, ${file.documents.length} document(s), ${file.text.length} bytes)`]
   if (documents.length === 0) {

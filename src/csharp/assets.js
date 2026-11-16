@@ -1,16 +1,16 @@
 // Acquisition of the Roslyn language server, the Unity analyzers and the .NET
 // runtime that hosts them.
 //
-// Mirrors `Locus/src-tauri/src/csharp_lsp/assets.rs` and `dotnet_runtime.rs`,
-// with two deliberate differences:
+// Mirrors `Locus/src-tauri/src/csharp_lsp/assets.rs` and `dotnet_runtime.rs`.
+// The one deliberate difference is the Unix archives: upstream only wires up
+// Windows ZIPs because its downloader assumed zip; this plugin targets
+// Linux/macOS first (the broker port is Unix-only), so
+// `dotnet-runtime-<v>-<rid>.tar.gz` is handled by `archive.js`.
 //
-//   * the Unix archives are supported. Upstream only wires up Windows ZIPs
-//     because its downloader assumed zip; this plugin targets Linux/macOS
-//     first (the broker port is Unix-only), so `dotnet-runtime-<v>-<rid>.tar.gz`
-//     is handled by `archive.js`.
-//   * nothing is downloaded implicitly. `installAssets()` must be called (the
-//     `code_analysis` tool's `install` action does) so a 90 MB fetch is never a
-//     surprise side effect of a query.
+// Like upstream (`assets::ensure_assets`, called from the language server's
+// start path), the download happens on the first query that needs it, and is
+// cached: the files are written once into the plugin home and every later
+// server start reuses them.
 //
 // The server and analyzers are pinned to the versions upstream ships so a
 // workspace behaves the same in both clients.
@@ -270,7 +270,7 @@ export async function resolveDotnet(env = process.env, { rid = platformRid(), op
 /**
  * What is on disk right now, without downloading anything.
  *
- * `ready` means a query can run. `missing` lists the components an `install`
+ * `ready` means a query can run. `missing` lists the components the next query
  * would fetch.
  */
 export function assetStatus(env = process.env, { rid = platformRid() } = {}) {
@@ -301,7 +301,8 @@ function estimateInstallBytes(missing) {
 
 /**
  * Download every missing component. Resolves to the same report as
- * `assetStatus()` with `ready: true`.
+ * `assetStatus()` with `ready: true`. The language server's start path calls
+ * this, so a query fetches what it needs instead of failing on a cold machine.
  */
 export async function installAssets(env = process.env, { rid = platformRid(), fetchImpl = fetch, onProgress = null, options = {} } = {}) {
   if (!rid) {
@@ -310,8 +311,11 @@ export async function installAssets(env = process.env, { rid = platformRid(), fe
   const shared = { fetchImpl, onProgress, ...options }
   await ensureServer(env, rid, shared)
   await ensureAnalyzers(env, shared)
+  // Only a machine without a usable system .NET 10 pays for the managed copy.
   await resolveDotnet(env, { rid, options: shared })
-  return { ...assetStatus(env, { rid }), ready: true }
+  const status = assetStatus(env, { rid })
+  const missing = status.missing.filter((part) => part !== 'runtime')
+  return { ...status, missing, ready: missing.length === 0 }
 }
 
 /** Resolve everything a query needs; throws when an asset is missing. */
@@ -324,8 +328,8 @@ export async function requireAssets(env = process.env, { rid = platformRid() } =
   const required = status.missing.filter((part) => part !== 'runtime')
   if (required.length > 0) {
     throw new AssetError(
-      `C# analysis assets are not installed (missing: ${required.join(', ')}). ` +
-        'Run the code_analysis tool with action "install".',
+      `C# analysis assets could not be installed (missing: ${required.join(', ')}). ` +
+        'Check the network connection, or install them by hand under the plugin home.',
       { code: 'assets_missing' },
     )
   }

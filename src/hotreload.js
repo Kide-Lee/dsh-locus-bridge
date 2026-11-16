@@ -1,21 +1,24 @@
 // `unity_hot_reload`: classify edited method bodies and patch them into the
 // running editor without a compile.
 //
-// Flow:
+// Flow — the split Locus itself uses (compile outside the Editor, apply inside
+// the payload):
 //   1. classification runs in the plugin process (`src/hotreload-classify.js`):
 //      it reads the scripts from disk and decides which files/methods can be
 //      detoured, which need a real compile, and which were unreadable;
 //   2. the patch assembly is built by the bundled .NET compile service
 //      (`src/csharp/sidecar.js` → `compile/hotPatch`);
-//   3. `dsh_hot_reload_apply {patch_id, assembly_b64, methods, domain_generation}`
-//      → the editor detours each method with MonoMod and reports the count;
-//   4. `dsh_hot_reload_status {}` → the editor's own detour ledger;
-//   5. `dsh_hot_reload_dispose {patch_id}` → detach one patch (or all of them).
+//   3. `hot_patch_loaded {patch_id, assembly_b64, methods, domain_generation}`
+//      → the PAYLOAD loads the assembly and detours each method with MonoMod;
+//   4. `hot_patch_dispose <patch_id|all>` → the payload detaches those detours;
+//   5. `hot_reload_probe` → the payload's own detour self-test, run before every
+//      apply batch so a broken engine costs no round trip.
 //
-// The editor keeps its OWN detour registry and never sends the payload's
-// `hot_patch_loaded`: that message belongs to the desktop client, which accounts
-// for live patches in its own ledger and would be corrupted by entries it did
-// not create. See DshHotReloadRegistry.cs for the full reasoning.
+// All three messages are the payload's own (`LocusBridge.cs` dispatch cases),
+// so the apply path is byte-for-byte the one the Locus desktop client drives.
+// The detour ledger lives in this process, exactly as it lives in the desktop's
+// `src-tauri/src/unity_hotreload/` — the payload keeps `_hotMethodDetours`
+// private and offers no query message for it.
 //
 // The patch assembly itself is built by the bundled .NET compile service
 // (`src/csharp/sidecar.js` → `compile/hotPatch`), which re-emits each changed
@@ -27,9 +30,10 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 import { getClient } from './client-pool.js'
+import { BROKER_ERRORS } from './protocol.js'
 import { SidecarError, SidecarUnavailable, hotDiff, hotPatch } from './csharp/sidecar.js'
 import { classifyHotPaths } from './hotreload-classify.js'
-import { isTransientBrokerError, normalizeChangedPaths } from './recompile.js'
+import { normalizeChangedPaths } from './recompile.js'
 
 /**
  * Values `unity_recompile` accepts for its `mode` argument. `auto` tries hot
@@ -39,15 +43,40 @@ import { isTransientBrokerError, normalizeChangedPaths } from './recompile.js'
  */
 export const HOT_RELOAD_MODES = Object.freeze(['auto', 'compile', 'scripts'])
 
-/** Default broker timeout for the four editor messages (§2.2). */
+/** Default broker timeout for the patch messages. */
 const HOT_RELOAD_TIMEOUT_MS = 60_000
+
+/** The payload's own hot-patch entry points (LocusBridge.cs dispatch cases). */
+const APPLY_MESSAGE = 'hot_patch_loaded'
+const DISPOSE_MESSAGE = 'hot_patch_dispose'
+const PROBE_MESSAGE = 'hot_reload_probe'
+const RELOAD_STATE_MESSAGE = 'get_reload_state'
+
+/** `get_reload_state` answers while the main thread is idle; a reload can stall it. */
+const RELOAD_STATE_TIMEOUT_MS = 10_000
+
+/**
+ * Why the payload refuses to apply a patch it did not compile against the
+ * running domain (LocusBridge.HotReload.cs, the `domain_generation` guard).
+ * Matched on text because the refusal arrives as a plain `ok:false` error.
+ */
+const STALE_DOMAIN_ERROR = /compiled for a previous domain generation/i
 
 /** Last text seen per absolute path, used as the "before" side of a hot diff. */
 const revisionCache = new Map()
 
-const APPLY_MESSAGE = 'dsh_hot_reload_apply'
-const STATUS_MESSAGE = 'dsh_hot_reload_status'
-const DISPOSE_MESSAGE = 'dsh_hot_reload_dispose'
+/**
+ * The live detour ledger, per project pipe: patch id → the methods it holds.
+ *
+ * The payload publishes no ledger query, so this process is the ledger — the
+ * same arrangement the desktop client has. `domainGeneration` is the payload
+ * generation the entries were applied in; every entry belongs to the running
+ * domain only (detours die with it), so a different generation empties the
+ * ledger instead of pretending stale detours are still live.
+ *
+ * @type {Map<string, {domainGeneration: string|null, lastError: string|null, entries: object[]}>}
+ */
+const ledger = new Map()
 
 /** File states the tool layer renders. */
 const STATE_HOT = 'hot'
@@ -59,36 +88,114 @@ const STATE_FAILED = 'failed'
  *
  * Two shapes mean "the editor is between domains": a broker rejection naming
  * one of the three transient codes, and a transport loss while the reload tore
- * the connection down (extension handlers die with the old domain and the new
- * one registers them again — §2.2 allows exactly one retry). The broker codes
- * come from the recompile module's exact-match predicate instead of a second
- * hand-maintained list; a transport loss is a `LocusClient` rejection with no
- * broker code (`code === undefined`), which `getClient` reconnects for.
+ * the connection down (the payload's managed executor is gone during the reload
+ * — §2.2 allows exactly one retry). The codes are matched exactly, the way
+ * upstream `is_transient_broker_error` does, so a real refusal is never retried.
  */
+const TRANSIENT_CODES = new Set([
+  BROKER_ERRORS.MANAGED_RELOADING,
+  BROKER_ERRORS.MANAGED_NOT_READY,
+  BROKER_ERRORS.RELOAD_INTERRUPTED,
+])
+
 function isTransient(error) {
-  if (isTransientBrokerError(error?.code) || isTransientBrokerError(error?.message)) return true
+  const code = String(error?.code ?? '').trim()
+  if (TRANSIENT_CODES.has(code) || TRANSIENT_CODES.has(String(error?.message ?? '').trim())) return true
   return error?.name === 'LocusError' && (error.code === undefined || error.code === null)
 }
 
 /**
- * Send one extension message and decode its JSON answer.
+ * The payload's per-domain generation (`get_reload_state`).
  *
- * Extension handlers answer `{ok:true, message:<json>}` on success and
- * `{ok:false, error:<text>}` on failure (LocusBridge.HandleExtensionMessageAsync),
- * but the body may also be `{"error": …}` written by the handler itself — both
- * are surfaced as the same thrown Error so callers never see a half-parsed
- * result.
+ * Its own copy on purpose: `src/skills/activation.js` has one, but routing a
+ * hot reload through the skills module would make an unrelated capability a
+ * prerequisite. Either way the value is the payload's, not a locally minted
+ * GUID — the payload compares it against `_compileDomainGeneration` and refuses
+ * a patch that predates the reload.
+ */
+async function readDomainGeneration(client) {
+  try {
+    const envelope = await client.call(RELOAD_STATE_MESSAGE, '', { timeoutMs: RELOAD_STATE_TIMEOUT_MS })
+    const payload = JSON.parse(String(envelope?.message ?? '') || '{}')
+    return typeof payload?.domain_generation === 'string' ? payload.domain_generation : ''
+  } catch {
+    return ''
+  }
+}
+
+/**
+ * One participant of the patch ledger.
+ *
+ * The payload keys its own registry by `MethodKey` (declaring type, name,
+ * parameter names, static flag) plus the original assembly, and "patched
+ * again" means *replaced*, not stacked. The Node ledger repeats the same key
+ * and the same replace rule, so `hotReloadStatus` reports what the payload
+ * actually holds. The comment in LocusBridge.HotReload.cs calls MethodKey
+ * "byte-identical with the Rust unity_method_key"; a view must not invent a
+ * different spelling.
+ */
+export function methodKey(method) {
+  const names = Array.isArray(method?.param_type_names) ? method.param_type_names : []
+  return `${method?.declaring_type ?? ''}|${method?.name ?? ''}|${names.join(',')}${method?.is_static ? '|s' : '|i'}`
+}
+
+/** `MethodKey` plus the original assembly: two assemblies may declare one name. */
+export function detourKey(method) {
+  return `${methodKey(method)}|${method?.original_assembly ?? ''}`
+}
+
+/** The ledger for one pipe, created on first use. */
+function ledgerFor(key) {
+  let entry = ledger.get(key)
+  if (!entry) {
+    entry = { domainGeneration: null, lastError: null, entries: [] }
+    ledger.set(key, entry)
+  }
+  return entry
+}
+
+/**
+ * Drop the ledger when it belongs to an earlier payload domain.
+ *
+ * Detours are live objects inside one AppDomain: a reload unmounts all of them
+ * and the payload does not try to clean up (`OnBeforeAssemblyReload` only stops
+ * the bridge). Reporting the old entries after that would claim methods are
+ * patched when they are back to their compiled bodies.
+ *
+ * @param {{domainGeneration: string|null, lastError: string|null, entries: object[]}} current
+ * @param {string|''} generation  the payload's current generation, '' when unreadable
+ */
+function syncLedgerDomain(current, generation) {
+  const next = typeof generation === 'string' && generation.length > 0 ? generation : null
+  if (current.domainGeneration !== null && next !== null && current.domainGeneration !== next) {
+    current.entries = []
+    current.lastError = null
+  }
+  current.domainGeneration = next
+  return current
+}
+
+/**
+ * Send one payload message and decode its body.
+ *
+ * The hot-patch handlers answer inside the standard envelope
+ * (`{ok:true, message:<text>}` / `{ok:false, error:<text>}`,
+ * `LocusBridge.HandleMessageAsync`), but the body is not uniform: the probe and
+ * `hot_patch_loaded` answer JSON, `hot_patch_dispose` answers `disposed:<n>`.
+ * JSON bodies that carry their own `error` are surfaced as thrown Errors so a
+ * caller never sees a half-parsed result.
  *
  * @param {object} client   LocusClient
- * @param {string} type     extension message type
- * @param {object} payload  request body (serialized to JSON)
+ * @param {string} type     payload message type
+ * @param {string} payload  request body, already serialized
  * @returns {Promise<object>}
  */
 async function send(client, type, payload) {
-  const envelope = await client.request(type, JSON.stringify(payload ?? {}), { timeoutMs: HOT_RELOAD_TIMEOUT_MS })
+  const envelope = await client.request(type, payload ?? '', { timeoutMs: HOT_RELOAD_TIMEOUT_MS })
   if (!envelope?.ok) throw new Error(String(envelope?.error ?? `${type} was refused`))
   const raw = String(envelope.message ?? '').trim()
   if (!raw) return {}
+  if (!raw.startsWith('{') && !raw.startsWith('[')) return { text: raw }
   let body
   try {
     body = JSON.parse(raw)
@@ -101,11 +208,41 @@ async function send(client, type, payload) {
 }
 
 /**
+ * The payload's detour self-test (`hot_reload_probe`).
+ *
+ * It detours a pair of `[MethodImpl(NoInlining)]` probe methods, checks the
+ * replacement took and that disposing restores the original, and answers
+ * `{detour_ok, detour_engine, code_optimization, domain_reload_on_play, error}`.
+ * The desktop runs it before patching for the same reason: a failed detour
+ * engine is a fact to report before a 60-second patch timeout, not after.
+ *
+ * @returns {Promise<{detourOk: boolean, detourEngine: string|null, codeOptimization: string|null,
+ *   domainReloadOnPlay: boolean|null, error: string|null}>}
+ */
+export async function probeDetourEngine(client) {
+  let body
+  try {
+    body = await send(client, PROBE_MESSAGE, '')
+  } catch (error) {
+    // The probe reports a failed self-test in its `error` field, but a handler
+    // that cannot even answer (engine load failure) comes back as `ok:false`.
+    // Either way it is a verdict about the engine, not a transport problem.
+    return { detourOk: false, detourEngine: null, codeOptimization: null, domainReloadOnPlay: null, error: String(error?.message ?? error) }
+  }
+  return {
+    detourOk: body.detour_ok === true,
+    detourEngine: body.detour_engine ?? null,
+    codeOptimization: body.code_optimization ?? null,
+    domainReloadOnPlay: typeof body.domain_reload_on_play === 'boolean' ? body.domain_reload_on_play : null,
+    error: body.error ?? null,
+  }
+}
+
+/**
  * Classify edited paths locally.
  *
- * The same file-level rules the editor package used to answer
- * `dsh_hot_reload_classify` with now run in this process, so a dry run needs no
- * Editor and the editor package only has to apply patches.
+ * The file-level rules run in this process, so a dry run needs no Editor at
+ * all: classification only has to apply the patch.
  *
  * @param projectRoot - the Unity project root the paths are relative to.
  * @param paths - project-relative scripts (Assets/ or Packages/).
@@ -117,48 +254,133 @@ export function classifyHotEdit(projectRoot, paths) {
   return classifyHotPaths(projectRoot, list)
 }
 
-/** Load a patch assembly in the editor and detour every listed method. */
-export async function applyHotPatch(client, { patchId, assemblyB64, methods, domainGeneration } = {}) {
+/**
+ * Load a patch assembly in the payload and detour every listed method.
+ *
+ * Request shape is the payload's `HotPatchLoadedRequest`
+ * (LocusBridge.HotReload.cs): snake_case fields, `param_type_names` required
+ * for overload resolution, `domain_generation` refusing a patch compiled
+ * before a reload. The answer is `HotPatchLoadedResponse`; the whole batch is
+ * atomic, so `applied` is either every method or an error was thrown
+ * ("hot patch apply failed (rolled back): …").
+ *
+ * @param {object} client  LocusClient
+ * @param {{patchId: string, assemblyB64: string, methods: object[], domainGeneration?: string|null,
+ *   sourcePath?: string|null}} request  methods already in HotPatchMethodDto shape
+ */
+export async function applyHotPatch(client, { patchId, assemblyB64, methods, domainGeneration, sourcePath } = {}) {
   if (!patchId) throw new Error('applyHotPatch requires a patchId')
   if (!assemblyB64) throw new Error('applyHotPatch requires the patch assembly bytes')
-  const body = await send(client, APPLY_MESSAGE, {
-    patch_id: patchId,
-    assembly_b64: assemblyB64,
-    methods: Array.isArray(methods) ? methods : [],
-    ...(domainGeneration ? { domain_generation: domainGeneration } : {}),
-  })
+  const list = Array.isArray(methods) ? methods : []
+  let body
+  try {
+    body = await send(
+      client,
+      APPLY_MESSAGE,
+      JSON.stringify({
+        patch_id: patchId,
+        assembly_b64: assemblyB64,
+        ...(domainGeneration ? { domain_generation: domainGeneration } : {}),
+        methods: sourcePath ? list.map((method) => ({ ...method, source_path: method.source_path ?? sourcePath })) : list,
+      }),
+    )
+  } catch (error) {
+    if (STALE_DOMAIN_ERROR.test(String(error?.message ?? ''))) {
+      // The patch was compiled against a domain that has since reloaded. The
+      // ledger belongs to that domain too, so drop it before reporting.
+      const current = ledgerFor(client.pipe ?? '')
+      current.entries = []
+      current.lastError = null
+    }
+    throw error
+  }
   return {
-    applied: Number(body.applied ?? 0),
-    skipped: Array.isArray(body.skipped) ? body.skipped : [],
+    patchId: body.patch_id ?? patchId,
+    applied: Number(body.method_count ?? 0),
     detourEngine: body.detour_engine ?? null,
-    domainGeneration: body.domain_generation ?? null,
+    inlinedMethodKeys: Array.isArray(body.inlined_method_keys) ? body.inlined_method_keys.map(String) : [],
+    inlinedSources: Array.isArray(body.inlined_sources) ? body.inlined_sources.map(String) : [],
+    pumpedCount: Number(body.pumped_count ?? 0),
+    pumpFailedCount: Number(body.pump_failed_count ?? 0),
   }
 }
 
-/** The editor's own detour ledger. */
-export async function hotReloadStatus(client) {
-  const body = await send(client, STATUS_MESSAGE, {})
+/**
+ * Record one applied batch in the ledger.
+ *
+ * Same replacement rule as the payload: a method patched again keeps only the
+ * newest detour, so its key moves to the new patch id instead of appearing
+ * twice.
+ */
+function recordBatch(key, { patchId, path, methods, detourEngine, domainGeneration }) {
+  const current = ledgerFor(key)
+  if (domainGeneration && current.domainGeneration !== domainGeneration) syncLedgerDomain(current, domainGeneration)
+  const incoming = methods.map((method) => ({
+    method_key: methodKey(method),
+    detour_key: detourKey(method),
+    patch_id: patchId,
+    engine: detourEngine,
+    declaring_type: method.declaring_type ?? '',
+    name: method.name ?? '',
+    assembly: method.original_assembly ?? '',
+    path: path ?? null,
+  }))
+  const keys = new Set(incoming.map((entry) => entry.detour_key))
+  current.entries = current.entries.filter((entry) => !keys.has(entry.detour_key)).concat(incoming)
+  current.lastError = null
+  return current
+}
+
+/** Forget a batch that failed: it never landed. */
+function forgetBatch(key, patchId) {
+  const current = ledgerFor(key)
+  current.entries = current.entries.filter((entry) => entry.patch_id !== patchId)
+}
+
+/**
+ * The live detour ledger for one project pipe.
+ *
+ * `client` adds the payload's half: its domain generation. A ledger recorded in
+ * a different generation is dropped, because the payload reloaded and every
+ * detour died with the old AppDomain. Passing no client answers from this
+ * process alone, which is what a status call does when the Editor is gone.
+ *
+ * @param {object|null} client  LocusClient
+ * @returns {Promise<{detours: number, patchedMethods: string[], lastError: string|null,
+ *   domainGeneration: string|null, entries: object[]}>}
+ */
+export async function hotReloadStatus(client = null) {
+  const key = client?.pipe ?? ''
+  const generation = client ? await readDomainGeneration(client) : ''
+  const current = syncLedgerDomain(ledgerFor(key), generation)
   return {
-    detours: Number(body.detours ?? 0),
-    patchedMethods: Array.isArray(body.patched_methods) ? body.patched_methods : [],
-    lastError: body.last_error ?? null,
-    domainGeneration: body.domain_generation ?? null,
-    entries: Array.isArray(body.entries) ? body.entries : [],
+    detours: current.entries.length,
+    patchedMethods: [...new Set(current.entries.map((entry) => entry.method_key))],
+    lastError: current.lastError,
+    domainGeneration: current.domainGeneration,
+    entries: current.entries.map((entry) => ({ ...entry })),
   }
 }
 
 /** Detach one patch (`patchId`), or every patch when it is omitted. */
 export async function disposeHotPatches(client, { patchId } = {}) {
-  const body = await send(client, DISPOSE_MESSAGE, patchId ? { patch_id: patchId } : {})
-  return { disposed: Number(body.disposed ?? 0) }
+  // The payload takes the target as a bare string, not as JSON:
+  // "" or "all" detaches everything, anything else is matched against
+  // `patch_id` exactly. The answer is the text `disposed:<n>`.
+  const envelope = await send(client, DISPOSE_MESSAGE, patchId ? String(patchId) : 'all')
+  const disposed = Number(/disposed:\s*(\d+)/.exec(String(envelope.text ?? ''))?.[1] ?? 0)
+  const current = ledgerFor(client?.pipe ?? '')
+  current.entries = patchId ? current.entries.filter((entry) => entry.patch_id !== patchId) : []
+  current.lastError = null
+  return { disposed }
 }
 
 /**
  * Classify the given paths against the connected editor.
  *
- * Retries once across a domain reload: the extension message handlers die with
- * the old domain and are re-registered by the new one, so a transient refusal
- * is expected exactly once and never means the classification failed.
+ * Retries once across a domain reload: the payload's managed executor is gone
+ * while the domain reloads, so a transient refusal is expected exactly once and
+ * never means the classification failed.
  *
  * @param {{projectRoot?: string, pipe?: string}} target
  * @param {{paths?: string[], dryRun?: boolean, signal?: AbortSignal, onPhase?: Function}} options
@@ -192,19 +414,23 @@ export async function hotReload(target, options = {}) {
   const client = await getClient(target)
 
   // Classification only says what *could* be patched. Turning that into live
-  // code needs a patch assembly, and an answered `done`.
-  onPhase('Compiling patch assemblies')
+  // code needs the payload's detour engine, a patch assembly and an answered
+  // `hot_patch_loaded`.
+  onPhase('Checking the editor detour engine')
   try {
     const patched = await compileAndApplyPatches(target, client, result, { signal, onPhase })
     result.patches = patched.patches
     result.applied = patched.applied
     result.skipped = patched.skipped
+    result.probe = patched.probe
   } catch (error) {
     if (error instanceof SidecarUnavailable || error instanceof SidecarError) {
       // No .NET / no build / a compile service that will not start: this is a
       // missing capability, not a failed patch. Report it, keep the
       // classification, and let the caller fall back to a recompile.
       result.patchError = `${error.code ? `[${error.code}] ` : ''}${error.message}`
+    } else if (error instanceof ProbeRefused) {
+      result.patchError = error.message
     } else if (isTransient(error)) {
       result.patchError = `the editor reloaded while the patch was being applied: ${error.message}`
     } else {
@@ -214,17 +440,56 @@ export async function hotReload(target, options = {}) {
   return result
 }
 
+/** A refused detour engine: the payload cannot detour here at all. */
+class ProbeRefused extends Error {
+  constructor(message, { probe = null } = {}) {
+    super(message)
+    this.name = 'ProbeRefused'
+    this.probe = probe
+  }
+}
+
+/**
+ * Retry one payload round trip once when the editor is between domains.
+ *
+ * `hot_patch_loaded` is idempotent enough to retry: a refused request never
+ * detoured anything, and a lost answer is answered by the ledger probe in
+ * `applyHotPatch`'s caller. Kept local so the compiler errors above stay
+ * untouched.
+ */
+async function withRetry(signal, action) {
+  try {
+    return await action()
+  } catch (error) {
+    if (signal?.aborted || !isTransient(error)) throw error
+    return await action()
+  }
+}
+
 /**
  * Compile one patch assembly per edited file and detour the methods each one
  * names.
  *
  * Per file, not per batch: two files that both change the same type still
- * produce two patch assemblies, and the editor tracks each one by its own
- * `patch_id`, so disposing one edit does not detach the other.
+ * produce two patch assemblies, and each is tracked by its own `patch_id`, so
+ * disposing one edit does not detach the other.
  */
 async function compileAndApplyPatches(target, client, classified, { signal = null, onPhase = () => {} } = {}) {
   const projectRoot = target?.projectRoot
   if (!projectRoot) throw new SidecarError('hot reload needs a project root to compile against.', { code: 'invalid_params' })
+  const ledgerKey = client?.pipe ?? ''
+
+  // The payload refuses a patch compiled before a reload with
+  // "compiled for a previous domain generation". Ask first: it is one cheap
+  // round trip and it makes the failure say which reload cost the patch.
+  const domainGeneration = await withRetry(signal, () => readDomainGeneration(client))
+  const probe = await withRetry(signal, () => probeDetourEngine(client))
+  if (!probe.detourOk) {
+    throw new ProbeRefused(
+      `the editor's detour engine is not usable in this domain${probe.error ? `: ${probe.error}` : ''}`,
+      { probe },
+    )
+  }
 
   const byPath = new Map()
   for (const entry of classified.hot) {
@@ -234,11 +499,10 @@ async function compileAndApplyPatches(target, client, classified, { signal = nul
     byPath.set(entry.path, list)
   }
 
-  // The classification carries both revisions: the editor reports what it last
-  // compiled (`text`) and what the file says now (`updated_text`). Without the
-  // pair there is nothing to diff, and "patch the file onto itself" would be a
-  // no-op that reports success — so a file without both revisions is skipped
-  // and left to a real recompile.
+  // The classification carries the current text and the cache carries what the
+  // domain was compiled from. Without the pair there is nothing to diff, and
+  // "patch the file onto itself" would be a no-op that reports success — so a
+  // file without both revisions is skipped and left to a real recompile.
   const patches = []
   const appliedMethods = []
   const skipped = []
@@ -265,57 +529,71 @@ async function compileAndApplyPatches(target, client, classified, { signal = nul
       skipped.push({ path, reason: compiled.error ?? 'the patch assembly did not compile' })
       continue
     }
-    const answer = await applyHotPatch(client, {
-      patchId,
-      assemblyB64: compiled.assemblyB64,
-      methods: compiled.methods.map(toApplyMethod),
-      domainGeneration: classified.domainGeneration ?? null,
-    })
-    patches.push({ id: patchId, path, methods: compiled.methods.length, applied: answer.applied, skipped: answer.skipped.length })
-    appliedMethods.push(...compiled.methods.map((method) => ({
+    const methods = compiled.methods.map(toApplyMethod)
+    let answer
+    try {
+      answer = await withRetry(signal, () => applyHotPatch(client, {
+        patchId,
+        assemblyB64: compiled.assemblyB64,
+        methods,
+        domainGeneration,
+        sourcePath: path,
+      }))
+    } catch (error) {
+      forgetBatch(ledgerKey, patchId)
+      // The payload applies a batch atomically: a failure here means nothing
+      // from this file is live, so the file is skipped rather than counted.
+      if (isTransient(error)) throw error
+      // One file failing is a per-file skip, not a lost editor: the rest of the
+      // batch still has a domain to land in.
+      skipped.push({ path, reason: stripPatchPrefix(error?.message ?? String(error)) })
+      continue
+    }
+    recordBatch(ledgerKey, {
       patchId,
       path,
-      method: describeMethod(method),
-    })))
-    for (const entry of answer.skipped) skipped.push({ path, reason: describeSkippedPatch(entry) })
+      methods: methods.map((method) => ({ ...method })),
+      detourEngine: answer.detourEngine,
+      domainGeneration,
+    })
+    patches.push({ id: patchId, path, methods: methods.length, applied: answer.applied, skipped: 0 })
+    appliedMethods.push(...methods.map((method) => ({ patchId, path, method: describeMethod(method) })))
   }
-  return { patches, applied: appliedMethods, skipped }
+  return { patches, applied: appliedMethods, skipped, probe }
+}
+
+/**
+ * The payload prefixes a rolled-back batch with this; the rows that follow are
+ * the actual reason, so the prefix is noise in a per-file report.
+ */
+function stripPatchPrefix(message) {
+  return String(message).replace(/^hot patch apply failed \(rolled back\):\s*/i, '')
 }
 
 /**
  * The `{path, oldText, newText}` triple for the compile service, from one
  * classified entry.
  *
- * The editor names its own snapshot `text` and the on-disk revision
- * `updated_text`; either may be missing when the message did not carry text at
- * all (classification still works then, patching does not).
+ * The "after" side is the file on disk: the text the user just saved, and the
+ * text the patch has to reproduce. The "before" side is the text the running
+ * domain was compiled from, which this process remembers (the classifier reads
+ * the same file, so it cannot supply the older revision). The file itself is
+ * never used as its own "before" side: that diff is empty by construction, and
+ * reporting "patched" for it would be a lie. When the cache has no baseline the
+ * edit is skipped and left to a real recompile.
  */
 async function asRevisionPair(entries, client, projectRoot, path) {
-  // The editor reports which methods changed, not the two source revisions.
-  //
-  // The "after" side is the file on disk: the text the user just saved, and the
-  // text the patch has to reproduce. The "before" side is asked of the editor
-  // first (its compiled copy), then of the revision cache. The file itself is
-  // never used as its own "before" side: that diff is empty by construction, and
-  // reporting "patched" for it would be a lie. When neither source has the
-  // previous text the edit is skipped and left to a real recompile.
   const after = readEditorRevision(projectRoot, path)
   if (after === null) return null
   const entry = entries[0] ?? null
-  // No `fromEditor` here on purpose: the companion package answers with the text
-  // it last *saw on disk*, not the text the running domain compiled. Using it as
-  // the "before" side would diff the file against its current self — the exact
-  // empty patch this function exists to prevent. What the running domain really
-  // compiled is the previous look at the file, which is what the cache holds.
-  const before = typeof entry?.text === 'string' ? entry.text : cachedRevision(projectRoot, path, after)
+  const before = cachedRevision(projectRoot, path, after)
   if (before === null || before === after) return null
   // The cache only knows what *some* earlier command saw. The editor's method
-  // identities carry the interesting half of that fact: the editor re-reads and
-  // re-classifies a file when it is re-imported, so an unchanged identity set
-  // means the file has not been compiled since the cache was written — a
-  // same-shaped body edit. A changed identity set is weaker evidence (the editor
-  // re-classified a new import), but it still refuses the one case that would be
-  // actively wrong: patching from a baseline older than the running domain.
+  // identities carry the interesting half of that fact: an unchanged identity
+  // set means the file has not been recompiled since the cache was written.
+  // A changed identity set is weaker evidence, but it still refuses the one
+  // case that would be actively wrong: patching from a baseline older than the
+  // running domain.
   if (identityChanged(entries)) return null
   return { path: join(projectRoot ?? '', path), oldText: before, newText: after }
 }
@@ -355,7 +633,7 @@ function cachedRevision(projectRoot, path, current) {
   return previous ?? null
 }
 
-/** The editor's revision of one file, or null when it cannot be read. */
+/** The file's current text, or null when it cannot be read. */
 function readEditorRevision(projectRoot, path) {
   try {
     return readFileSync(join(projectRoot ?? '', path), 'utf8')
@@ -364,8 +642,8 @@ function readEditorRevision(projectRoot, path) {
   }
 }
 
-/** Why the editor refused to detour one method. */
-function describeSkippedPatch(entry) {
+/** Why the payload refused to detour one method (kept for log-shaped rows). */
+export function describeSkippedPatch(entry) {
   if (typeof entry === 'string') return entry
   const name = entry?.method ?? entry?.name ?? '?'
   return `${name}: ${entry?.reason ?? entry?.error ?? 'refused by the editor'}`
@@ -450,6 +728,13 @@ export function formatHotReload(result) {
     if ((result?.skipped?.length ?? 0) > 0) {
       for (const entry of result.skipped) lines.push(`  skipped ${entry.path}: ${entry.reason}`)
     }
+    // Release builds inline method bodies, and an inlined call site keeps calling
+    // the compiled copy even after the detour is live. Say so instead of leaving
+    // a stale call path where the user cannot see it.
+    const inlined = Array.isArray(result?.inlinedMethodKeys) ? result.inlinedMethodKeys : []
+    if (inlined.length > 0) {
+      lines.push(`  ${inlined.length} method(s) are inlined in this Release build; their call sites still run the compiled body until a compile: ${inlined.join(', ')}`)
+    }
   } else if (hot.length > 0) {
     if ((result?.skipped?.length ?? 0) > 0) {
       lines.push('No method bodies were patched:')
@@ -477,22 +762,27 @@ export function formatHotReload(result) {
 }
 
 /**
- * One compiled method → the shape the editor's `dsh_hot_reload_apply` reads.
+ * One compiled method → the payload's `HotPatchMethodDto`
+ * (LocusBridge.HotReload.cs).
  *
- * The compile service answers in camelCase (`declaringType`), the editor's
- * message DTO is snake_case with `param_type_sigs`. Sending the camelCase object
- * straight through made every field undefined on the editor side, which it then
- * reported as "type  is not loaded in this domain".
+ * The compile service answers in camelCase (`declaringType`), the payload's DTO
+ * is snake_case. `param_type_names` is load-bearing, not decorative: the
+ * payload resolves the original method by name and parameter names, and a DTO
+ * without them resolves to nothing and reports "original method not found in
+ * the loaded assemblies". `param_type_sigs` is optional refinement for
+ * ambiguous overloads.
  */
 function toApplyMethod(method) {
+  const names = Array.isArray(method.paramTypeNames) ? method.paramTypeNames.map(String) : []
   return {
     declaring_type: method.declaringType ?? '',
     patch_declaring_type: method.patchDeclaringType ?? '',
     name: method.name ?? '',
+    param_type_names: names,
+    param_type_sigs: Array.isArray(method.paramTypeSigs) ? method.paramTypeSigs.map(String) : names,
     is_static: Boolean(method.isStatic),
     is_ctor: Boolean(method.isCtor),
     original_assembly: method.originalAssembly ?? null,
-    param_type_sigs: Array.isArray(method.paramTypeSigs) ? method.paramTypeSigs : [],
   }
 }
 

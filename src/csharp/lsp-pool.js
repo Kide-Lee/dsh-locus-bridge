@@ -19,7 +19,7 @@
 import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 
-import { requireAssets, assetsRoot } from './assets.js'
+import { installAssets, requireAssets, assetsRoot } from './assets.js'
 import { LspConnection, LspConnectionError, LspResponseError, REQUEST_CANCELLED } from './lsp-client.js'
 import { ensureProjectFiles, ensureRestored, findProjectTargets, projectFilesStale, projectIsRestored } from './project-sync.js'
 
@@ -212,6 +212,16 @@ export async function openWorkspace(root, { target = null, unityExecutable = nul
 
   const entry = { connection: null, project: null, lastUsed: Date.now(), starting: null }
   entry.starting = (async () => {
+    // Fetch what a cold machine is missing, as upstream's server start path does
+    // (`assets::ensure_assets` before `solution/open`). Only server and analyzers
+    // are asked for: the managed runtime is optional whenever a system .NET 10
+    // is present, so `assetStatus().missing` alone would over-fetch it. After the
+    // first workspace every call is a couple of `existsSync` checks.
+    const downloaded = await installAssets()
+    if (!downloaded.ready) {
+      // Fail through `requireAssets` so the error carries `assets_missing`.
+      await requireAssets()
+    }
     const assets = await requireAssets()
     const project = await ensureProjectFiles(key, { target, unityExecutable, force, signal })
     if (!project.solution && project.projects.length === 0) {

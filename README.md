@@ -29,7 +29,7 @@ dsh-locus-bridge 是一个 **DeepSeek harness 插件**。它能让 DSH 直接扮
 dsh plugin --profile <profile> add github:Kide-Lee/dsh-locus-bridge
 ```
 
-重启 DSH 后，模型会看到 18 个以 `unity_` 开头的工具，外加 6 个 `code_*` C# 分析工具（可用
+重启 DSH 后，模型会看到 18 个以 `unity_` 开头的工具，外加 5 个 `code_*` C# 分析工具（可用
 `DSH_LOCUS_CSHARP=0` 关闭后者）。
 
 ## 工具
@@ -47,18 +47,17 @@ dsh plugin --profile <profile> add github:Kide-Lee/dsh-locus-bridge
 | `unity_asset_graph` | 资产引用图与脚本用法：`references` / `dependencies` / `usages`；有工程索引时标 `source: "project"`，否则退回已打开场景并标 `open-scene` | 资产索引 / 生成的 `execute_code`（按 `.meta` 的 GUID 比对序列化字段） |
 | `unity_capture` | 截取 Game / Scene / 编辑器窗口，图像直接随结果返回（`ImageBlock`），一次调用即可看见 | `capture_viewport` + `attachments.saveImage` |
 | `unity_scene` | 场景对象检索（`search` 按名称、`find` 按组件类型）、属性树读取、原子 `set`、单事务 `batch` 与 `undo` | `search_scene_objects` / `property_tree_read` / 生成的 `execute_code` |
-| `unity_hot_reload` | 判定改过的脚本能否热补丁（只改方法/构造/访问器体）而非编译域重载；可行时用编译服务生成补丁程序集并让编辑器 detour 真正挂上，`dry_run` 只分类 | `dsh_hot_reload_classify` / `dsh_hot_reload_apply`（协作包）+ 编译服务 `analyze/hotDiff`、`compile/hotPatch` |
+| `unity_hot_reload` | 判定改过的脚本能否热补丁（只改方法/构造/访问器体）而非编译域重载；可行时用编译服务生成补丁程序集，再由 payload 原生的 `hot_patch_loaded` 真正挂上 detour，`dry_run` 只分类 | 本地分类 + 编译服务 `analyze/hotDiff`、`compile/hotPatch`，应用走 payload 的 `hot_patch_loaded` / `hot_patch_dispose` / `hot_reload_probe` |
 | `unity_asset_search` | 基于 `.meta` 的全工程资产索引：类型、名字、目录、GUID，并报告缺 `.meta` 与重复 GUID；编辑器关着也能答 | 持久化索引 `Library/Locus/asset-index.db`（SQLite，只扫变化文件） |
-| `unity_yaml_read` / `unity_yaml_search` | 直接读写 Unity YAML（`.unity` / `.prefab` / `.asset`），按 scope 与字段收窄，不必打开场景；`source: "live"` 改读编辑器内存值（未保存的修改、二进制序列化的场景） | 本地解析，或 `dsh_live_read`（协作包） |
+| `unity_yaml_read` / `unity_yaml_search` | 直接读写 Unity YAML（`.unity` / `.prefab` / `.asset`），按 scope 与字段收窄，不必打开场景；`source: "live"` 带 object 选择器时改读编辑器内存值（未保存的修改） | 本地解析，或 payload 自带的 `read_yaml` |
 | `unity_lock` / `unity_release` | 跨会话的协作编辑器锁，带持有者、等待/试拿语义与过期判定 | 锁文件（进程消失即过期） |
 | `unity_offline_docs` | 导入 Unity 官方离线文档（中/英，版本按工程解析）并检索、读页，导入过程可看进度、取消、删除；同时提供 `unity-offline-docs` 技能 | 本地文档树 `Library/Locus/unity-docs` |
-| `unity_prefab_overrides` | 读 Prefab 实例相对源的逐字段覆盖（值、对象引用、原始值）；实例与源一致时如实说明 | `dsh_live_prefab_overrides`（协作包） |
 
 `unity_execute` 与 `unity_test action:"run"` 还接受宿主注入的 `async` 参数，语义与 Locus 一致：`sync`（默认）等待结果；`async` 立即返回 job id，不发送完成通知，用 `job_output` 读取；`notify` 立即返回，并在完成时自动投递结果。job 由 DSH 的 jobs 管理，`job_kill` 可以取消，生命周期限于当前 Session；后台只让 agent 继续，不绕开 Unity 主线程，也不解除 `unity_execute` 的 30 秒无输出限制和工具自身的 `timeout`。`unity_run_states` 按官方行为保持同步。
 
 ### C# 语义分析（可选，独立于 Unity 连接）
 
-这六个工具不走 broker：它们在本地起一个 Roslyn 语言服务器（`dotnet` 子进程），
+这五个工具不走 broker：它们在本地起一个 Roslyn 语言服务器（`dotnet` 子进程），
 通过 LSP/stdio 对话，因此 Unity 关着也能用（只要 `.sln`/`.csproj` 已存在）。
 
 | 工具 | 作用 |
@@ -68,10 +67,9 @@ dsh plugin --profile <profile> add github:Kide-Lee/dsh-locus-bridge
 | `code_find_references` | 语义级引用查找（重载、泛型、partial、using 别名都解析；排除注释与字符串） |
 | `code_hover` | 签名、类型与 XML 文档 |
 | `code_diagnostics` | Roslyn 编译错误 + Roslyn/Unity 分析器诊断，不触发 Unity 编译 |
-| `code_analysis` | 查看/安装/预热/重启/重置分析后端（`status` / `install` / `warm` / `restart` / `reset`） |
 
-首次使用需 `code_analysis action:"install"`，下载约 90 MB（Roslyn 服务器约 60 MB；本机已有
-.NET 10 运行时则跳过约 30 MB 的运行时）。可在设置里关掉，或用 `DSH_LOCUS_CSHARP=0` 整组强制关闭
+第一次查询会自动下载需要的组件（约 90 MB：Roslyn 服务器约 60 MB，本机已有 .NET 10 运行时则跳过
+约 30 MB 的运行时），之后缓存在插件目录里复用——与 Locus 桌面端一样，由查询本身触发。可在设置里关掉，或用 `DSH_LOCUS_CSHARP=0` 整组强制关闭
 （后者是部署级开关，设置页无法覆盖）。
 
 这三个工具都照搬上游的做法，但都受「插件只做 broker 客户端」这一条约束，能力边界值得写清楚。
@@ -172,7 +170,7 @@ DSH 设置里有一个 **Unity 桥接** 页（`settings.section`，id `dsh-locus
 | 开关 | 关掉之后 |
 |---|---|
 | **Unity 操纵** | 十一个 `unity_*` 工具从模型的工具列表里消失（Host 侧注销，并非只在 UI 隐藏） |
-| **C# 分析** | 六个 `code_*` 工具消失，并关闭已启动的 Roslyn 语言服务器进程 |
+| **C# 分析** | 五个 `code_*` 工具消失，并关闭已启动的 Roslyn 语言服务器进程 |
 | **文件预览** | 右栏 Unity 资产标签页不再注册；`/locus/api` 下访问 Unity 的路由一律返回 `feature_disabled` |
 
 `preferences.frameCache`（预览帧写入工程）仍保留在 `settings.json` 里，但页面不再提供开关：把渲染帧
@@ -267,9 +265,9 @@ DSH 设置里有一个 **Unity 桥接** 页（`settings.section`，id `dsh-locus
   桌面端可以同时连着同一个编辑器，响应回到发起请求的那条连接。
 - **重编译会跨断线继续。** 域重载会在调用中途断开连接，客户端会重连并接着轮询 operation id，
   而不是报一个传输错误。
-- **编辑器侧新增能力放在独立包 `com.locus.dsh-bridge` 里。** `payload/locus_unity/` 是逐字的上游副本
-  （`npm run check:payload` 一旦不一致就失败），所以热重载的 detour 账本、健康阶段上报这些新东西
-  装在 `packages/unity-bridge/`，通过反射挂到 payload 的扩展消息通道上。
+- **编辑器侧只用 payload 已有的消息。** `payload/locus_unity/` 是逐字的上游副本
+  （`npm run check:payload` 一旦不一致就失败），因此插件里没有任何 Unity 侧代码：热补丁应用、
+  实时值、prefab 覆盖全部走 payload 自带的消息与工具，与 Locus 桌面端同一条路。
 - **有两处能力是本机实现而非上游实现，能力边界因此不完全相同。** 后台调度钩子只在 Windows 真正
   打补丁（需要 Unity 的 PDB 私有符号）；卡死诊断在 Linux/macOS 上用 `ptrace` 抓寄存器并沿帧指针链
   走栈，只能给出它证明得了的托管帧，抓不到就明说抓不到。两者都宁可报 `unsupported` 也不假装成功。
