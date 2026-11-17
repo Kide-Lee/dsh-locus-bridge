@@ -25,6 +25,7 @@ import {
   workspaceDiagnostics,
 } from './queries.js'
 import { assetsRoot } from './assets.js'
+import { formatDownloadStatus, watchDownload } from './lsp-pool.js'
 import { resolveProjectRoot } from '../args.js'
 
 const PROJECT_PATH = {
@@ -61,10 +62,16 @@ const ANALYSIS_SETUP =
   'Unity-generated .sln/.csproj files. The first query in a profile downloads the assets once and reuses them; ' +
   'project files are generated automatically from a connected editor, or by a one-shot headless Unity run.'
 
-/** Run one query, turning setup problems into an actionable message. */
+/**
+ * Run one query, turning setup problems into an actionable message.
+ *
+ * A query that had to fetch assets first carries what it downloaded into the
+ * text: upstream reports the same thing as `downloading server 37%` in its
+ * status bar, and without a line the caller only sees a long silence.
+ */
 async function runQuery(action) {
   try {
-    return await action()
+    return await withDownloadNote(action)
   } catch (error) {
     if (error?.code === 'assets_missing' || error?.code === 'asset_corrupt') {
       throw new Error(
@@ -83,6 +90,32 @@ async function runQuery(action) {
     }
     throw error
   }
+}
+
+/**
+ * Run `action` and append what it downloaded, if anything.
+ *
+ * The observation has to wrap the query itself: a second query on a warm
+ * workspace starts and finishes without passing through the install path, and
+ * must not be annotated with the previous transfer.
+ */
+async function withDownloadNote(action) {
+  let latest = null
+  const stop = watchDownload((status) => {
+    latest = status
+  })
+  try {
+    return await action((value) => noteDownload(value, latest))
+  } finally {
+    stop()
+  }
+}
+
+/** Append the transfer summary to a {@link QUERY_TEXT} result. */
+function noteDownload(value, latest) {
+  const progress = formatDownloadStatus(latest)
+  if (!progress || typeof value?.text !== 'string') return value
+  return { ...value, text: `${value.text}\n\n(First run in this profile: ${progress} of C# analysis assets.)` }
 }
 
 function projectRootFor(args, exec) {
@@ -113,10 +146,10 @@ const codeSymbolSearch = {
   },
   async execute(args, exec) {
     const root = projectRootFor(args, exec)
-    const symbols = await runQuery(() =>
-      searchSymbols(root, { query: args.query, maxResults: args.max_results, signal: exec.signal }),
-    )
-    return { text: formatSymbols(args.query, symbols), count: symbols.length }
+    return runQuery(async (note) => {
+      const symbols = await searchSymbols(root, { query: args.query, maxResults: args.max_results, signal: exec.signal })
+      return note({ text: formatSymbols(args.query, symbols), count: symbols.length })
+    })
   },
 }
 
@@ -148,15 +181,15 @@ const codeGotoDefinition = {
   },
   async execute(args, exec) {
     const root = projectRootFor(args, exec)
-    const result = await runQuery(() =>
-      gotoDefinition(root, {
+    return runQuery(async (note) => {
+      const result = await gotoDefinition(root, {
         filePath: args.file_path,
         symbol: args.symbol,
         line: args.line,
         signal: exec.signal,
-      }),
-    )
-    return { text: formatDefinition(args.symbol, result), locations: result.locations }
+      })
+      return note({ text: formatDefinition(args.symbol, result), locations: result.locations })
+    })
   },
 }
 
@@ -168,7 +201,8 @@ const codeFindReferences = {
     'Find references to a C# symbol across the workspace using Roslyn semantic analysis (the same engine as Visual ' +
     'Studio). Unlike grep, results are semantically exact: overloads, partial classes, generics and using-aliases ' +
     'are resolved, and comment/string mentions are excluded. Code references only — serialized references in ' +
-    'scenes, prefabs and assets are not visible here; use unity_code_usages for those.\n\n' +
+    'scenes, prefabs and assets are not visible here; use unity_yaml_search, unity_yaml_read or code_diagnostics for ' +
+    'those.\n\n' +
     ANALYSIS_SETUP,
   parameters: {
     project_path: PROJECT_PATH,
@@ -194,20 +228,20 @@ const codeFindReferences = {
   },
   async execute(args, exec) {
     const root = projectRootFor(args, exec)
-    const result = await runQuery(() =>
-      findReferences(root, {
+    return runQuery(async (note) => {
+      const result = await findReferences(root, {
         filePath: args.file_path,
         symbol: args.symbol,
         line: args.line,
         includeDeclaration: args.include_declaration === true,
         signal: exec.signal,
-      }),
-    )
-    return {
-      text: formatReferences(args.symbol, result, { includeDeclaration: args.include_declaration === true }),
-      count: result.locations.length,
-      locations: result.locations,
-    }
+      })
+      return note({
+        text: formatReferences(args.symbol, result, { includeDeclaration: args.include_declaration === true }),
+        count: result.locations.length,
+        locations: result.locations,
+      })
+    })
   },
 }
 
@@ -236,10 +270,10 @@ const codeHover = {
   },
   async execute(args, exec) {
     const root = projectRootFor(args, exec)
-    const result = await runQuery(() =>
-      hover(root, { filePath: args.file_path, symbol: args.symbol, line: args.line, signal: exec.signal }),
-    )
-    return { text: formatHover(args.symbol, result), contents: result.contents }
+    return runQuery(async (note) => {
+      const result = await hover(root, { filePath: args.file_path, symbol: args.symbol, line: args.line, signal: exec.signal })
+      return note({ text: formatHover(args.symbol, result), contents: result.contents })
+    })
   },
 }
 
@@ -252,9 +286,11 @@ const codeDiagnostics = {
     'source without applying changes or reloading Unity, so it answers "did I just break the build" in a second ' +
     'instead of waiting for a Unity compile.\n\n' +
     'File scope is fast; workspace scope catches cross-file errors but its first call waits for the server to warm ' +
-    'its caches. Reports compiler errors plus Roslyn and Unity analyzers. Unlike the desktop client it does NOT also ' +
-    'validate tags, layers, build-scene references, Resources paths or legacy Input axes — those need the desktop ' +
-    'asset database.\n\n' +
+    'its caches. Reports compiler errors plus Roslyn and Unity analyzers.\n\n' +
+    'After the diagnostics it also reports what Roslyn cannot see, as upstream does: string references that compile ' +
+    'but fail at run time (tags, layers, build scenes, Resources paths, legacy Input axes) and [SerializeReference] ' +
+    'types whose stored identity no longer names a type. The second needs an asset index, which unity_asset_search ' +
+    'builds; a project that has never been scanned simply omits that section.\n\n' +
     ANALYSIS_SETUP,
   parameters: {
     project_path: PROJECT_PATH,
@@ -304,21 +340,21 @@ const codeDiagnostics = {
       }
     }
     const minSeverity = SEVERITIES.includes(args.min_severity) ? args.min_severity : 'warning'
-    const result = await runQuery(() =>
-      scope === 'workspace'
-        ? workspaceDiagnostics(root, { signal: exec.signal })
-        : fileDiagnostics(root, { filePath, signal: exec.signal }),
-    )
-    const text = formatDiagnostics(result, { minSeverity, maxResults: args.max_results })
-    const threshold = minSeverity === 'error' ? 1 : minSeverity === 'warning' ? 2 : minSeverity === 'info' ? 3 : 4
-    const visible = result.diagnostics.filter((entry) => entry.severity <= threshold)
-    return {
-      text,
-      scope,
-      errors: visible.filter((entry) => entry.severity === 1).length,
-      warnings: visible.filter((entry) => entry.severity === 2).length,
-      total: visible.length,
-    }
+    return runQuery(async (note) => {
+      const result = scope === 'workspace'
+        ? await workspaceDiagnostics(root, { signal: exec.signal })
+        : await fileDiagnostics(root, { filePath, signal: exec.signal })
+      const text = formatDiagnostics(result, { minSeverity, maxResults: args.max_results })
+      const threshold = minSeverity === 'error' ? 1 : minSeverity === 'warning' ? 2 : minSeverity === 'info' ? 3 : 4
+      const visible = result.diagnostics.filter((entry) => entry.severity <= threshold)
+      return note({
+        text,
+        scope,
+        errors: visible.filter((entry) => entry.severity === 1).length,
+        warnings: visible.filter((entry) => entry.severity === 2).length,
+        total: visible.length,
+      })
+    })
   },
 }
 

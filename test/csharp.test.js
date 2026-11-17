@@ -12,6 +12,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { execFileSync } from 'node:child_process'
+import { ReadableStream } from 'node:stream/web'
 
 import {
   anchorNote,
@@ -28,6 +29,7 @@ import {
   assetsRoot,
   assetStatus,
   downloadToFile,
+  installAssets,
   isPlatformSupported,
   platformRid,
   serverDllPath,
@@ -424,9 +426,12 @@ test('formatDefinition distinguishes source from a compiled assembly', () => {
   assert.match(missing, /No definition found/)
 })
 
-test('formatReferences points at unity_code_usages when empty', () => {
+test('formatReferences points at the serialized YAML tools when empty', () => {
+  // The desktop client's `unity_code_usages` does not exist in this plugin, so
+  // the suggestion has to name tools that do.
   const text = formatReferences('Foo', { file: 'Assets/A.cs', anchor: null, locations: [] }, { includeDeclaration: false })
-  assert.match(text, /unity_code_usages/)
+  assert.match(text, /unity_yaml_search/)
+  assert.doesNotMatch(text, /unity_code_usages/)
 })
 
 test('formatDiagnostics filters by severity and summarises counts', () => {
@@ -879,4 +884,144 @@ test('decompiled framework sources are collapsed to a filename', () => {
     '/cache/run/MetadataAsSource/abc/DecompilationMetadataAsSourceFileProvider/def/MonoBehaviour.cs',
   )
   assert.equal(path, '[decompiled] MonoBehaviour.cs')
+})
+
+// ─── transfer clocks and install serialization ──────────────────────────────
+
+/**
+ * A body that pauses for `stallMs` before the chunk at `stallAt`.
+ *
+ * It is a real `ReadableStream`, like the one `fetch` returns, so an abort
+ * propagates the way it does in production; an async generator cannot be
+ * cancelled once it is suspended.
+ */
+function stallingFetch({ status = 200, body = [], contentLength = null, stallAt = null, stallMs = 0 } = {}) {
+  return async (_url, init = {}) => {
+    const signal = init.signal ?? null
+    const headers = new Map()
+    if (contentLength !== null) headers.set('content-length', String(contentLength))
+    const stream = new ReadableStream({
+      async start(controller) {
+        for (const [index, chunk] of body.entries()) {
+          if (stallAt !== null && index === stallAt) {
+            await new Promise((done) => setTimeout(done, stallMs))
+          }
+          if (signal?.aborted) {
+            controller.error(signal.reason ?? new Error('aborted'))
+            return
+          }
+          controller.enqueue(Buffer.from(chunk))
+        }
+        controller.close()
+      },
+    })
+    return {
+      ok: status >= 200 && status < 300,
+      status,
+      headers: { get: (name) => headers.get(String(name).toLowerCase()) ?? null },
+      body: stream,
+    }
+  }
+}
+
+test('a stalled transfer fails on the idle clock instead of waiting forever', async () => {
+  const target = join(sandbox, 'dl', 'stalled.bin')
+  const started = Date.now()
+  await assert.rejects(
+    // The first chunk arrives, then the socket goes quiet well past the idle
+    // budget. Upstream has no timeout at all here; a tool call cannot afford
+    // that because it has no progress channel to explain the silence.
+    downloadToFile('https://example.test/stalled', target, {
+      fetchImpl: stallingFetch({ body: ['abc', 'def'], contentLength: 6, stallAt: 1, stallMs: 400 }),
+      idleTimeoutMs: 40,
+      totalTimeoutMs: 60_000,
+    }),
+    /no data from https:\/\/example\.test\/stalled for 40 ms/,
+  )
+  assert.ok(Date.now() - started < 2_000, 'the idle clock must fire long before the total ceiling')
+  assert.equal(existsSync(target), false)
+  assert.equal(existsSync(`${target}.part`), false)
+})
+
+test('a slow but steady transfer survives the total ceiling only when it delivers', async () => {
+  const target = join(sandbox, 'dl', 'slow.bin')
+  const result = await downloadToFile('https://example.test/slow', target, {
+    // Each chunk pauses, but never longer than the idle budget: this is the
+    // slow-link case a flat deadline gets wrong.
+    fetchImpl: stallingFetch({ body: ['aa', 'bb', 'cc'], contentLength: 6, stallAt: 1, stallMs: 30 }),
+    idleTimeoutMs: 200,
+    totalTimeoutMs: 60_000,
+  })
+  assert.equal(result.bytes, 6)
+  assert.equal(readFileSync(target, 'utf8'), 'aabbcc')
+})
+
+test('the total clock stops a transfer that trickles forever', async () => {
+  const target = join(sandbox, 'dl', 'trickle.bin')
+  // Each chunk arrives well inside the idle budget, so no single gap looks like
+  // a stall; only the ceiling can end a server that keeps trickling.
+  let served = 0
+  const fetchImpl = async () => ({
+    ok: true,
+    status: 200,
+    headers: { get: () => '100' },
+    body: new ReadableStream({
+      async pull(controller) {
+        await new Promise((done) => setTimeout(done, 20))
+        served += 1
+        controller.enqueue(Buffer.from('x'))
+      },
+    }),
+  })
+  const started = Date.now()
+  await assert.rejects(
+    downloadToFile('https://example.test/trickle', target, { fetchImpl, idleTimeoutMs: 10_000, totalTimeoutMs: 120 }),
+    /exceeded 120 ms/,
+  )
+  assert.ok(Date.now() - started < 2_000)
+  assert.ok(served < 100, 'the ceiling must stop the transfer, not the body ending')
+  assert.equal(existsSync(target), false)
+  assert.equal(existsSync(`${target}.part`), false)
+})
+
+test('the reported digest covers the bytes on disk, never the in-memory buffer', async () => {
+  const target = join(sandbox, 'dl', 'digest.bin')
+  const result = await downloadToFile('https://example.test/digest', target, {
+    fetchImpl: fakeFetch({ body: ['abc', 'def'], contentLength: 6 }),
+  })
+  const { createHash } = await import('node:crypto')
+  assert.equal(result.sha256, createHash('sha256').update('abcdef').digest('hex'))
+})
+
+test('two concurrent installs never download the same component twice', async () => {
+  const env = { DSH_LOCUS_CSHARP_HOME: join(sandbox, 'home') }
+  const rid = platformRid()
+  let downloads = 0
+  let inFlight = 0
+  let overlaps = 0
+  const fetchImpl = async (url) => {
+    downloads += 1
+    inFlight += 1
+    if (inFlight > 1) overlaps += 1
+    await new Promise((done) => setTimeout(done, 20))
+    inFlight -= 1
+    return {
+      ok: true,
+      status: 200,
+      headers: { get: () => '0' },
+      body: (async function* generate() {})(),
+    }
+  }
+  // Neither call can succeed (the archives are empty), but the point is the
+  // serialization: each component is fetched once, by the first caller.
+  const [first, second] = await Promise.allSettled([
+    installAssets(env, { rid, fetchImpl }),
+    installAssets(env, { rid, fetchImpl }),
+  ])
+  // Both fail (the archives carry no server), but never concurrently: the lock
+  // is what keeps two workspaces from removing each other's half-written tree.
+  assert.equal(first.status, 'rejected')
+  assert.equal(second.status, 'rejected')
+  assert.equal(overlaps, 0, 'the install lock must keep two workspaces from deleting each other')
+  assert.ok(downloads >= 1)
 })

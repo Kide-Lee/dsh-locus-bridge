@@ -7,7 +7,7 @@
 // applied exactly once — plus the row shapes the graph needs.
 
 import assert from 'node:assert/strict'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
@@ -23,10 +23,14 @@ import {
   statFile,
 } from '../src/asset-index.js'
 import {
+  collectManagedRefs,
   deriveRows,
   indexStats,
   indexPath,
+  lookupManagedRefs,
   lookupReferences,
+  managedClassKey,
+  parseManagedTypeFlow,
   refreshIndex,
 } from '../src/asset-index-sync.js'
 import { parseUnityYaml } from '../src/yaml-lite.js'
@@ -261,14 +265,137 @@ test('without node:sqlite the index reports itself unavailable instead of throwi
   }
 })
 
-test('statFile reports a missing file as null', () => {
-  assert.equal(statFile(join(tmpdir(), 'asset-index-missing', 'nope')), null)
+/** A prefab carrying a `[SerializeReference]` registry. */
+const MANAGED_PREFAB = [
+  '--- !u!1 &100',
+  'GameObject:',
+  '  m_Name: Player',
+  '--- !u!114 &200',
+  'MonoBehaviour:',
+  '  m_GameObject: {fileID: 100}',
+  `  m_Script: {fileID: 11500000, guid: ${SCRIPT_GUID}, type: 3}`,
+  '  behaviour:',
+  '    rid: 1',
+  '  references:',
+  '    version: 2',
+  '    RefIds:',
+  '    - rid: -2',
+  '      type: {class: , ns: , asm: }',
+  '    - rid: 1',
+  '      type: {class: MeleeAttack, ns: Game.Combat, asm: Game.Runtime}',
+  '    - rid: 2',
+  '      type: {class: Terminus, ns: UnityEngine.DMAT, asm: FAKE_ASM}',
+  '',
+].join('\n')
+
+test('a managed-reference registry yields one row per real entry', () => {
+  const parsed = parseUnityYaml(MANAGED_PREFAB.replace('    rid: 2', '    rid: 2\n    other: 0'))
+  const document = parsed.documents.find((entry) => entry.classId === 114)
+  const rows = collectManagedRefs(MANAGED_PREFAB, document)
+  assert.deepEqual(
+    rows.map((row) => [row.rid, row.className, row.namespace, row.assembly]),
+    [[1, 'MeleeAttack', 'Game.Combat', 'Game.Runtime']],
+  )
+  // The row points at the entry's own `- rid:` line, which is where a reader
+  // looking for the broken reference lands.
+  assert.equal(rows[0].line, 15)
+})
+
+test('a type value that wraps across lines is still parsed', () => {
+  const text = MANAGED_PREFAB.replace(
+    '      type: {class: MeleeAttack, ns: Game.Combat, asm: Game.Runtime}',
+    '      type: {class: MeleeAttack, ns: Game.Combat,\n        asm: Game.Runtime}',
+  )
+  const document = parseUnityYaml(text).documents.find((entry) => entry.classId === 114)
+  const rows = collectManagedRefs(text, document)
+  assert.equal(rows.length, 1)
+  assert.equal(rows[0].assembly, 'Game.Runtime')
+})
+
+test('the older `NNNNNNNN:` registry form is read too', () => {
+  const text = [
+    '--- !u!114 &200',
+    'MonoBehaviour:',
+    '  references:',
+    '    version: 1',
+    '    12345678:',
+    '      type: {class: OldThing, ns: , asm: Assembly-CSharp}',
+    '  m_Name: Host',
+    '',
+  ].join('\n')
+  const document = parseUnityYaml(text).documents[0]
+  const rows = collectManagedRefs(text, document)
+  assert.deepEqual(
+    rows.map((row) => [row.rid, row.className, row.namespace, row.line]),
+    [[12345678, 'OldThing', '', 5]],
+  )
+})
+
+test('parseManagedTypeFlow keeps namespaces that contain dots and quoted values', () => {
+  const parsed = parseManagedTypeFlow('{class: "Outer+Inner", ns: A.B, asm: "Game, Runtime"}')
+  assert.deepEqual(
+    [parsed.className, parsed.namespace, parsed.assembly, parsed.classKey],
+    ['Outer+Inner', 'A.B', 'Game, Runtime', 'inner'],
+  )
+  assert.equal(parseManagedTypeFlow('null'), null)
+  assert.equal(parseManagedTypeFlow('{class: Terminus, ns: UnityEngine.DMAT, asm: FAKE_ASM}'), null)
+})
+
+test('managedClassKey keys on the last segment and keeps generic arity', () => {
+  assert.equal(managedClassKey('Game.Outer/Inner'), 'inner')
+  assert.equal(managedClassKey('Outer+Inner'), 'inner')
+  assert.equal(managedClassKey('List<int>'), 'list<int>')
+  assert.equal(managedClassKey('Holder`1'), 'holder`1')
+})
+
+test('the index stores managed refs and answers with per-identity counts', () => {
+  const root = makeProject()
+  try {
+    writeFileSync(join(root, 'Assets/Player.prefab'), MANAGED_PREFAB)
+    const walked = [
+      { absolute: join(root, 'Assets/Scripts/Player.cs'), path: 'Assets/Scripts/Player.cs', ext: '.cs', yaml: false, guid: SCRIPT_GUID, type: 'script', root },
+      { absolute: join(root, 'Assets/Player.prefab'), path: 'Assets/Player.prefab', ext: '.prefab', yaml: true, guid: null, type: 'prefab', root },
+    ]
+    const summary = refreshIndex(root, walked)
+    assert.equal(summary.managedRefs, 1)
+    summary.db.close()
+
+    const found = lookupManagedRefs(root, { classKeys: ['meleeattack', 'gone'] })
+    assert.equal(found.available, true)
+    assert.deepEqual(
+      found.types.map((type) => [type.className, type.instanceCount, type.assetCount]),
+      [['MeleeAttack', 1, 1]],
+    )
+    assert.deepEqual(
+      found.entries.map((entry) => [entry.path, entry.rid, entry.line, entry.hostFileId]),
+      [['Assets/Player.prefab', 1, 15, 200]],
+    )
+    assert.equal(indexStats(root).managedRefs, 1)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('a project that was never scanned answers "not available" instead of creating an index', async () => {
+  const root = makeProject()
+  try {
+    const found = lookupManagedRefs(root)
+    assert.equal(found.available, false)
+    assert.match(found.unavailable, /does not exist yet/)
+    assert.equal(existsSync(indexPath(root)), false)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
 })
 
 /** Close a summary's handle when the test opened it itself. */
 function closeIndexAfter(summary) {
   summary.db?.close()
 }
+
+test('statFile reports a missing file as null', () => {
+  assert.equal(statFile(join(tmpdir(), 'asset-index-missing', 'nope')), null)
+})
 
 // `installBuiltinLoader` is installed by `asset-db.js` on import; this guard makes
 // a future refactor that drops that wiring fail loudly here instead of silently

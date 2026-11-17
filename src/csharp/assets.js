@@ -17,12 +17,12 @@
 
 import { execFile } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { createReadStream, createWriteStream, existsSync, mkdirSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { promisify } from 'node:util'
 
-import { extractArchive } from './archive.js'
+import { extractArchiveFile } from './archive.js'
 
 const execFileAsync = promisify(execFile)
 
@@ -35,7 +35,16 @@ export const DOTNET_RUNTIME_VERSION = '10.0.9'
 const DOTNET_RUNTIME_MAJOR = '10.0.0'
 
 const COMPLETE_MARKER = '.locus-complete'
-const DOWNLOAD_TIMEOUT_MS = 20 * 60 * 1000
+/**
+ * A transfer that delivers no bytes for this long is treated as dead.
+ *
+ * Upstream sets no timeout at all and relies on a GUI progress indicator to
+ * make a hang visible; a tool call has no such channel, so a stalled socket has
+ * to fail on its own.
+ */
+export const DOWNLOAD_IDLE_TIMEOUT_MS = 30 * 1000
+/** Hard ceiling on one transfer, so a trickling server cannot hold the call open. */
+export const DOWNLOAD_TIMEOUT_MS = 60 * 60 * 1000
 
 /** An asset could not be downloaded or unpacked. */
 export class AssetError extends Error {
@@ -133,47 +142,121 @@ function runtimeDownloadUrl(rid) {
  *
  * A partial file is never left behind under the final name: the body lands in
  * `<target>.part` and is renamed only after the stream ends cleanly.
+ *
+ * Two clocks bound the transfer, because one never fits both failure modes:
+ *
+ *   * `idleTimeoutMs` — how long a stalled socket may go without delivering a
+ *     chunk. This is what actually detects a hung connection; a flat deadline
+ *     would instead punish a slow but steady link.
+ *   * `totalTimeoutMs` — a hard ceiling on the whole transfer, so a server that
+ *     trickles one byte every few seconds cannot hold the call forever.
+ *
+ * Each component overwrites `<target>.part` in place rather than buffering the
+ * body, so a 60 MB package does not also become 60 MB of heap.
  */
-export async function downloadToFile(url, target, { fetchImpl = fetch, onProgress = null, timeoutMs = DOWNLOAD_TIMEOUT_MS } = {}) {
+export async function downloadToFile(
+  url,
+  target,
+  {
+    fetchImpl = fetch,
+    onProgress = null,
+    idleTimeoutMs = DOWNLOAD_IDLE_TIMEOUT_MS,
+    totalTimeoutMs = DOWNLOAD_TIMEOUT_MS,
+  } = {},
+) {
   mkdirSync(dirname(target), { recursive: true })
   const partial = `${target}.part`
   const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), timeoutMs)
+  let abortReason = null
+  let idleTimer = null
+  // An abort cancels a real fetch body, but the body cannot always be relied on
+  // to notice: a stalled transport may sit inside a pending read for as long as
+  // it takes to unwind. Racing each read against a promise the clock settles
+  // makes the failure immediate and keeps the timer the authority on when a
+  // transfer is dead, rather than whatever the transport does next.
+  let failOnAbort = null
+  const aborted = new Promise((_resolve, reject) => {
+    failOnAbort = reject
+  })
+  aborted.catch(() => {})
+  const abortWith = (message) => {
+    abortReason = new AssetError(message, { code: 'download_failed' })
+    controller.abort(abortReason)
+    // Settles the read that is currently blocked on a dead transport.
+    failOnAbort?.(abortReason)
+  }
+  const armIdle = () => {
+    clearTimeout(idleTimer)
+    if (idleTimeoutMs > 0) idleTimer = setTimeout(() => abortWith(`no data from ${url} for ${idleTimeoutMs} ms`), idleTimeoutMs)
+  }
+  const totalTimer = totalTimeoutMs > 0 ? setTimeout(() => abortWith(`download of ${url} exceeded ${totalTimeoutMs} ms`), totalTimeoutMs) : null
+  const stopTimers = () => {
+    clearTimeout(idleTimer)
+    clearTimeout(totalTimer)
+    idleTimer = null
+    failOnAbort = null
+  }
+
+  // The abort reason travels on the stream error, which keeps the message
+  // "download failed" rather than the AbortError Node raises by default.
+  const describe = (error) => (abortReason !== null ? abortReason.message : error.message)
+
+  armIdle()
   let response
   try {
     response = await fetchImpl(url, { signal: controller.signal, redirect: 'follow' })
   } catch (error) {
-    clearTimeout(timer)
-    throw new AssetError(`cannot reach ${url}: ${error.message}`, { code: 'download_failed' })
+    stopTimers()
+    throw new AssetError(`cannot reach ${url}: ${describe(error)}`, { code: 'download_failed' })
   }
   if (!response.ok) {
-    clearTimeout(timer)
+    stopTimers()
     throw new AssetError(`${url} answered HTTP ${response.status}`, { code: 'download_failed' })
   }
   const total = Number(response.headers.get('content-length') ?? 0) || null
-  const chunks = []
   let received = 0
+  const sink = createWriteStream(partial)
   try {
-    for await (const chunk of response.body) {
-      chunks.push(Buffer.from(chunk))
+    const body = response.body[Symbol.asyncIterator]()
+    for (;;) {
+      const step = await Promise.race([body.next(), aborted])
+      // Re-armed after the read settles: a slow arrival is progress, and only a
+      // gap between two chunks may trip the idle clock.
+      armIdle()
+      if (step.done) break
+      const chunk = step.value
+      if (!sink.write(chunk)) await new Promise((resolve, reject) => {
+        sink.once('drain', resolve)
+        sink.once('error', reject)
+      })
       received += chunk.length
       onProgress?.({ received, total })
     }
   } catch (error) {
-    clearTimeout(timer)
+    stopTimers()
+    sink.destroy()
+    await new Promise((resolve) => sink.once('close', resolve))
     rmSync(partial, { force: true })
-    throw new AssetError(`download interrupted after ${received} bytes: ${error.message}`, { code: 'download_failed' })
-  } finally {
-    clearTimeout(timer)
+    throw new AssetError(`download interrupted after ${received} bytes: ${describe(error)}`, { code: 'download_failed' })
   }
+  stopTimers()
+  await new Promise((resolve, reject) => {
+    sink.once('error', reject)
+    sink.end(resolve)
+  })
   if (total !== null && received !== total) {
     rmSync(partial, { force: true })
     throw new AssetError(`download truncated: ${received} of ${total} bytes`, { code: 'download_failed' })
   }
-  const buffer = Buffer.concat(chunks)
-  writeFileSync(partial, buffer)
   renameSync(partial, target)
-  return { bytes: buffer.length, sha256: createHash('sha256').update(buffer).digest('hex') }
+  const sha256 = await new Promise((resolve, reject) => {
+    const hash = createHash('sha256')
+    createReadStream(target)
+      .on('data', (chunk) => hash.update(chunk))
+      .on('error', reject)
+      .on('end', () => resolve(hash.digest('hex')))
+  })
+  return { bytes: received, sha256 }
 }
 
 async function ensureServer(env, rid, options) {
@@ -185,7 +268,7 @@ async function ensureServer(env, rid, options) {
   const archive = join(dir, 'server.nupkg')
   await downloadToFile(serverDownloadUrl(rid), archive, options)
   const prefix = `content/LanguageServer/${rid}/`
-  extractArchive(readFileSync(archive), dir, { archiveName: archive, prefix })
+  await extractArchiveFile(archive, dir, { prefix })
   rmSync(archive, { force: true })
   if (!existsSync(dll)) {
     throw new AssetError(
@@ -205,8 +288,7 @@ async function ensureAnalyzers(env, options) {
   const archive = join(dir, 'analyzers.nupkg')
   await downloadToFile(analyzersDownloadUrl(), archive, options)
   const staging = join(dir, 'staging')
-  extractArchive(readFileSync(archive), staging, {
-    archiveName: archive,
+  await extractArchiveFile(archive, staging, {
     filter: (name) => name.startsWith('analyzers/dotnet/cs/') && name.endsWith('.dll'),
   })
   // Flatten to `dir/*.dll`: the server takes a directory of analyzer assemblies.
@@ -258,7 +340,7 @@ export async function resolveDotnet(env = process.env, { rid = platformRid(), op
   const archiveName = runtimeDownloadUrl(rid).split('/').pop()
   const archive = join(dir, archiveName)
   await downloadToFile(runtimeDownloadUrl(rid), archive, options)
-  extractArchive(readFileSync(archive), dir, { archiveName })
+  await extractArchiveFile(archive, dir, {})
   rmSync(archive, { force: true })
   if (!existsSync(program)) {
     throw new AssetError(`the .NET runtime archive did not contain ${suffix}`, { code: 'asset_corrupt' })
@@ -308,6 +390,30 @@ export async function installAssets(env = process.env, { rid = platformRid(), fe
   if (!rid) {
     throw new AssetError(`unsupported platform ${process.platform}/${process.arch}`, { code: 'unsupported_platform' })
   }
+  // One install at a time across every workspace. Each component deletes its
+  // target directory before downloading, so two workspaces opening at once
+  // would otherwise remove each other's half-written tree; upstream guards the
+  // same sequence with a global `INSTALL_LOCK`.
+  const key = installLockKey(env, rid)
+  const previous = installs.get(key) ?? Promise.resolve()
+  const current = previous.then(() => installComponents(env, rid, { fetchImpl, onProgress, options }))
+  const settled = current.catch(() => {})
+  installs.set(key, settled)
+  try {
+    return await current
+  } finally {
+    if (installs.get(key) === settled) installs.delete(key)
+  }
+}
+
+/** In-flight installs, keyed by asset root + runtime identifier. */
+const installs = new Map()
+
+function installLockKey(env, rid) {
+  return `${assetsRoot(env)}\u0000${rid}`
+}
+
+async function installComponents(env, rid, { fetchImpl, onProgress, options }) {
   const shared = { fetchImpl, onProgress, ...options }
   await ensureServer(env, rid, shared)
   await ensureAnalyzers(env, shared)

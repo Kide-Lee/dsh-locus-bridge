@@ -33,7 +33,7 @@ import { join } from 'node:path'
 export const INDEX_FILE = 'asset-index.db'
 
 /** Bumping this drops the tables and rebuilds from scratch. */
-export const INDEX_SCHEMA_VERSION = 1
+export const INDEX_SCHEMA_VERSION = 2
 
 /** Column/index definitions, applied when `PRAGMA user_version` is behind. */
 const SCHEMA = [
@@ -71,6 +71,22 @@ const SCHEMA = [
      PRIMARY KEY (path, from_file_id, to_guid, to_file_id)
    )`,
   `CREATE INDEX IF NOT EXISTS refs_by_target ON refs (to_guid)`,
+  // `[SerializeReference]` registry entries. Unlike everything above, these rows
+  // do not point at anything: a `references: RefIds` entry stores the managed
+  // type by name — `{class, ns, asm}` — with no GUID, so this table is the only
+  // place that identity survives to be checked against the C# sources later.
+  `CREATE TABLE IF NOT EXISTS managed_refs (
+     path TEXT NOT NULL,
+     host_file_id INTEGER NOT NULL,
+     rid INTEGER NOT NULL,
+     class_name TEXT NOT NULL,
+     namespace TEXT NOT NULL,
+     assembly TEXT NOT NULL,
+     class_key TEXT NOT NULL,
+     line INTEGER NOT NULL,
+     PRIMARY KEY (path, host_file_id, rid)
+   )`,
+  `CREATE INDEX IF NOT EXISTS managed_refs_by_class ON managed_refs (class_key)`,
   `CREATE TABLE IF NOT EXISTS meta (
      key TEXT PRIMARY KEY,
      value TEXT NOT NULL
@@ -176,7 +192,9 @@ function applySchema(db) {
   if (current !== INDEX_SCHEMA_VERSION) {
     // A stale schema is dropped rather than migrated: the database holds
     // nothing but a cache, and a rebuild is cheaper than a migration bug.
-    for (const table of ['refs', 'objects', 'assets', 'files', 'meta']) db.exec(`DROP TABLE IF EXISTS ${table}`)
+    for (const table of ['refs', 'managed_refs', 'objects', 'assets', 'files', 'meta']) {
+      db.exec(`DROP TABLE IF EXISTS ${table}`)
+    }
   }
   for (const statement of SCHEMA) db.exec(statement)
   db.exec(`PRAGMA user_version = ${INDEX_SCHEMA_VERSION}`)
@@ -234,11 +252,16 @@ export function writeBatch(db, { upsert, removed }) {
   const deleteAsset = db.prepare('DELETE FROM assets WHERE path = ?')
   const deleteObjects = db.prepare('DELETE FROM objects WHERE path = ?')
   const deleteRefs = db.prepare('DELETE FROM refs WHERE path = ?')
+  const deleteManagedRefs = db.prepare('DELETE FROM managed_refs WHERE path = ?')
   const insertObject = db.prepare(
     'INSERT OR REPLACE INTO objects (path, class_id, file_id, type_name, name, script_guid, owner_file_id) VALUES (?, ?, ?, ?, ?, ?, ?)',
   )
   const insertRef = db.prepare(
     'INSERT OR REPLACE INTO refs (path, from_file_id, to_guid, to_file_id) VALUES (?, ?, ?, ?)',
+  )
+  const insertManagedRef = db.prepare(
+    `INSERT OR REPLACE INTO managed_refs (path, host_file_id, rid, class_name, namespace, assembly, class_key, line)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
   )
   const deleteFile = db.prepare('DELETE FROM files WHERE path = ?')
 
@@ -246,6 +269,7 @@ export function writeBatch(db, { upsert, removed }) {
   try {
     for (const path of removed) {
       deleteRefs.run(path)
+      deleteManagedRefs.run(path)
       deleteObjects.run(path)
       deleteAsset.run(path)
       deleteFile.run(path)
@@ -256,6 +280,7 @@ export function writeBatch(db, { upsert, removed }) {
       // or lost its .meta (asset row appears/disappears), and object/ref rows
       // are whole-file facts.
       deleteRefs.run(entry.path)
+      deleteManagedRefs.run(entry.path)
       deleteObjects.run(entry.path)
       deleteAsset.run(entry.path)
       if (entry.asset) {
@@ -274,6 +299,18 @@ export function writeBatch(db, { upsert, removed }) {
       }
       for (const ref of entry.refs ?? []) {
         insertRef.run(entry.path, ref.fromFileId, ref.toGuid, ref.toFileId ?? null)
+      }
+      for (const managed of entry.managedRefs ?? []) {
+        insertManagedRef.run(
+          entry.path,
+          managed.hostFileId,
+          managed.rid,
+          managed.className,
+          managed.namespace,
+          managed.assembly,
+          managed.classKey,
+          managed.line,
+        )
       }
     }
     db.exec('COMMIT')
@@ -346,6 +383,60 @@ export function selectObjects(db, path, { limit = 500 } = {}) {
       name: row.name,
       scriptGuid: row.script_guid,
       ownerFileId: row.owner_file_id === null ? null : Number(row.owner_file_id),
+    }))
+}
+
+/**
+ * Managed types that serialized assets ask for, grouped by identity.
+ *
+ * One row per distinct `{class, ns, asm}` that a `references: RefIds` block
+ * declares, with how many registry entries and how many assets carry it. This
+ * is the question `code_diagnostics` asks of the asset database upstream, and
+ * the join on `assets` is deliberate: an identity whose asset row is missing
+ * cannot be reported back to the model with a path, so counting it would only
+ * produce an issue nobody can navigate to.
+ */
+export function selectManagedRefTypeSummaries(db) {
+  return db
+    .prepare(
+      `SELECT m.class_name, m.namespace, m.assembly, m.class_key,
+              COUNT(*) AS instance_count, COUNT(DISTINCT m.path) AS asset_count
+         FROM managed_refs m JOIN assets a ON a.path = m.path
+        GROUP BY m.class_name, m.namespace, m.assembly
+        ORDER BY m.class_name, m.namespace, m.assembly`,
+    )
+    .all()
+    .map((row) => ({
+      className: row.class_name,
+      namespace: row.namespace,
+      assembly: row.assembly,
+      classKey: row.class_key,
+      instanceCount: Number(row.instance_count),
+      assetCount: Number(row.asset_count),
+    }))
+}
+
+/** Every registry entry whose class key is one of `classKeys` (sample lookup). */
+export function selectManagedRefsByClassKeys(db, classKeys, { limit = 500 } = {}) {
+  const keys = [...new Set(classKeys)].filter((key) => typeof key === 'string' && key !== '')
+  if (keys.length === 0) return []
+  const placeholders = keys.map(() => '?').join(', ')
+  return db
+    .prepare(
+      `SELECT a.path, m.host_file_id, m.rid, m.class_name, m.namespace, m.assembly, m.line
+         FROM managed_refs m JOIN assets a ON a.path = m.path
+        WHERE m.class_key IN (${placeholders})
+        ORDER BY a.path, m.line LIMIT ${Number(limit)}`,
+    )
+    .all(...keys)
+    .map((row) => ({
+      path: row.path,
+      hostFileId: Number(row.host_file_id),
+      rid: Number(row.rid),
+      className: row.class_name,
+      namespace: row.namespace,
+      assembly: row.assembly,
+      line: Number(row.line),
     }))
 }
 

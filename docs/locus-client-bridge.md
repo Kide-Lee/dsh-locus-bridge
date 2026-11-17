@@ -360,10 +360,11 @@ ctx.tools.register(defineTool({
 | 查询就绪超时 | `QUERY_READY_TIMEOUT`（75s） | `QUERY_READY_TIMEOUT_MS = 75_000` | 对齐 |
 | 结果条数上限 | `MAX_RESULT_LOCATIONS = 200` | `MAX_RESULT_LOCATIONS = 200` | 对齐 |
 | 服务器崩溃重试 | `retry_once_on_server_exit` | `queryWithReadyRetry`（`-32800`/超时重试） | 语义等价 |
-| 资产下载 | `assets.rs` + `dotnet_runtime.rs` | `assets.js` + `archive.js` | 版本锁定相同 |
+| 资产下载 | `assets.rs` + `dotnet_runtime.rs` | `assets.js` + `archive.js` | 版本锁定相同，超时与内存策略**有意不同**，见下 |
 | 工程文件生成 | `unity_sync.rs` | `project-sync.js` | 同一段 C# 生成链 |
 | 临时包清理 | `strip_temp_project_artifacts` | `stripProjectTempArtifacts` | 含 `.sln` 条目剥离 |
 | 字符串引用校验 | `code_unity.rs::scan_project_refs` | `project-refs.js` | 见下 |
+| 托管引用类型校验 | `code_unity_managed.rs::check_managed_reference_types` | `managed-types.js` | 见下 |
 
 ### 字符串引用校验：已移植
 
@@ -385,11 +386,58 @@ ctx.tools.register(defineTool({
 2. **纯数字场景索引**：`LoadScene(9)` 不含引号，若按「本行有引号才扫描」预筛会整行跳过。
    本插件对 `LoadScene(<数字>)` 单独放行。
 
+### 托管引用类型校验：已移植
+
+`[SerializeReference]` 字段保存的是**类型身份**（`class` / `ns` / `asm`），不是脚本 GUID。
+改类名或换 assembly 两侧任何一边，Unity 都会把这些实例读成 missing type 而不报编译错。
+上游在 `code_diagnostics` 里检查这件事，数据来自桌面端的 asset_db；本插件的对应物是
+`Library/Locus/asset-index.db` 的 `managed_refs` 表（schema v2）：
+
+| 上游 | 本插件 |
+|---|---|
+| `managed_refs`（src_guid, host_file_id, rid, class/ns/asm, line） | `asset-index.js` 的 `managed_refs` 表 + `asset-index-sync.js::collectManagedRefs` |
+| `get_managed_ref_type_summaries` | `selectManagedRefTypeSummaries`（按身份聚合实例数与资产数） |
+| `ManagedSnapshot` 叠加 prefab `managedReferences` 覆盖 | 未移植：上游用它统计「prefab 变体改写了哪些引用」，本插件的索引按源文件记录，变体里的改写不改变身份归属 |
+| `TypeCatalog` / `AssemblyResolver` / `DeclarationScan` | `managed-types.js`（文件名快路径 + 声明扫描 + asmdef/asmref 归属） |
+| `[MovedFrom]` 旧身份 | 同左，含「只给 `sourceClassName`」的命名参数形式 |
+| `Missing` / `AssemblyMismatch` 两种结论 | `missing` / `moved`，文案与上游逐字一致 |
+
+与上游相同的边界：
+
+- 只解析工程内可见的 assembly（四个 predefined assembly + `Assets/`、`Packages/` 下的 asmdef 名）；
+  其余身份计入 `skippedExternalTypes`，不报错。
+- file scope 只检查「指向本文件声明的身份」，workspace scope 检查索引里的全部身份。
+- 索引不存在时整段静默（不触发全量扫描），与上游「没有 asset_db 就不检查」一致；
+  查询抛错时输出 `(SerializeReference type check skipped: …)`，截断时输出 `(… failed: …)`。
+
+本插件的额外修正：`.asmref` 的 `GUID:<hex>` 引用经索引里的 GUID→路径映射解析；
+`[MovedFrom]` 的旧类名在扫描时单独建索引，否则每次旧身份查找都会退化成全量扫描。
+
+### 资产下载：超时、内存与并发
+
+官方的下载路径**没有任何超时**：`network::default_reqwest_client()` 的
+`connect_timeout` / `timeout` 全是 `None`，连不上靠操作系统 TCP 超时（Windows 约 21 秒），
+连上了但服务器不出数据就无限等待。它靠状态栏的 `downloading server 37%`
+（`Phase::Downloading` → `phase_progress_text`）让卡顿可见。
+
+工具调用没有状态栏，一次调用返回就结束了，所以本插件保留超时但换个形状：
+
+| 方面 | 上游 | 本插件 |
+|---|---|---|
+| 卡住判定 | 无（靠界面进度） | 30 秒没有任何数据块即失败（`DOWNLOAD_IDLE_TIMEOUT_MS`） |
+| 总时长 | 无 | 60 分钟硬上限（`DOWNLOAD_TIMEOUT_MS`），挡住「一点点往外挤」的服务器 |
+| 断流检测 | 无：流提前结束也照写，坏包会被 `mark_complete` 永久固化 | 比对 `content-length`，不符即报 `download truncated` |
+| 落盘 | 逐 chunk 写 `.partial` + rename | 逐 chunk 写 `.part` + rename（同样原子） |
+| 解压 | `std::io::copy` 逐条流式写（仅 ZIP） | ZIP 逐条从文件读；`.tar.gz` 先流式解出临时 tar 再逐条写（上游只接 ZIP） |
+| 并发 | 全局 `static INSTALL_LOCK: Mutex<()>` | 按「资产根 + RID」串行化（`installs`），换头锁语义对齐 |
+| 进度 | 状态栏 `downloading <component> N%` | 首次查询的结果末尾追加 `(First run in this profile: downloaded 37% (…) of C# analysis assets.)` |
+
+两条时钟的分工是刻意的：单一时钟要么误杀慢链路（墙钟太短），要么对卡死的连接毫无反应（墙钟太长）。
+
 ### 未移植（附原因）
 
 | 上游能力 | 原因 |
 |---|---|
-| `[SerializeReference]` 类型检查 | `check_managed_reference_types` 需要桌面端 `asset_db` 解析「哪些序列化对象指向该类型」，管道里没有等价数据。跳过而不是近似实现。 |
 | `warm_up_in_background` 自动预热 | 不做自动预热：本插件没有「会话绑定 checkout」这个事件可挂钩，首次查询直接等加载完成（`openWorkspace` 内部等到 `projectInitializationComplete`）。工程文件在 `.cs` 比 `.csproj` 新时会自动重新生成，因此 Unity 重新生成项目文件后不需要额外操作。 |
 | 进程池容量上限 | 上游明确不设上限（"Other checkouts do not impose a capacity limit"），只靠空闲回收。本插件设 8 个上限，因为 DSH 是单进程宿主，需要防止单一调用方占满 .NET 堆。 |
 | `status_for_checkout` / `pool_metrics` 等 UI 面 API | 桌面端的设置面板与状态栏用，插件无对应界面。 |
@@ -402,7 +450,7 @@ ctx.tools.register(defineTool({
 | 诊断列表 | 按文件分组，标题 `N diagnostics in <label>: X errors, Y warnings` | 平铺 `path:line:col  severity code: message` |
 | 诊断为空 | 会报告低于阈值的条数 | **已对齐**：`(N below the severity threshold.)` |
 | 完成提示 | `No definition found for 'X'. It may be defined in a compiled assembly.` | 额外说明「可能来自尚未加载的程序集，或工程同步后新增的文件」 |
-| 引用为空 | `No references to 'X' found (declaration excluded).` | 额外指向 `unity_code_usages`（序列化引用不在 Roslyn 视野内） |
+| 引用为空 | `No references to 'X' found (declaration excluded).` | 额外指向 `unity_yaml_search` / `code_diagnostics`（序列化引用不在 Roslyn 视野内；官方那个 `unity_code_usages` 本插件没有） |
 | 反编译源路径 | `[decompiled] Name.cs` | **已对齐** |
 
 格式差异保留是有意的：本插件的读者是 DSH 的模型，平铺列表更省 token，且附加提示能避免

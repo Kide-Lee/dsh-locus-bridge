@@ -4,18 +4,20 @@
 // the same five capabilities, the same forgiving symbol anchor, and the same
 // result formatting, so an answer reads identically in both clients.
 //
-// One deliberate difference: upstream's `code_diagnostics` file scope also
-// validates tags, layers, build-scene references, Resources paths and legacy
-// Input axes against project configuration. That lives in the desktop app's
-// asset database and is not reachable over the broker, so this client reports
-// the Roslyn view only (compiler + analyzer + Unity analyzers) and says so.
+// `code_diagnostics` reports Roslyn's view (compiler + analyzer + Unity
+// analyzers) plus the two checks upstream adds after it: string references
+// against project configuration (`./project-refs.js`) and [SerializeReference]
+// identities against the asset index (`./managed-types.js`). Both append their
+// own section; neither is merged into the diagnostics list.
 
 import { readFileSync } from 'node:fs'
 import { isAbsolute, relative, resolve } from 'node:path'
 
 import { fileUriToPath, locateSymbol, pathToFileUri } from './lsp-protocol.js'
 import { fileInProject } from './project-sync.js'
+import { lookupManagedRefs } from '../asset-index-sync.js'
 import { formatProjectRefsSection, scanProjectRefs } from './project-refs.js'
+import { managedTypeSection } from './managed-types.js'
 import {
   markWorkspaceWarm,
   queryWithReadyRetry,
@@ -347,7 +349,8 @@ export function formatReferences(symbol, result, { includeDeclaration }) {
   const note = anchorNote(symbol, result.anchor)
   if (result.locations.length === 0) {
     return `${note}No references to '${symbol}' in the workspace. This is semantic (Roslyn) references only: ` +
-      'serialized uses in scenes, prefabs and assets are not visible here — use unity_code_usages for those.'
+      'serialized uses in scenes, prefabs and assets are not visible here — use unity_yaml_search or ' +
+      'code_diagnostics for those. They read serialized YAML and the asset index, not the compiled code.'
   }
   const heading =
     `${result.locations.length} reference(s) to '${symbol}'` +
@@ -458,22 +461,32 @@ export async function fileDiagnostics(root, { filePath, settleMs = DIAGNOSTIC_SE
         if (compilerAnswered || Date.now() >= deadline) break
         await new Promise((done) => setTimeout(done, DIAGNOSTIC_POLL_MS))
       }
-      // Upstream's file scope also validates string references that compile but
-      // fail at run time (tags, layers, scenes, Resources, Input axes). It reads
-      // ProjectSettings text only, so the bridge can do the same; the
-      // `[SerializeReference]` half of upstream's check needs the desktop
-      // asset_db and is deliberately absent.
+      // Upstream's file scope validates two things Roslyn cannot: string
+      // references that compile but fail at run time (tags, layers, scenes,
+      // Resources, Input axes), and `[SerializeReference]` identities that no
+      // longer name a type. Both read project state outside the source tree —
+      // ProjectSettings text and the asset index — and both are appended here
+      // rather than merged into the diagnostics list.
       let projectRefs = null
       try {
         projectRefs = scanProjectRefs(root, absolute)
       } catch {
         projectRefs = null
       }
+      // `[SerializeReference]` identities are looked up in the asset index,
+      // which holds no entry until some earlier scan has run; a project never
+      // scanned simply has nothing to check, exactly as upstream skips the
+      // section when no asset database exists.
+      const managedTypes = managedTypeSection(root, {
+        scopeFile: absolute,
+        lookup: (projectRoot, options) => lookupManagedRefs(projectRoot, options),
+      })
       return {
         scope: 'file',
         file: displayPath(root, absolute),
         diagnostics: dedupeSort(diagnostics),
         projectRefs,
+        managedTypes,
         // Without restore artifacts the compiler provider reports nothing at
         // all, so "no errors" would be a false all-clear.
         restored: workspaceIsRestored(root),
@@ -500,7 +513,12 @@ export async function workspaceDiagnostics(root, { ...options }) {
           for (const item of result?.items ?? []) {
             pushDiagnostics(root, item?.uri ?? '', item?.items ?? [], diagnostics)
           }
-          return { scope: 'workspace', file: null, diagnostics: dedupeSort(diagnostics), restored: workspaceIsRestored(root) }
+          // Workspace scope checks every identity the index holds: there is no
+          // single file to narrow to.
+          const managedTypes = managedTypeSection(root, {
+            lookup: (projectRoot, options) => lookupManagedRefs(projectRoot, options),
+          })
+          return { scope: 'workspace', file: null, diagnostics: dedupeSort(diagnostics), restored: workspaceIsRestored(root), managedTypes }
         },
         { timeoutMs: 180_000 },
       ),
@@ -513,7 +531,7 @@ export function formatDiagnostics(result, { minSeverity = 'warning', maxResults 
   const filtered = result.diagnostics.filter((entry) => entry.severity <= threshold)
   // File scope carries string-reference findings; they are not Roslyn
   // diagnostics, so they are appended rather than counted in the summary.
-  const refsSection = result.projectRefs ? formatProjectRefsSection(result.projectRefs) : ''
+  const refsSection = (result.projectRefs ? formatProjectRefsSection(result.projectRefs) : '') + (result.managedTypes ?? '')
   if (filtered.length === 0) {
     const where = result.scope === 'file' ? result.file : 'the workspace'
     // Upstream reports how many diagnostics were suppressed by the threshold:

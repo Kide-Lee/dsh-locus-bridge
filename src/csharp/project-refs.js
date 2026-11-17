@@ -12,10 +12,9 @@
 // `ProjectSettings/InputManager.asset` and the `Resources` directory trees. No
 // asset database is involved, which is what makes this portable to the bridge.
 //
-// Deliberately NOT ported: upstream's `[SerializeReference]` type check
-// (`code_unity_managed::check_managed_reference_types`) needs the desktop
-// asset_db to resolve which serialized objects point at a type. It is skipped,
-// not silently approximated.
+// Upstream's `[SerializeReference]` type check lives next door in
+// `./managed-types.js`: it needs the asset index rather than ProjectSettings
+// text, so it is a separate module with its own inputs.
 
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { join, relative } from 'node:path'

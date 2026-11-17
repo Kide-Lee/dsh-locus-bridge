@@ -66,6 +66,54 @@ export class CsharpWorkspaceError extends Error {
 const pool = new Map()
 let reaper = null
 
+/**
+ * Download progress for the install currently in flight, or `null`.
+ *
+ * The first query in a profile can spend minutes fetching ~90 MB. Upstream
+ * shows this as `downloading server 37%` in its status bar; a tool call has no
+ * such channel, so the status is recorded here and `runQuery` appends it to
+ * whatever the tool returns.
+ */
+let downloadStatus = null
+const downloadListeners = new Set()
+
+function forwardDownload({ received, total }) {
+  const bytes = Number(received) || 0
+  const size = Number(total) || null
+  downloadStatus = {
+    percent: size !== null && size > 0 ? Math.min(100, Math.floor((bytes * 100) / size)) : null,
+    received: bytes,
+    total: size,
+  }
+  for (const listener of downloadListeners) {
+    try {
+      listener(downloadStatus)
+    } catch {
+      // A listener that throws must not break the transfer.
+    }
+  }
+}
+
+/**
+ * Observe download progress. Returns an unsubscribe function and the latest
+ * status seen, which may already be `null` when nothing is downloading.
+ */
+export function watchDownload(listener) {
+  downloadListeners.add(listener)
+  return () => downloadListeners.delete(listener)
+}
+
+/** Human-readable transfer progress, or an empty string when nothing ran. */
+export function formatDownloadStatus(status) {
+  if (!status) return ''
+  if (status.percent === null) return `downloaded ${megabytes(status.received)}`
+  return `downloaded ${status.percent}% (${megabytes(status.received)} of ${megabytes(status.total)})`
+}
+
+function megabytes(bytes) {
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+}
+
 function normalizeRoot(root) {
   return String(root ?? '').replaceAll('\\', '/').replace(/\/+$/, '')
 }
@@ -217,7 +265,7 @@ export async function openWorkspace(root, { target = null, unityExecutable = nul
     // are asked for: the managed runtime is optional whenever a system .NET 10
     // is present, so `assetStatus().missing` alone would over-fetch it. After the
     // first workspace every call is a couple of `existsSync` checks.
-    const downloaded = await installAssets()
+    const downloaded = await installAssets(process.env, { onProgress: forwardDownload })
     if (!downloaded.ready) {
       // Fail through `requireAssets` so the error carries `assets_missing`.
       await requireAssets()

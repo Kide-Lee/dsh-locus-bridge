@@ -19,6 +19,8 @@ import {
   openIndex,
   readKnownFiles,
   selectAssets,
+  selectManagedRefsByClassKeys,
+  selectManagedRefTypeSummaries,
   selectObjects,
   selectReferences,
   setMeta,
@@ -28,6 +30,9 @@ import {
 
 /** How many files one incremental apply may re-read before it gives up and defers. */
 export const INDEX_APPLY_LIMIT = 20_000
+
+/** `MonoBehaviour`, the only document class that carries a `references` block. */
+const MONOBEHAVIOUR_CLASS_ID = 114
 
 /**
  * Bring the durable index up to date with one walk.
@@ -58,6 +63,7 @@ export function refreshIndex(projectRoot, walked, options = {}) {
     added: 0,
     objects: 0,
     refs: 0,
+    managedRefs: 0,
   }
   if (opened.db === null) return summary
 
@@ -91,10 +97,12 @@ export function refreshIndex(projectRoot, walked, options = {}) {
 
     let objects = 0
     let refs = 0
+    let managedRefs = 0
     const enriched = upsert.map((entry) => {
       const derived = deriveRows(entry, readYaml)
       objects += derived.objects.length
       refs += derived.refs.length
+      managedRefs += derived.managedRefs.length
       return { ...entry, ...derived }
     })
 
@@ -105,6 +113,7 @@ export function refreshIndex(projectRoot, walked, options = {}) {
     summary.added = enriched.filter((entry) => !known.has(entry.path) && entry.asset !== undefined).length
     summary.objects = objects
     summary.refs = refs
+    summary.managedRefs = managedRefs
     setMeta(db, 'scanned_at', new Date().toISOString())
   } catch (error) {
     summary.unavailable = `index update failed: ${error?.message ?? error}`
@@ -123,16 +132,17 @@ export function refreshIndex(projectRoot, walked, options = {}) {
 export function deriveRows(entry, readYaml) {
   const objects = []
   const refs = []
+  const managedRefs = []
   // Both columns are NOT NULL in the schema, so a missing walk field has to
   // become a placeholder rather than `undefined` (which node:sqlite refuses to bind).
   const asset = { guid: entry.guid ?? '', type: entry.type ?? '' }
-  if (!entry.yaml) return { asset, objects, refs }
+  if (!entry.yaml) return { asset, objects, refs, managedRefs }
 
   let parsed
   try {
     parsed = readYaml(entry.root ?? '', entry.path)
   } catch {
-    return { asset, objects, refs }
+    return { asset, objects, refs, managedRefs }
   }
   const documents = parsed?.documents ?? []
   // A MonoBehaviour stores its script's GUID in `m_Script`, and its GameObject
@@ -162,8 +172,234 @@ export function deriveRows(entry, readYaml) {
     for (const ref of collectGuidRefs(document.tree ?? [])) {
       refs.push({ fromFileId: document.fileId, toGuid: ref.guid, toFileId: ref.fileId ?? null })
     }
+    if (document.classId === MONOBEHAVIOUR_CLASS_ID) {
+      for (const managed of collectManagedRefs(parsed?.text ?? '', document)) {
+        managedRefs.push({ hostFileId: document.fileId, ...managed })
+      }
+    }
   }
-  return { asset, objects, refs }
+  return { asset, objects, refs, managedRefs }
+}
+
+/**
+ * The `[SerializeReference]` registry entries of one MonoBehaviour document.
+ *
+ * The `references` block is scanned as text rather than read from the parsed
+ * tree on purpose: a `type: {…}` value may wrap across lines, and the field
+ * tree keeps only what fits on the key's own line. Unity itself writes the
+ * short form, but a hand-merged or pretty-printed file must not silently lose
+ * its type identities — losing one here would be reported as an unresolved type
+ * that is in fact fine.
+ *
+ * Layout being walked (Unity 2021+):
+ *
+ *     references:
+ *       version: 2
+ *       RefIds:
+ *       - rid: 1
+ *         type: {class: Foo, ns: Game, asm: Assembly-CSharp}
+ *       - rid: 2
+ *         type: {class: Terminus, ns: UnityEngine.DMAT, asm: FAKE_ASM}
+ *
+ * `rid: -2` and the Terminus sentinel are Unity's own "nothing here" markers and
+ * are skipped, as upstream does.
+ *
+ * @param {string} text the whole asset file.
+ * @param {object} document the parsed document supplying the host file id.
+ * @returns {Array<{hostFileId: number, rid: number, className: string, namespace: string,
+ *   assembly: string, classKey: string, line: number}>}
+ */
+export function collectManagedRefs(text, document) {
+  const lines = text.split('\n')
+  const found = []
+  let index = document.lineStart - 1
+  const end = Math.min(lines.length, document.lineEnd)
+  while (index < end) {
+    const line = lines[index] ?? ''
+    const stripped = stripTrailingComment(line)
+    if (!/^\s*references:\s*(#.*)?$/.test(stripped)) {
+      index += 1
+      continue
+    }
+    const blockIndent = indentOf(line)
+    let cursor = index + 1
+    let pendingRid = null
+    while (cursor < end) {
+      const current = lines[cursor] ?? ''
+      if (current.trim() === '') {
+        cursor += 1
+        continue
+      }
+      const depth = indentOf(current)
+      if (depth <= blockIndent) break
+      const body = stripTrailingComment(current).trim()
+      if (body === 'RefIds:') {
+        cursor += 1
+        continue
+      }
+      // A new entry is a sequence item at the block's own child indent; its
+      // fields sit one level deeper. Unity writes v2 as `- rid: N` and older
+      // files as `NNNNNNNN:`, and both forms mark the same thing.
+      if (depth === blockIndent + 2) {
+        const lineNumber = cursor + 1
+        if (/^-\s/.test(body)) {
+          const value = Number(/^-\s*rid:\s*(-?\d+)/.exec(body)?.[1] ?? NaN)
+          pendingRid = Number.isSafeInteger(value) ? value : null
+          const entry = readManagedType(lines, cursor + 1, end, blockIndent + 4)
+          if (entry !== null && isReportableRid(pendingRid)) found.push({ ...entry, rid: pendingRid, line: lineNumber })
+        } else {
+          const match = /^(-?\d+):\s*(\{.*\}|)$/.exec(body)
+          if (match !== null) {
+            const value = Number(match[1])
+            pendingRid = Number.isSafeInteger(value) ? value : null
+            const entry =
+              match[2] === '' ? readManagedType(lines, cursor + 1, end, blockIndent + 4) : parseManagedTypeFlow(match[2])
+            if (entry !== null && isReportableRid(pendingRid)) found.push({ ...entry, rid: pendingRid, line: lineNumber })
+          }
+        }
+      }
+      cursor += 1
+    }
+    index = cursor
+  }
+  return found
+}
+
+/** `-2` is Unity's "no reference"; anything else is a real registry entry. */
+function isReportableRid(rid) {
+  return rid !== null && rid !== -2
+}
+
+/** The `type:` value of one entry, joining continuation lines until the braces close. */
+function readManagedType(lines, start, end, depth) {
+  let cursor = start
+  while (cursor < end) {
+    const line = lines[cursor] ?? ''
+    if (line.trim() === '') {
+      cursor += 1
+      continue
+    }
+    if (indentOf(line) !== depth) return null
+    const value = /^type:\s*(.*)$/.exec(stripTrailingComment(line).trim())
+    if (value === null) return null
+    const text = value[1].trim()
+    if (text === '' || text === 'null') return null
+    let joined = text
+    let next = cursor + 1
+    while (countBraces(joined) > 0 && next < end) {
+      joined += ` ${(lines[next] ?? '').trim()}`
+      next += 1
+    }
+    return parseManagedTypeFlow(joined)
+  }
+  return null
+}
+
+/**
+ * `{class: Foo, ns: Game, asm: Assembly-CSharp}` → `{className, namespace, assembly, classKey}`.
+ *
+ * Values are arbitrary strings, optionally quoted, and a namespace may itself
+ * contain dots, so the split is on top-level commas only.
+ */
+export function parseManagedTypeFlow(text) {
+  const trimmed = String(text ?? '').trim()
+  const open = trimmed.indexOf('{')
+  const close = trimmed.lastIndexOf('}')
+  if (open === -1 || close <= open) return null
+  const fields = new Map()
+  for (const part of splitTopLevel(trimmed.slice(open + 1, close))) {
+    const colon = part.indexOf(':')
+    if (colon === -1) continue
+    fields.set(part.slice(0, colon).trim(), unquote(part.slice(colon + 1).trim()))
+  }
+  const className = fields.get('class') ?? ''
+  if (className === '') return null
+  const namespace = fields.get('ns') ?? ''
+  const assembly = fields.get('asm') ?? ''
+  if (className === 'Terminus' && namespace === 'UnityEngine.DMAT' && assembly === 'FAKE_ASM') return null
+  return { className, namespace, assembly, classKey: managedClassKey(className) }
+}
+
+function splitTopLevel(text) {
+  const parts = []
+  let current = ''
+  let depth = 0
+  let quote = ''
+  for (const character of text) {
+    if (quote !== '') {
+      current += character
+      if (character === quote) quote = ''
+      continue
+    }
+    if (character === '"' || character === "'") {
+      quote = character
+      current += character
+      continue
+    }
+    if (character === '(' || character === '[' || character === '{') depth += 1
+    if (character === ')' || character === ']' || character === '}') depth -= 1
+    if (character === ',' && depth === 0) {
+      parts.push(current)
+      current = ''
+      continue
+    }
+    current += character
+  }
+  parts.push(current)
+  return parts.map((part) => part.trim()).filter((part) => part !== '')
+}
+
+function unquote(value) {
+  if (value.length >= 2 && (value[0] === '"' || value[0] === "'") && value[value.length - 1] === value[0]) {
+    return value.slice(1, -1).replace(/\\(.)/g, '$1')
+  }
+  return value
+}
+
+function countBraces(text) {
+  let depth = 0
+  for (const character of text) {
+    if (character === '{') depth += 1
+    if (character === '}') depth -= 1
+  }
+  return depth
+}
+
+function indentOf(line) {
+  let count = 0
+  for (const character of line) {
+    if (character === ' ') count += 1
+    else if (character === '\t') count += 2
+    else break
+  }
+  return count
+}
+
+/** Unity never quotes a `#` inside a name, so a trailing comment can be cut blindly. */
+function stripTrailingComment(line) {
+  const hash = line.indexOf(' #')
+  return hash === -1 ? line : line.slice(0, hash)
+}
+
+/**
+ * The lookup key for a managed class name: the last segment, lowercased.
+ *
+ * `Game.Foo+Inner`, `Game.Foo/Inner` and `Inner` all key to `inner`; generics
+ * keep their arity (`Inner\`1` → `inner\`1`), because a type argument list is
+ * part of the identity in Unity's registry.
+ */
+export function managedClassKey(className) {
+  const segments = managedClassSegments(className)
+  return (segments[segments.length - 1] ?? '').toLowerCase()
+}
+
+/** `Outer/Inner` and `Outer+Inner` split into names, generic arguments dropped. */
+export function managedClassSegments(className) {
+  const bare = String(className ?? '').split('[')[0]
+  return bare
+    .split(/[/+]/)
+    .map((segment) => segment.trim())
+    .filter((segment) => segment !== '')
 }
 
 /**
@@ -234,6 +470,34 @@ export function lookupAssets(projectRoot, filters = {}, { openIndexImpl = openIn
   }
 }
 
+/**
+ * Managed types the index knows about, for `code_diagnostics`.
+ *
+ * The index is opened read-only and never created: a project that was never
+ * scanned has no serialized facts to check, which is exactly the "no asset
+ * database" case upstream answers silently. Opening a missing index read-write
+ * would build an empty database and then claim every type is unresolved.
+ */
+export function lookupManagedRefs(projectRoot, { classKeys = null, openIndexImpl = openIndex } = {}) {
+  const opened = openIndexImpl(projectRoot, { create: false, readonly: true })
+  if (opened.db === null) return { available: false, unavailable: opened.unavailable, types: [], entries: [], guidToPath: new Map() }
+  try {
+    const types = selectManagedRefTypeSummaries(opened.db)
+    const entries = classKeys === null ? [] : selectManagedRefsByClassKeys(opened.db, classKeys, { limit: 2000 })
+    // `.asmref` files name their target by GUID; the index already maps every
+    // GUID to a path, so assembly resolution can follow one without a second scan.
+    const guidToPath = new Map()
+    if (classKeys !== null) {
+      for (const row of selectAssets(opened.db, { limit: null })) {
+        if (typeof row.guid === 'string' && row.guid !== '' && row.path.endsWith('.asmdef')) guidToPath.set(row.guid.toLowerCase(), row.path)
+      }
+    }
+    return { available: true, unavailable: null, types, entries, guidToPath }
+  } finally {
+    closeIndex(opened.db)
+  }
+}
+
 /** Row counts, for the "index built from N files" line in search results. */
 export function indexStats(projectRoot, { openIndexImpl = openIndex } = {}) {
   const opened = openIndexImpl(projectRoot, { create: false, readonly: true })
@@ -246,6 +510,7 @@ export function indexStats(projectRoot, { openIndexImpl = openIndex } = {}) {
       assets: countRows(opened.db, 'assets'),
       objects: countRows(opened.db, 'objects'),
       refs: countRows(opened.db, 'refs'),
+      managedRefs: countRows(opened.db, 'managed_refs'),
     }
   } finally {
     closeIndex(opened.db)

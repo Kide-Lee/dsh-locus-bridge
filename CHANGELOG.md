@@ -2,6 +2,35 @@
 
 本文件记录 dsh-locus-bridge 的版本变更。版本号遵循 SemVer，条目按用户可见的变化归纳。
 
+## [未发布]
+
+#### 与 Locus 官方对齐
+
+- **`code_diagnostics` 补上字符串引用校验**（对应官方 `scan_project_refs`）：标签、层、构建设置里的场景、
+  Resources 路径、旧版 Input 轴这些「能编译、运行期才炸」的字符串，现在在诊断之后单列一段，
+  file 作用域只看该文件，workspace 作用域看全工程。
+- **`code_diagnostics` 补上 `[SerializeReference]` 类型检查**（对应官方 `check_managed_reference_types`）：
+  资产索引新增 `managed_refs` 表（schema v2，逐文档解析 `references: RefIds` 的 `class` / `ns` / `asm`），
+  源文件扫描 C# 声明、按 asmdef / asmref 判定 assembly、认 `[MovedFrom]`。改类名没加 `[MovedFrom]`、
+  类型挪到别的 assembly 这类只在运行期炸的引用会报成 `no such type in code` / `now compiles into …`，
+  文案与官方一致；索引不存在时整段静默，不触发全量扫描。
+- **`code_find_references` 的空结果不再提 `unity_code_usages`**：官方有这个工具、本插件没有，改为指向
+  `unity_yaml_search` / `code_diagnostics`。
+
+#### 修复
+
+- **下载卡死**：原来是一个 20 分钟的整体墙钟计时器，慢而稳的链路会被误杀，卡住的连接反而要等满 20 分钟。
+  现在改成两条时钟——30 秒没有任何数据块即判失败，另有 60 分钟总上限兜住「一点点往外挤」的服务器。
+  官方的 `download_to_file` **完全没有超时**（靠状态栏进度让卡顿可见），工具调用没有这个通道，所以保留超时但不照搬。
+- **下载与解压的内存峰值**：下载不再把整个包堆在数组里，`.part` 边下边写；`.tar.gz` 解压不再
+  `readFileSync` + `gunzipSync` 各持一份完整副本，改为流式解出临时 tar 再逐条写；ZIP 逐条从文件读。
+  首次安装时不再出现几百 MB 的瞬时占用。
+- **首次安装的进度可见**：对齐官方状态栏的 `downloading server 37%`。首次查询若下过东西，
+  结果末尾追加一行 `(First run in this profile: downloaded 37% (22.1 MB of 60.0 MB) of C# analysis assets.)`，
+  不再只是一段长时间空白。
+- **两个工程同时首次使用时互相删目录**：每个组件下载前都会删掉目标目录，跨进程/跨工程并发时会把对方的
+  半成品删掉。现在按「资产根 + RID」串行化安装（对应官方全局 `INSTALL_LOCK`）。
+
 ## [1.1.0] - 2026-11-16
 
 本版把插件的能力面推到与 Locus 官方接近的位置：热补丁从「只分类」变成真正编译并挂进运行中的编辑器，

@@ -14,9 +14,10 @@
 // destination would be an escape. Entry paths are rejected when they traverse
 // (`..`) or are absolute, matching what the desktop extractor enforces.
 
-import { mkdirSync, writeFileSync } from 'node:fs'
+import { createReadStream, createWriteStream, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join, normalize, sep } from 'node:path'
-import { gunzipSync, inflateRawSync } from 'node:zlib'
+import { pipeline } from 'node:stream/promises'
+import { createGunzip, gunzipSync, inflateRawSync } from 'node:zlib'
 
 /** A malformed or unsupported archive. */
 export class ArchiveError extends Error {
@@ -163,7 +164,29 @@ function tarSize(header) {
  * @returns {{ files: string[], skipped: number }}
  */
 export function extractTarGz(buffer, destDir, { filter = null } = {}) {
-  const tar = gunzipSync(buffer)
+  return extractTar(gunzipSync(buffer), destDir, { filter })
+}
+
+/**
+ * Extract a `.tar.gz` from disk without holding its expansion in memory.
+ *
+ * `gunzipSync` keeps the compressed archive and the whole inflated tar alive at
+ * once — for the .NET runtime archive that is well over a hundred megabytes of
+ * heap. Inflating into a temporary file instead costs one extra disk copy and
+ * bounds the heap to a single pipe buffer.
+ */
+export async function extractTarGzFile(archivePath, destDir, { filter = null, tempPath } = {}) {
+  const temp = tempPath ?? `${archivePath}.tar`
+  await pipeline(createReadStream(archivePath), createGunzip(), createWriteStream(temp))
+  try {
+    return extractTar(readFileSync(temp), destDir, { filter })
+  } finally {
+    rmSync(temp, { force: true })
+  }
+}
+
+/** Walk a raw tar image already in memory. */
+function extractTar(tar, destDir, { filter = null } = {}) {
   const files = []
   let skipped = 0
   let cursor = 0
@@ -207,9 +230,23 @@ export function extractTarGz(buffer, destDir, { filter = null } = {}) {
 
 /** Extract by archive extension: `.zip`/`.nupkg` or `.tar.gz`/`.tgz`. */
 export function extractArchive(buffer, destDir, { archiveName, prefix = '', filter = null } = {}) {
-  const name = String(archiveName ?? '').toLowerCase()
-  if (name.endsWith('.tar.gz') || name.endsWith('.tgz')) {
-    return extractTarGz(buffer, destDir, { filter })
-  }
+  if (isTarGz(archiveName)) return extractTarGz(buffer, destDir, { filter })
   return extractZip(buffer, destDir, { prefix, filter })
+}
+
+function isTarGz(archiveName) {
+  const name = String(archiveName ?? '').toLowerCase()
+  return name.endsWith('.tar.gz') || name.endsWith('.tgz')
+}
+
+/**
+ * Extract an archive that is already on disk.
+ *
+ * ZIP is walked entry by entry from the file itself; `.tar.gz` inflates to a
+ * temporary file first. Either way the archive never has to be read into a
+ * single buffer, which is what the caller's download just wrote.
+ */
+export async function extractArchiveFile(archivePath, destDir, { prefix = '', filter = null } = {}) {
+  if (isTarGz(archivePath)) return extractTarGzFile(archivePath, destDir, { filter })
+  return extractZip(readFileSync(archivePath), destDir, { prefix, filter })
 }
