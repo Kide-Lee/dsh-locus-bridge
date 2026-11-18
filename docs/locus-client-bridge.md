@@ -299,16 +299,22 @@ ctx.tools.register(defineTool({
 |---|---|
 | `lsp-protocol.js` | `client.rs` 的帧编解码 + `mod.rs::locate_symbol_position` |
 | `lsp-client.js` | `client.rs` 的 JSON-RPC 状态机、服务端请求应答、诊断 provider 注册 |
-| `lsp-pool.js` | `mod.rs` 的每 checkout 一进程、空闲回收、`retry_once_on_server_exit` |
+| `lsp-pool.js` | `mod.rs` 的每 checkout 一进程、空闲回收与 `retry_once_on_server_exit`（查询出错重试一次） |
+| `file-watch.js` | `mod.rs::start_file_watcher`：监听 `Assets/`、`Packages/` 与工程文件，去抖后通知服务器 |
+| `source-tracker.js` | `mod.rs` 里「见过但不在工程中的 `.cs`」判定，用于触发工程文件重新生成 |
+| `analyzer-injection.js` | `mod.rs::write_analyzer_props`（改为不落盘，见关键差异第 9 条） |
 | `assets.js` / `archive.js` | `assets.rs` + `dotnet_runtime.rs`（并补上 Unix 的 `tar.gz`） |
 | `project-sync.js` | `unity_sync.rs` 的 `.sln`/`.csproj` 生成与临时包清理 |
 | `queries.js` | `tool/builtins/code.rs` 的五个查询与结果格式 |
 
 关键差异（均为实测结论）：
 
-1. **`XDG_RUNTIME_DIR` 必须可写。** 只读时 `dotnet restore` 与 `MetadataAsSource` 组合失败，症状是
-   首次查询 `-32800` 后进程静默 `exit 0`。客户端把 `XDG_RUNTIME_DIR` / `TMPDIR` / `DOTNET_CLI_HOME`
-   重定向到资产目录下的 `run/`。
+1. **`XDG_RUNTIME_DIR` / `DOTNET_CLI_HOME` 必须可写。** 只读时 `dotnet restore` 与 `MetadataAsSource`
+   组合失败，症状是首次查询 `-32800` 后进程静默 `exit 0`；更隐蔽的是 BuildHost 评估每个 csproj 时报
+   `IOException: Read-only file system`（CLI 要往 `DOTNET_CLI_HOME` 写首个运行标记），**所有项目加载失败
+   但服务器照样发 `projectInitializationComplete`**，于是每次查询都是「没有该文档」/「无诊断」。
+   客户端先探测资产目录下的 `run/` 可否写入，不能写就退到私有临时目录，再把
+   `XDG_RUNTIME_DIR` / `TMPDIR` / `DOTNET_CLI_HOME` / `NUGET_PACKAGES` 指过去。
 2. **必须有 `obj/project.assets.json`。** 缺失时编译器诊断 provider 永远返回空数组，而分析器仍在
    返回风格建议——「无诊断」是假结论。工作区启动前按需 `dotnet restore`；`code_diagnostics` 在缺
    还原产物时明确标注不可信。
@@ -316,7 +322,15 @@ ctx.tools.register(defineTool({
 4. **`workspace/symbol` 预热期返回空数组而非错误**（位置查询才是 `-32800`），因此在项目加载后的
    短窗口内把空结果视为「索引未就绪」，窗口由首次成功查询消费。
 5. **诊断覆盖面窄于桌面端**：不含 tag / layer / build scene / Resources / legacy Input 轴校验，
-   这些依赖桌面端 asset database。
+   这些依赖桌面端 asset database。文件级诊断末尾会附上这组字符串引用检查（大小写、场景索引、
+   `Input.GetAxis` 未校验计数等），但基于 `ProjectSettings/` 文本，不经过 asset database。
+9. **Unity 分析器通过与上游相同的落盘方式注入。** 服务器启动前由 `src/csharp/analyzer-injection.js`
+   在工程根写入带标记注释（`locus:unity-analyzers`）的 `Directory.Build.props`，里面只有一个
+   `<Analyzer Include="…/Microsoft.Unity.Analyzers.dll" />`；工作区关闭（`disposeEntry`）时只删自己
+   写的那份，用户原有的 `Directory.Build.props` 一律不改、不覆盖，直接放弃注入。实测（Unity 2022.3 +
+   Roslyn 5.4.0）这条路径能让 `UNT*` 出现在 `code_diagnostics` 里（空 `Awake()` → `UNT0001`）；
+   此前「打开 csproj 时附加 `<ItemGroup>`」的做法无效——BuildHost 只从磁盘评估工程，打开的文本只影响
+   文档模型。工程自己引用的分析器（VSF 扩展写入的 `IDE0xxx`）不依赖这条路径。
 6. **资产门控只看服务器与分析器。** `assetStatus()` 会把缺失的托管运行时也列进 `missing`，但系统
    装了 .NET 10 就够用（`resolveDotnet` 会选它）。若按 `missing` 全量门控，开发者机器上会一直
    误报「资产未安装」。
@@ -325,7 +339,9 @@ ctx.tools.register(defineTool({
    写死默认路径会把每个 Unity 工程判成未还原。`dotnet restore` 也不接受多个 csproj（MSB1008），
    必须走 `.sln` 或逐个还原。
 8. **Unity 的 csproj 用显式文件列表。** 最后一次同步后新建的 `.cs` 不在编译集内，Roslyn 对它
-   不产生诊断；工具会明确报告「不在编译集中」而不是「无诊断」。
+   不产生诊断。上树时按 `Assets/`、`Packages/` 的最新 `.cs` mtime 与最新工程文件比较，过期就重新生成
+   `.sln`/`.csproj`；查询命中「不在编译集中」的文件时也会排队一次重新生成，下一轮加载即可分析。
+   给出的「无诊断」后面仍会注明该文件不在编译集，避免把假阴性当结论。
 9. **生成链自身也经过编译验证。** `editorSyncSnippet()` / `batchEntryPointSource()` 产出的 C# 用
    Roslyn 实编译过（两种宿主形态），并在真实 headless Unity 里执行成功；测试锁定生成器尝试顺序、
    batch 入口只 `Debug.Log` 不 `print`、以及模板字符串里不得出现反引号（会破坏模块解析）。
@@ -438,7 +454,8 @@ ctx.tools.register(defineTool({
 
 | 上游能力 | 原因 |
 |---|---|
-| `warm_up_in_background` 自动预热 | 不做自动预热：本插件没有「会话绑定 checkout」这个事件可挂钩，首次查询直接等加载完成（`openWorkspace` 内部等到 `projectInitializationComplete`）。工程文件在 `.cs` 比 `.csproj` 新时会自动重新生成，因此 Unity 重新生成项目文件后不需要额外操作。 |
+| `warm_up_in_background` 自动预热 | 不做自动预热：本插件没有「会话绑定 checkout」这个事件可挂钩，首次查询直接等加载完成（`openWorkspace` 内部等到 `projectInitializationComplete`）。工程文件在 `.cs` 比 `.csproj` 新时会在加载前自动重新生成，运行期由 `file-watch.js` 监听 `Assets/`、`Packages/` 与工程文件，变更去抖后重载工作区并重新生成过一次期工程。 |
+| — | 分析器注入已按上游实现（见关键差异第 9 条），不再列在未移植项里。 |
 | 进程池容量上限 | 上游明确不设上限（"Other checkouts do not impose a capacity limit"），只靠空闲回收。本插件设 8 个上限，因为 DSH 是单进程宿主，需要防止单一调用方占满 .NET 堆。 |
 | `status_for_checkout` / `pool_metrics` 等 UI 面 API | 桌面端的设置面板与状态栏用，插件无对应界面。 |
 | `is_enabled` / `set_enabled` 开关 | 等价物是 `DSH_LOCUS_CSHARP` 环境变量（注册期决定）。 |

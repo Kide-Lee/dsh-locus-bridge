@@ -25,7 +25,7 @@
 //     request must echo each provider's own `identifier`.
 
 import { spawn } from 'node:child_process'
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 
@@ -54,6 +54,37 @@ export class LspResponseError extends Error {
 export const REQUEST_CANCELLED = -32800
 const REQUEST_TIMEOUT_MS = 120_000
 const MAX_DOCUMENT_SIZE = 8 * 1024 * 1024
+/** LSP `FileChangeType` values used by `workspace/didChangeWatchedFiles`. */
+export const FILE_CREATED = 1
+export const FILE_CHANGED = 2
+export const FILE_DELETED = 3
+/** How much of the last server-reported error is kept for a failure message.
+ * Matches upstream's 400-character `last_server_error`. */
+const LAST_SERVER_ERROR_LIMIT = 400
+/** How many `window/logMessage` lines a connection keeps for diagnostics. */
+const SERVER_LOG_LIMIT = 500
+
+/**
+ * The text a document is opened with: exactly its on-disk text.
+ *
+ * Analyzers cannot be added here. The server's MSBuild host evaluates a project
+ * from disk, so an `<ItemGroup>` a client appends to the *opened* text never
+ * reaches project evaluation (verified live with Unity 2022.3 + Roslyn 5.4.0:
+ * no `UNT*` diagnostics). Unity's analyzers are injected the way upstream does
+ * it, by writing a marker-tagged `Directory.Build.props` before the server
+ * starts (see `analyzer-injection.js`).
+ */
+function documentText(path) {
+  return readSource(path)
+}
+
+/** The P/Invoke-heavy kind of MSBuild document `path` is (project or props). */
+function projectExtension(path) {
+  const lower = String(path ?? '').toLowerCase()
+  if (lower.endsWith('.csproj')) return 'proj'
+  if (lower.endsWith('.props')) return 'props'
+  return null
+}
 
 /** Read a file as UTF-8, rejecting anything implausibly large for a source file. */
 function readSource(path) {
@@ -62,6 +93,11 @@ function readSource(path) {
     throw new Error(`${path} is larger than the 8 MiB document limit`)
   }
   return text
+}
+
+function languageIdFor(path) {
+  const kind = projectExtension(path)
+  return kind === 'proj' ? 'xml' : kind === 'props' ? 'xml' : 'csharp'
 }
 
 /**
@@ -73,6 +109,8 @@ function readSource(path) {
  * @param {string} options.workspaceRoot absolute checkout root
  * @param {string} [options.logDir]      directory for the server's stderr log
  * @param {string} [options.locale]      server-produced strings locale
+ * @param {string} [options.stateDir]    writable dir for the server's runtime state
+ * @param {() => void} [options.onServerExit]  called once when the process dies
  */
 export class LspConnection {
   #child = null
@@ -88,8 +126,20 @@ export class LspConnection {
   #openDocs = new Map()
   #diagnosticProviders = []
   #stderrTail = []
+  #serverLog = []
+  #lastServerError = null
+  #registrations = 0
 
-  constructor({ program, serverDll, workspaceRoot, logDir = null, stateDir = null, locale = 'en-US' }) {
+  constructor(options) {
+    const {
+      program,
+      serverDll,
+      workspaceRoot,
+      logDir = null,
+      stateDir = null,
+      locale = 'en-US',
+      onServerExit = null,
+    } = options
     this.program = program
     this.serverDll = serverDll
     this.workspaceRoot = workspaceRoot
@@ -98,6 +148,7 @@ export class LspConnection {
     // `#childEnv`); `null` keeps the inherited environment untouched.
     this.stateDir = stateDir
     this.locale = locale
+    this.onServerExit = onServerExit
     this.reader = new LspReader()
   }
 
@@ -117,7 +168,41 @@ export class LspConnection {
     return [...this.#diagnosticProviders]
   }
 
-  /** Last lines of the server's stderr, for a failure message. */
+  /**
+   * How many capability registrations this connection has received.
+   *
+   * `initialize` answers `workspace: {}` without listing `diagnosticProvider`,
+   * so the server registers one provider per source through
+   * `client/registerCapability`. That stream is the only readiness signal the
+   * analysis pipeline publishes before it starts evaluating the solution, and
+   * it is what `code_diagnostics` waits on before trusting an empty answer.
+   */
+  get registrationCount() {
+    return this.#registrations
+  }
+
+  /**
+   * Server log lines worth keeping.
+   *
+   * The server reports problems that are not protocol errors through
+   * `window/logMessage`: a project that failed to load still completes
+   * `projectInitializationComplete`, so the failure only ever appears here. The
+   * tail is bounded because a large solution logs thousands of lines.
+   */
+  get serverLog() {
+    return [...this.#serverLog]
+  }
+
+  /** Last `window/logMessage`/`window/showMessage` of type Error, if any. */
+  get lastServerError() {
+    return this.#lastServerError
+  }
+
+  /** Everything the server wrote to stderr, for `dumpStderr`. */
+  get stderrDump() {
+    return this.#stderrTail.join('')
+  }
+
   /**
    * Environment for the server child process.
    *
@@ -140,12 +225,47 @@ export class LspConnection {
       DOTNET_SKIP_FIRST_TIME_EXPERIENCE: '1',
     }
     if (this.stateDir) {
-      env.XDG_RUNTIME_DIR = this.stateDir
-      env.TMPDIR = this.stateDir
-      env.DOTNET_CLI_HOME = this.stateDir
-      env.NUGET_PACKAGES = env.NUGET_PACKAGES ?? join(this.stateDir, 'nuget')
+      // Ownership matters as much as writability: `fs.mkdtemp` hands the
+      // directory to this process alone, which is what makes it usable on a host
+      // where the asset root (a sandbox mount, another user's home) is not.
+      const dir = this.#ensureWritable(this.stateDir)
+      if (dir) {
+        env.XDG_RUNTIME_DIR = dir
+        env.TMPDIR = dir
+        env.DOTNET_CLI_HOME = dir
+        env.NUGET_PACKAGES = env.NUGET_PACKAGES ?? join(dir, 'nuget')
+      }
     }
     return env
+  }
+
+  /**
+   * A directory the server can write to, or `null`.
+   *
+   * The server's MSBuild host evaluates every project through the .NET CLI, and
+   * the CLI insists on writing its first-run sentinel and workload state into
+   * `DOTNET_CLI_HOME`. When that directory is not writable the build host fails
+   * with `IOException: Read-only file system`, every project fails to load, and
+   * the server still reports `projectInitializationComplete` — so the failure
+   * surfaces only as "no document" / "no diagnostics" for every query. A
+   * private temp directory is the fallback; it costs a first-run marker per
+   * session and nothing else.
+   */
+  #ensureWritable(dir) {
+    try {
+      mkdirSync(dir, { recursive: true })
+      const probe = join(dir, `.dsh-write-test-${process.pid}`)
+      writeFileSync(probe, '')
+      unlinkSync(probe)
+      return dir
+    } catch {
+      // Fall through to a private copy.
+    }
+    try {
+      return mkdtempSync(join(tmpdir(), 'dsh-csharp-'))
+    } catch {
+      return null
+    }
   }
 
   /**
@@ -171,10 +291,14 @@ export class LspConnection {
     })
     this.#child.on('error', (error) => this.#fail(new LspConnectionError(`language server failed to start: ${error.message}`)))
     this.#child.on('exit', (code, signal) => {
+      // Upstream records the last error-level log message and puts it in the
+      // failure reason: the server has been observed exiting without writing
+      // anything to stderr, right after rapid file edits.
+      const lastError = this.#lastServerError ? `. Last server error: ${this.#lastServerError}` : ''
+      const stderr = this.#stderrTail.length ? `: ${this.#stderrTail.slice(-3).join('').trim().slice(0, 400)}` : ''
       this.#fail(
         new LspConnectionError(
-          `C# language server exited (${signal ? `signal ${signal}` : `code ${code}`})` +
-            (this.#stderrTail.length ? `: ${this.#stderrTail.slice(-3).join('').trim().slice(0, 400)}` : ''),
+          `C# language server exited (${signal ? `signal ${signal}` : `code ${code}`})${lastError || stderr}`,
           { code: 'server_exited' },
         ),
       )
@@ -206,6 +330,13 @@ export class LspConnection {
     this.#pending.clear()
     for (const waiter of this.#loadedWaiters) waiter.reject(error)
     this.#loadedWaiters.clear()
+    // Tell the pool this process is gone so the next query starts a fresh one
+    // instead of reusing a connection every request will reject on.
+    try {
+      this.onServerExit?.(error)
+    } catch {
+      // A bookkeeping callback must not mask the failure it reports.
+    }
   }
 
   #onData(chunk) {
@@ -301,6 +432,7 @@ export class LspConnection {
 
   #recordRegistrations(params) {
     const registrations = params?.registrations ?? []
+    this.#registrations += registrations.length
     for (const registration of registrations) {
       if (registration?.method !== 'textDocument/diagnostic') continue
       const identifier = registration.registerOptions?.identifier ?? null
@@ -323,7 +455,17 @@ export class LspConnection {
     }
   }
 
+  /** Keep the recent server log, and the failures it reports outside the protocol. */
+  #recordLog(message) {
+    if (message.method !== 'window/logMessage' && message.method !== 'window/showMessage') return
+    const text = String(message.params?.message ?? '').trim()
+    if (!text) return
+    this.#serverLog.push(text)
+    while (this.#serverLog.length > SERVER_LOG_LIMIT) this.#serverLog.shift()
+  }
+
   #onNotification(message) {
+    this.#recordLog(message)
     if (message.method === 'workspace/projectInitializationComplete') {
       this.#loaded = true
       for (const waiter of this.#loadedWaiters) waiter.resolve(true)
@@ -334,6 +476,11 @@ export class LspConnection {
     // thing to load progress the server offers.
     if (message.method === 'window/logMessage' || message.method === 'window/showMessage') {
       const text = message.params?.message ?? ''
+      // Keep the last error-level message: the server can exit without writing
+      // anything to stderr, and this is the only explanation it leaves behind.
+      if ((message.params?.type ?? 0) === 1 && text) {
+        this.#lastServerError = text.length > LAST_SERVER_ERROR_LIMIT ? `${text.slice(0, LAST_SERVER_ERROR_LIMIT)}…` : text
+      }
       const match = /Loading (?:project|solution file) .*?([^\\/]+\.(?:csproj|sln))/.exec(text)
       if (match) this.#projectsSeen.add(match[1])
     }
@@ -452,31 +599,92 @@ export class LspConnection {
 
   /** Open `path` (or push its new content) and return the document URI. */
   syncDocument(path) {
+    return this.#openDocument(path)
+  }
+
+  /**
+   * Open a project file (`.csproj`/`.props`) so the server knows it.
+   *
+   * Analyzers are not injected into this text; see `documentText`.
+   */
+  syncProjectDocument(path) {
+    const kind = projectExtension(path)
+    if (!kind) return this.isOpen(path)
+    return this.#openDocument(path, kind) !== null
+  }
+
+  #openDocument(path, kind = projectExtension(path)) {
     const uri = pathToFileUri(path)
-    const text = readSource(path)
+    const text = documentText(path)
     const existing = this.#openDocs.get(uri)
     if (!existing) {
       this.#openDocs.set(uri, { version: 1, text })
       this.notify('textDocument/didOpen', {
-        textDocument: { uri, languageId: 'csharp', version: 1, text },
+        textDocument: { uri, languageId: languageIdFor(path), version: 1, text },
       })
       return uri
     }
     if (existing.text === text) return uri
-    existing.version += 1
+    // Roslyn negotiates incremental sync and dies with an NRE on a rangeless
+    // full-text didChange (`ProtocolConversions.RangeToTextSpan` on a null
+    // Range — observed killing the server on every edit→query cycle; see
+    // `client.rs` in upstream, which documents the same trap). Reopen instead:
+    // didOpen always carries full text and is valid under any sync kind.
+    // The version has to keep climbing across the pair: a document reopened
+    // with the same version as before reads as "already current" to a server
+    // that still remembers the earlier one.
+    existing.version += 2
     existing.text = text
-    this.notify('textDocument/didChange', {
-      textDocument: { uri, version: existing.version },
-      contentChanges: [{ text }],
+    this.notify('textDocument/didOpen', {
+      textDocument: { uri, languageId: languageIdFor(path), version: existing.version, text },
     })
     return uri
   }
 
-  /** Tell the server a file changed on disk (outside our own writes). */
-  notifyFileChanged(path, kind = 2) {
+  /**
+   * Re-sync a document only when we already opened it.
+   *
+   * Open documents shadow the disk state on the server side, so an edit made
+   * outside this process has to be pushed; a file we never opened is the
+   * server's own business (it follows `workspace/didChangeWatchedFiles`), and
+   * opening it here would pin a copy nobody will refresh.
+   */
+  syncDocumentIfOpen(path) {
+    if (!this.isOpen(path)) return null
+    return this.syncDocument(path)
+  }
+
+  /** Whether this connection has told the server about `path`. */
+  isOpen(path) {
+    return this.#openDocs.has(pathToFileUri(path))
+  }
+
+  /**
+   * Close a document we opened before, so the server drops our pinned copy
+   * (typically because the file was deleted and the copy must not shadow it).
+   */
+  closeDocument(path) {
     const uri = pathToFileUri(path)
+    if (!this.#openDocs.delete(uri)) return false
+    this.notify('textDocument/didClose', { textDocument: { uri } })
+    return true
+  }
+
+  /** Tell the server a file changed on disk (outside our own writes). */
+  notifyFileChanged(path, kind = FILE_CHANGED) {
+    this.notifyWatchedFiles([[path, kind]])
+  }
+
+  /**
+   * Forward file events so the server refreshes documents it did not open and
+   * re-evaluates project files. `changes` entries are `[path, kind]` with LSP
+   * change kinds (1 created / 2 changed / 3 deleted).
+   */
+  notifyWatchedFiles(changes) {
+    const entries = (changes ?? []).filter((entry) => entry?.[0])
+    if (entries.length === 0) return
     this.notify('workspace/didChangeWatchedFiles', {
-      changes: [{ uri, type: kind }],
+      changes: entries.map(([path, kind]) => ({ uri: pathToFileUri(path), type: kind ?? FILE_CHANGED })),
     })
   }
 
@@ -529,8 +737,8 @@ export class LspConnection {
 
 /** Write the server's stderr tail to a log file for later inspection. */
 export function dumpStderr(connection, path) {
-  if (!connection?.stderrTail) return null
+  if (!connection?.stderrDump) return null
   mkdirSync(dirname(path), { recursive: true })
-  writeFileSync(path, connection.stderrTail)
+  writeFileSync(path, connection.stderrDump)
   return path
 }

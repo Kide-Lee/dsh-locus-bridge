@@ -39,7 +39,7 @@ const BUILTIN_LAYERS = new Map([
 ])
 
 /** Caps that match upstream (`MAX_SOURCE_FILES`, `MAX_PROBLEMS`). */
-const MAX_SOURCE_FILES = 4000
+const MAX_SOURCE_FILES = 5000
 const MAX_PROBLEMS = 40
 
 /** Read `ProjectSettings/<name>` as text, or null. */
@@ -441,29 +441,52 @@ export function scanProjectRefs(root, targetFile = null) {
     }
   }
 
-  return { filesChecked, filesCapped, counts, problems, hasBuildSettings: build.hasSettings }
+  // Upstream reports Input.GetAxis/GetButton names it could not check instead of
+  // staying silent about them: with no InputManager.asset (or the new Input
+  // System active) every such reference is unverified, not verified-good.
+  const unvalidatedAxes = !input.hasSettings || activeInputHandler === 1 ? counts.axes : 0
+  return {
+    filesChecked,
+    filesCapped,
+    counts,
+    problems,
+    unvalidatedAxes,
+    hasBuildSettings: build.hasSettings,
+  }
 }
 
-/** Render the section appended to `code_diagnostics` file scope. */
+/**
+ * Render the section appended to `code_diagnostics` file scope.
+ *
+ * Mirrors upstream `push_project_refs_section`: a scan that looked at nothing
+ * and found nothing says nothing, but one that found a problem while counting
+ * zero references still reports it (the empty-string early return used to drop
+ * exactly that case), and references it could not validate are named.
+ */
 export function formatProjectRefsSection(report, maxProblems = 40) {
   const { counts, problems } = report
-  const total =
-    counts.tags + counts.layers + counts.scenes + counts.resources + counts.axes
-  if (total === 0) return ''
+  const total = counts.tags + counts.layers + counts.scenes + counts.resources + counts.axes
+  if (total === 0 && problems.length === 0) return ''
+  const countsText =
+    `${counts.tags} tag, ${counts.layers} layer, ${counts.scenes} scene, ` +
+    `${counts.resources} resource, ${counts.axes} input`
   const lines = []
+  const capped = report.filesCapped ? `, scanned the first ${MAX_SOURCE_FILES} files` : ''
   if (problems.length === 0) {
+    lines.push(`\nProject string refs: all ${total} resolve (${countsText}).`)
+  } else {
+    const shown = problems.slice(0, maxProblems)
+    const more = problems.length > shown.length ? `, showing first ${shown.length}` : ''
+    lines.push(`\nProject string refs: ${problems.length} problem${problems.length === 1 ? '' : 's'}${more} (${countsText} checked${capped})`)
+    for (const problem of shown) {
+      lines.push(`  ${problem.path}:${problem.line} — ${problem.message}`)
+    }
+  }
+  if (report.unvalidatedAxes > 0) {
     lines.push(
-      `\nProject string references: ${total} checked (${counts.tags} tag, ${counts.layers} layer, ` +
-        `${counts.scenes} scene, ${counts.resources} Resources, ${counts.axes} input) — all resolve.`,
+      `\n  (${report.unvalidatedAxes} Input.GetAxis/GetButton ref(s) not validated: ` +
+        'the legacy InputManager has no axes, or the new Input System is active.)',
     )
-    return lines.join('\n')
-  }
-  lines.push(`\nProject string references with problems (${problems.length}):`)
-  for (const problem of problems.slice(0, maxProblems)) {
-    lines.push(`  ${problem.path}:${problem.line}  ${problem.message}`)
-  }
-  if (problems.length > maxProblems) {
-    lines.push(`  … ${problems.length - maxProblems} more`)
   }
   return lines.join('\n')
 }

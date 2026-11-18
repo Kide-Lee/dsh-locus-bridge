@@ -66,7 +66,7 @@ dsh plugin --profile <profile> add github:Kide-Lee/dsh-locus-bridge
 | `code_goto_definition` | 跳转到定义，跨文件、跨 asmdef、跨包 |
 | `code_find_references` | 语义级引用查找（重载、泛型、partial、using 别名都解析；排除注释与字符串） |
 | `code_hover` | 签名、类型与 XML 文档 |
-| `code_diagnostics` | Roslyn 编译错误 + Roslyn/Unity 分析器诊断，不触发 Unity 编译 |
+| `code_diagnostics` | Roslyn 编译错误与 analyzer 建议（含 Unity 分析器 `UNT*`，与 Locus 一样通过工程根的 `Directory.Build.props` 注入），不触发 Unity 编译 |
 
 第一次查询会自动下载需要的组件（约 90 MB：Roslyn 服务器约 60 MB，本机已有 .NET 10 运行时则跳过
 约 30 MB 的运行时），之后缓存在插件目录里复用——与 Locus 桌面端一样，由查询本身触发。可在设置里关掉，或用 `DSH_LOCUS_CSHARP=0` 整组强制关闭

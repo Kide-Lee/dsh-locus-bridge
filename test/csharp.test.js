@@ -8,7 +8,7 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { execFileSync } from 'node:child_process'
@@ -57,7 +57,17 @@ import {
   projectIsRestored,
   stripProjectFromSolution,
 } from '../src/csharp/project-sync.js'
-import { csharpToolDefinitions, csharpToolNames } from '../src/csharp/tools.js'
+import { csharpToolDefinitions, csharpToolNames, renderDiagnostics } from '../src/csharp/tools.js'
+import {
+  ANALYZER_PROPS_MARKER,
+  analyzerPropsContent,
+  analyzerPropsPath,
+  removeAnalyzerProps,
+  unityAnalyzerPath,
+  writeAnalyzerProps,
+} from '../src/csharp/analyzer-injection.js'
+import { watchedChangeKind, WATCHED_EXTENSIONS } from '../src/csharp/file-watch.js'
+import { forgetTrackedSources, trackSource, trackedSources } from '../src/csharp/source-tracker.js'
 import { allToolDefinitions, csharpEnabled } from '../src/index.js'
 
 const sandbox = mkdtempSync(join(tmpdir(), 'locus-csharp-test-'))
@@ -302,10 +312,14 @@ test('projectFilesStale notices a .cs newer than the generated project files', (
   mkdirSync(root, { recursive: true })
   const source = join(root, 'New.cs')
   writeFileSync(source, 'class A {}')
-  assert.equal(projectFilesStale(root, Date.now() + 10_000, [source]), false)
-  assert.equal(projectFilesStale(root, 1, [source]), true)
+  assert.equal(projectFilesStale(Date.now() + 10_000, [source]), false)
+  assert.equal(projectFilesStale(1, [source]), true)
   // An unreadable file cannot prove freshness.
-  assert.equal(projectFilesStale(root, Date.now() + 10_000, [join(root, 'gone.cs')]), true)
+  assert.equal(projectFilesStale(Date.now() + 10_000, [join(root, 'gone.cs')]), true)
+  // A stat already taken by the caller is compared, so a tree walk does not
+  // stat every file twice; a missing mtime falls back to the file system.
+  assert.equal(projectFilesStale(Date.now() + 10_000, [{ path: source, mtimeMs: 1 }]), false)
+  assert.equal(projectFilesStale(1, [{ path: source, mtimeMs: Date.now() + 10_000 }]), true)
 })
 
 test('stripProjectFromSolution removes the block and its GUID lines', () => {
@@ -499,6 +513,64 @@ test('an unrestored project is not reported as clean', () => {
   assert.match(text, /dotnet restore/)
   const clean = formatDiagnostics({ scope: 'file', file: 'Assets/A.cs', diagnostics: [], restored: true })
   assert.doesNotMatch(clean, /restore/)
+})
+
+test('a cold server is not reported as a clean file', () => {
+  // Observed live: the first pull after a workspace load is answered by the
+  // server's default providers with a well-formed empty list while a real
+  // CS0103 exists. Saying "no diagnostics" there is a false all-clear.
+  const text = formatDiagnostics({
+    scope: 'file',
+    file: 'Assets/A.cs',
+    diagnostics: [],
+    restored: true,
+    member: 'member',
+    providersReady: false,
+  })
+  assert.match(text, /had not registered\s+its diagnostic providers/)
+  assert.match(text, /Retry/)
+  const ready = formatDiagnostics({
+    scope: 'file',
+    file: 'Assets/A.cs',
+    diagnostics: [],
+    restored: true,
+    member: 'member',
+    providersReady: true,
+  })
+  assert.doesNotMatch(ready, /had not registered/)
+})
+
+test('a compile error is never replaced by the compile-set caveat', () => {
+  const text = formatDiagnostics({
+    scope: 'file',
+    file: 'Assets/A.cs',
+    diagnostics: [{ path: 'Assets/A.cs', line: 3, column: 5, severity: 1, code: 'CS0103', message: 'x' }],
+    restored: true,
+    member: 'absent',
+  })
+  assert.match(text, /CS0103/)
+  assert.doesNotMatch(text, /not in any project's compile set/)
+})
+
+test('renderDiagnostics keeps the sections a compact text left out', () => {
+  const text = renderDiagnostics({ text: '1 C# diagnostic(s): 1 error', project_refs: '\nProject string refs: 1 problem', managed_types: '' })
+  assert.match(text, /1 C# diagnostic/)
+  assert.match(text, /Project string refs/)
+  // A section already inside the primary text is not repeated.
+  const once = renderDiagnostics({ text: 'x\nProject string refs: all 2 resolve', project_refs: '\nProject string refs: all 2 resolve' })
+  assert.equal(once.match(/Project string refs/g).length, 1)
+})
+
+test('code_diagnostics rejects a misspelled scope or severity', async () => {
+  const definition = csharpToolDefinitions.find((entry) => entry.name === 'code_diagnostics')
+  const project = join(sandbox, 'typo-project')
+  mkdirSync(join(project, 'Assets'), { recursive: true })
+  mkdirSync(join(project, 'ProjectSettings'), { recursive: true })
+  const exec = { signal: undefined, workingDirectory: project }
+  const badSeverity = await definition.execute({ project_path: project, file_path: 'Assets/A.cs', min_severity: 'warnings' }, exec)
+  assert.match(badSeverity.text, /min_severity must be one of/)
+  const badScope = await definition.execute({ project_path: project, scope: 'files' }, exec)
+  assert.match(badScope.text, /scope must be 'file' or 'workspace'/)
 })
 
 // ─── generated project-sync C# ──────────────────────────────────────────────
@@ -884,6 +956,64 @@ test('decompiled framework sources are collapsed to a filename', () => {
     '/cache/run/MetadataAsSource/abc/DecompilationMetadataAsSourceFileProvider/def/MonoBehaviour.cs',
   )
   assert.equal(path, '[decompiled] MonoBehaviour.cs')
+})
+
+// ─── analyzer injection, watching, source tracking ─────────────────────────
+
+test('writeAnalyzerProps adds the analyzer to the set and leaves user files alone', () => {
+  const root = join(sandbox, 'analyzer-workspace')
+  mkdirSync(root, { recursive: true })
+  const dll = '/assets/unity-analyzers/1.0/Microsoft.Unity.Analyzers.dll'
+  // An absent download is not an error: analyzers are optional.
+  assert.equal(unityAnalyzerPath({ DSH_LOCUS_CSHARP_HOME: sandbox }), null)
+
+  const written = writeAnalyzerProps(root, dll)
+  assert.deepEqual(written, { ok: true, path: analyzerPropsPath(root) })
+  const text = readFileSync(written.path, 'utf8')
+  assert.match(text, new RegExp(ANALYZER_PROPS_MARKER.replace(':', '\\:')))
+  assert.match(text, /<Analyzer Include="\/assets\/unity-analyzers\/1\.0\/Microsoft\.Unity\.Analyzers\.dll" \/>/)
+
+  // Same content again is a no-op, not a rewrite.
+  const before = statSync(written.path).mtimeMs
+  assert.equal(writeAnalyzerProps(root, dll).ok, true)
+  assert.equal(statSync(written.path).mtimeMs, before)
+
+  // A file the user owns is never overwritten, and never deleted.
+  writeFileSync(analyzerPropsPath(root), '<Project><PropertyGroup /></Project>\n')
+  const refused = writeAnalyzerProps(root, dll)
+  assert.equal(refused.ok, false)
+  assert.match(refused.reason, /not created by dsh-locus-bridge/)
+  assert.equal(removeAnalyzerProps(root), false)
+  assert.match(readFileSync(analyzerPropsPath(root), 'utf8'), /PropertyGroup/)
+
+  // Ours is removed, leaving the tree as it was found.
+  writeFileSync(analyzerPropsPath(root), analyzerPropsContent(dll))
+  assert.equal(removeAnalyzerProps(root), true)
+  assert.equal(existsSync(analyzerPropsPath(root)), false)
+  assert.equal(removeAnalyzerProps(root), false)
+})
+
+test('watchedChangeKind classifies the events the server cares about', () => {
+  assert.deepEqual(WATCHED_EXTENSIONS.includes('.csproj'), true)
+  // The analyzer props file is written by this plugin on every load, so it must
+  // not be watched: its own write would schedule a reload of the server it was
+  // written for.
+  assert.equal(WATCHED_EXTENSIONS.includes('.props'), false)
+  assert.equal(watchedChangeKind('/p', 'Directory.Build.props', 'change', true), null)
+  assert.equal(watchedChangeKind('/p', 'Assets/A.cs', 'change', true), 2)
+  assert.equal(watchedChangeKind('/p', 'Assets/New.cs', 'rename', true), 1)
+  assert.equal(watchedChangeKind('/p', 'Assets/Old.cs', 'rename', false), 3)
+  assert.equal(watchedChangeKind('/p', 'Assets/icon.png', 'change', true), null)
+  assert.equal(watchedChangeKind('/p', 'Game.sln', 'change', true), 2)
+})
+
+test('source tracking keeps only C# files, per workspace', () => {
+  trackSource('/ws', '/ws/Assets/A.cs')
+  trackSource('/ws', '/ws/Assets/tex.png')
+  trackSource('/ws', '/ws/Packages/P/B.cs')
+  assert.deepEqual(trackedSources('/ws').sort(), ['/ws/Assets/A.cs', '/ws/Packages/P/B.cs'])
+  forgetTrackedSources('/ws')
+  assert.deepEqual(trackedSources('/ws'), [])
 })
 
 // ─── transfer clocks and install serialization ──────────────────────────────

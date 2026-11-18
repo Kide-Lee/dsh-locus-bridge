@@ -21,6 +21,7 @@ import {
   gotoDefinition,
   hover,
   searchSymbols,
+  severityRank,
   SEVERITIES,
   workspaceDiagnostics,
 } from './queries.js'
@@ -322,11 +323,40 @@ const codeDiagnostics = {
         errors: { type: 'integer' },
         warnings: { type: 'integer' },
         total: { type: 'integer' },
+        // Appended to `text` by `formatDiagnostics`, so the two stay in one
+        // string for the model and separately inspectable for a client that
+        // wants them apart. Same split upstream keeps in its structured result.
+        project_refs: { type: 'string' },
+        managed_types: { type: 'string' },
+        member: { type: 'string' },
+        providers_ready: { type: 'boolean' },
       },
     },
-    render: (_args, value) => [{ type: 'text', text: value.text }],
+    render: (_args, value) => [{ type: 'text', text: renderDiagnostics(value) }],
   },
   async execute(args, exec) {
+    // An out-of-range value is refused rather than silently treated as the
+    // default: asking for 'Warning' and getting an error-only list back would
+    // hide the answer without saying so (upstream rejects these the same way).
+    // Validated before the project is resolved so a typo is answered as a typo.
+    if (args.scope !== undefined && args.scope !== 'file' && args.scope !== 'workspace') {
+      return {
+        text: `Error: scope must be 'file' or 'workspace' (got \`${String(args.scope)}\`).`,
+        scope: 'workspace',
+        errors: 0,
+        warnings: 0,
+        total: 0,
+      }
+    }
+    if (args.min_severity !== undefined && !SEVERITIES.includes(args.min_severity)) {
+      return {
+        text: `Error: min_severity must be one of ${SEVERITIES.join(', ')} (got \`${String(args.min_severity)}\`).`,
+        scope: args.scope ?? 'workspace',
+        errors: 0,
+        warnings: 0,
+        total: 0,
+      }
+    }
     const root = projectRootFor(args, exec)
     const filePath = String(args.file_path ?? '').trim()
     const scope = args.scope === 'workspace' || (!args.scope && !filePath) ? 'workspace' : 'file'
@@ -339,13 +369,13 @@ const codeDiagnostics = {
         total: 0,
       }
     }
-    const minSeverity = SEVERITIES.includes(args.min_severity) ? args.min_severity : 'warning'
+    const minSeverity = args.min_severity ?? 'warning'
     return runQuery(async (note) => {
       const result = scope === 'workspace'
         ? await workspaceDiagnostics(root, { signal: exec.signal })
         : await fileDiagnostics(root, { filePath, signal: exec.signal })
       const text = formatDiagnostics(result, { minSeverity, maxResults: args.max_results })
-      const threshold = minSeverity === 'error' ? 1 : minSeverity === 'warning' ? 2 : minSeverity === 'info' ? 3 : 4
+      const threshold = severityRank(minSeverity)
       const visible = result.diagnostics.filter((entry) => entry.severity <= threshold)
       return note({
         text,
@@ -353,9 +383,31 @@ const codeDiagnostics = {
         errors: visible.filter((entry) => entry.severity === 1).length,
         warnings: visible.filter((entry) => entry.severity === 2).length,
         total: visible.length,
+        project_refs: result.projectRefs ? formatProjectRefsSection(result.projectRefs) : '',
+        managed_types: result.managedTypes ?? '',
+        member: result.member ?? null,
+        providers_ready: result.providersReady !== false,
       })
     })
   },
+}
+
+/**
+ * The model-facing text for `code_diagnostics`.
+ *
+ * `formatDiagnostics` already appends the string-reference and
+ * [SerializeReference] sections, so the primary text is complete on its own.
+ * When a result carries those sections as separate fields and the text does not
+ * contain them (a caller that formatted without them), they are appended here
+ * rather than dropped — the previous render forwarded `text` only, which is how
+ * a section the tool had computed never reached the model.
+ */
+export function renderDiagnostics(value) {
+  const text = String(value?.text ?? '')
+  const missing = [value?.project_refs, value?.managed_types]
+    .filter((section) => typeof section === 'string' && section.trim() !== '')
+    .filter((section) => !text.includes(section))
+  return missing.length > 0 ? `${text}${missing.join('')}` : text
 }
 
 /** Every C# analysis tool, in registration order. */

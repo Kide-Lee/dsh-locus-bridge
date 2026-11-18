@@ -165,7 +165,7 @@ exist.
 | `code_goto_definition` | Jump to a definition across files, asmdefs and packages |
 | `code_find_references` | Semantic references (overloads, generics, partials, using aliases; comments and strings excluded) |
 | `code_hover` | Signature, type and XML documentation |
-| `code_diagnostics` | Roslyn compiler errors plus Roslyn and Unity analyzers, without a Unity compile |
+| `code_diagnostics` | Roslyn compiler errors and analyzer suggestions (including Unity's `UNT*` analyzers, injected through a `Directory.Build.props` at the project root exactly as Locus does), without a Unity compile |
 
 The first query fetches what it needs (about 90 MB: a ~60 MB Roslyn server, and the ~30 MB runtime is
 skipped when the machine already has .NET 10), cached for later queries — the same on-demand path the

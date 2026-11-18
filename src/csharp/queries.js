@@ -14,13 +14,15 @@ import { readFileSync } from 'node:fs'
 import { isAbsolute, relative, resolve } from 'node:path'
 
 import { fileUriToPath, locateSymbol, pathToFileUri } from './lsp-protocol.js'
-import { fileInProject } from './project-sync.js'
+import { fileInProject, readProjectIncludes } from './project-sync.js'
+import { trackSource } from './source-tracker.js'
 import { lookupManagedRefs } from '../asset-index-sync.js'
 import { formatProjectRefsSection, scanProjectRefs } from './project-refs.js'
 import { managedTypeSection } from './managed-types.js'
 import {
   markWorkspaceWarm,
   queryWithReadyRetry,
+  scheduleProjectRefresh,
   withWorkspace,
   workspaceIsRestored,
   workspaceIsWarming,
@@ -400,7 +402,7 @@ export function formatHover(symbol, result) {
 
 // ─── code_diagnostics ───────────────────────────────────────────────────────
 
-function pushDiagnostics(root, uri, items, out) {
+function pushDiagnostics(root, uri, items, out, provider = null) {
   const path = fileUriToPath(uri)
   const display = path ? displayPath(root, path) : `[external] ${uri}`
   for (const item of items ?? []) {
@@ -410,7 +412,11 @@ function pushDiagnostics(root, uri, items, out) {
     const code = item?.code === undefined || item?.code === null ? null : String(item.code)
     const message = String(item?.message ?? '').trim()
     if (!message) continue
-    out.push({ path: display, line, column, severity, code, message })
+    out.push(
+      provider === null
+        ? { path: display, line, column, severity, code, message }
+        : { path: display, line, column, severity, code, message, provider },
+    )
   }
 }
 
@@ -429,6 +435,27 @@ function dedupeSort(diagnostics) {
 }
 
 /**
+ * Wait until the server has registered its diagnostic providers.
+ *
+ * `initialize` answers `workspace: {}` without listing `diagnosticProvider`, so
+ * the providers arrive as `client/registerCapability` notifications after the
+ * project load completes. A pull issued before that is answered by the server's
+ * default providers with a well-formed, empty result — indistinguishable from
+ * "this file is clean", which is how a cold workspace used to report a file with
+ * a real compile error as diagnostic-free. Upstream avoids the race by keeping
+ * queries behind its `Phase::Ready` watch; the registration count is the same
+ * signal this client has.
+ */
+async function waitForDiagnosticProviders(connection, timeoutMs) {
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    if (connection.diagnosticProviders.length > 0) return true
+    if (!connection.loaded || Date.now() >= deadline) return false
+    await new Promise((done) => setTimeout(done, 250))
+  }
+}
+
+/**
  * Pull diagnostics for one document.
  *
  * The analyzer providers answer before the compiler provider has a semantic
@@ -444,10 +471,15 @@ export async function fileDiagnostics(root, { filePath, settleMs = DIAGNOSTIC_SE
       `C# diagnostics only support Unity-managed source files under Assets/ or Packages/: ${displayPath(root, absolute)}`,
     )
   }
-  const membership = fileInProject(root, absolute)
   return withWorkspace(
     root,
     async (connection) => {
+      // Record the file before asking: if the project files do not list it, the
+      // next workspace load regenerates them (see `source-tracker.js`).
+      trackSource(root, absolute)
+      const providersReady = await waitForDiagnosticProviders(connection, DIAGNOSTIC_SETTLE_MS)
+      const includes = readProjectIncludes(root)
+      const membership = fileInProject(root, absolute, includes)
       const uri = pathToFileUri(absolute)
       const deadline = Date.now() + settleMs
       let diagnostics = []
@@ -458,6 +490,8 @@ export async function fileDiagnostics(root, { filePath, settleMs = DIAGNOSTIC_SE
         // Any compiler diagnostic proves the semantic model is live. Waiting for
         // a *specific* severity would keep polling a file with only warnings.
         const compilerAnswered = diagnostics.some((entry) => entry.code?.startsWith('CS'))
+        // Without a compiler diagnostic there is nothing to wait for once the
+        // budget is spent; with one the answer is already trustworthy.
         if (compilerAnswered || Date.now() >= deadline) break
         await new Promise((done) => setTimeout(done, DIAGNOSTIC_POLL_MS))
       }
@@ -481,6 +515,10 @@ export async function fileDiagnostics(root, { filePath, settleMs = DIAGNOSTIC_SE
         scopeFile: absolute,
         lookup: (projectRoot, options) => lookupManagedRefs(projectRoot, options),
       })
+      // A file the generated project files do not list is being analyzed by
+      // nothing at all. Ask the server to regenerate them on its next load
+      // instead of leaving the caller to call `unity_recompile` and retry.
+      if (membership === 'absent') scheduleProjectRefresh(root, absolute)
       return {
         scope: 'file',
         file: displayPath(root, absolute),
@@ -490,10 +528,10 @@ export async function fileDiagnostics(root, { filePath, settleMs = DIAGNOSTIC_SE
         // Without restore artifacts the compiler provider reports nothing at
         // all, so "no errors" would be a false all-clear.
         restored: workspaceIsRestored(root),
-        // Unity lists every file explicitly in its csproj, so a file written
-        // after the last project sync is outside the compilation and yields no
-        // diagnostics whatsoever.
         member: membership,
+        // False with an empty list means "the server had not registered its
+        // providers yet", which must not be reported as a clean file.
+        providersReady,
       }
     },
     options,
@@ -504,14 +542,30 @@ export async function fileDiagnostics(root, { filePath, settleMs = DIAGNOSTIC_SE
 export async function workspaceDiagnostics(root, { ...options }) {
   return withWorkspace(
     root,
-    (connection) =>
-      queryWithReadyRetry(
+    async (connection) => {
+      await waitForDiagnosticProviders(connection, DIAGNOSTIC_SETTLE_MS)
+      // Only providers that advertise `workspaceDiagnostics` can answer a pull;
+      // the compiler and analyzer providers in this server do not, and asking
+      // them anyway costs a second per identifier. This is upstream's
+      // `workspace_diagnostics_attempt` filter.
+      const providers = connection.diagnosticProviders.filter((provider) => provider.workspaceDiagnostics)
+      const identifiers = providers.length > 0 ? providers.map((provider) => provider.identifier) : [null]
+      return queryWithReadyRetry(
         connection,
         async () => {
           const diagnostics = []
-          const result = await connection.request('workspace/diagnostic', { previousResultIds: [] }, { timeoutMs: 180_000 })
-          for (const item of result?.items ?? []) {
-            pushDiagnostics(root, item?.uri ?? '', item?.items ?? [], diagnostics)
+          const grouped = await Promise.all(
+            identifiers.map(async (identifier) => {
+              const params = { previousResultIds: [] }
+              if (identifier) params.identifier = identifier
+              const result = await connection.request('workspace/diagnostic', params, { timeoutMs: 180_000 })
+              return (result?.items ?? []).map((item) => [item, identifier])
+            }),
+          )
+          for (const entries of grouped) {
+            for (const [item, identifier] of entries) {
+              pushDiagnostics(root, item?.uri ?? '', item?.items ?? [], diagnostics, identifier)
+            }
           }
           // Workspace scope checks every identity the index holds: there is no
           // single file to narrow to.
@@ -521,7 +575,8 @@ export async function workspaceDiagnostics(root, { ...options }) {
           return { scope: 'workspace', file: null, diagnostics: dedupeSort(diagnostics), restored: workspaceIsRestored(root), managedTypes }
         },
         { timeoutMs: 180_000 },
-      ),
+      )
+    },
     options,
   )
 }
@@ -538,12 +593,13 @@ export function formatDiagnostics(result, { minSeverity = 'warning', maxResults 
     // "no problems" and "nothing above your threshold" are different answers.
     const belowThreshold = result.diagnostics.filter((entry) => entry.severity > threshold).length
     const suppressed = belowThreshold > 0 ? ` (${belowThreshold} below the severity threshold.)` : ''
-    if (result.member === 'absent') {
+    // Caveats qualify a clean-looking answer; they never replace one. Upstream
+    // prints "No … diagnostics in <scope>." and appends its sections, and this
+    // client keeps that order: the answer first, the reason to doubt it second.
+    if (result.providersReady === false) {
       return (
-        `No C# diagnostics at or above '${minSeverity}' in ${where} — but the file is not in any project's ` +
-        'compile set, so Roslyn never analyzes it. Unity writes each file into its generated .csproj explicitly; ' +
-        'a file created after the last project sync is missing until Unity regenerates them (open the editor, or ' +
-        'call unity_recompile).'
+        `No C# diagnostics at or above '${minSeverity}' in ${where} — but the language server had not registered ` +
+        'its diagnostic providers yet, so this is not a verified clean result. Retry once the project has loaded.'
       ) + refsSection
     }
     if (result.restored === false) {
@@ -553,7 +609,12 @@ export function formatDiagnostics(result, { minSeverity = 'warning', maxResults 
         '(or let a fresh query reinstall them) before trusting this result.'
       ) + refsSection
     }
-    return `No C# diagnostics at or above '${minSeverity}' in ${where}.${suppressed}${refsSection}`
+    const membership = result.member === 'absent'
+      ? ` — but the file is not in any project's compile set, so Roslyn never analyzes it. Unity writes each ` +
+        'file into its generated .csproj explicitly; the project files are regenerated on the next load ' +
+        '(open the editor, or call unity_recompile).'
+      : ''
+    return `No C# diagnostics at or above '${minSeverity}' in ${where}.${suppressed}${membership}${refsSection}`
   }
   const shown = filtered.slice(0, maxResults)
   const counts = { error: 0, warning: 0, info: 0, hint: 0 }

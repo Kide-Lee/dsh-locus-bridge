@@ -266,8 +266,8 @@ test('a clean report states the counts', () => {
     counts: { tags: 2, layers: 0, scenes: 1, resources: 0, axes: 0 },
     problems: [],
   })
-  assert.match(text, /3 checked/)
-  assert.match(text, /all resolve/)
+  assert.match(text, /all 3 resolve/)
+  assert.match(text, /2 tag, 0 layer, 1 scene, 0 resource, 0 input/)
 })
 
 test('a problem report lists path and line', () => {
